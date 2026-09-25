@@ -4,6 +4,25 @@ const { createApp, ref, computed, nextTick } = Vue;
 // 注意「窄屏」按图表实测宽度判断（弹窗宽度是 min(680px, 92vw)，非固定）；「移动端」按视口宽度，见 style.css。
 const CHART_NARROW_WIDTH = 480;
 
+// 语义色统一色值（FR-11）：与 style.css 的 --good / --bad 同值，改色只改此处（CSS 侧同步改令牌）。
+// good=向好/健康；goodMid/warn=AI 评分中间档（黄绿/琥珀）；bad=恶化/坏；neutral=图表中性灰；growth=增速折线琥珀。
+const PALETTE = {
+  good: '#149a5e',
+  goodMid: '#6aa84f',
+  warn: '#d9a240',
+  bad: '#d64040',
+  neutral: '#998c8c',
+  growth: '#d97706',
+};
+
+// FR-10：指标趋势图柱色 —— 向好绿 / 恶化红 / 无信号或中性灰；负值无论信号一律红。
+function barColorOf(signal, value) {
+  if (value != null && value < 0) return PALETTE.bad;
+  if (signal === 'improving') return PALETTE.good;
+  if (signal === 'worsening') return PALETTE.bad;
+  return PALETTE.neutral;
+}
+
 // 百分比刻度：至多 1 位小数（12.5% / 10% / 0% / -5%）；左轴与右轴（同比增速）共用。
 function fmtAxisPct(v) {
   if (v === 0) return '0%';
@@ -71,7 +90,7 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
       type: 'value',
       name: '增速 %',
       nameGap: 8,
-      nameTextStyle: { color: '#998c8c', fontSize },
+      nameTextStyle: { color: PALETTE.neutral, fontSize },
       axisLabel: { formatter: fmtAxisPct, fontSize },
       splitLine: { show: false },
     });
@@ -81,7 +100,8 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
     name: seriesName,
     type: 'bar',
     data: values.map(v => v == null ? null : v),
-    itemStyle: { color: '#d64040', borderRadius: [3, 3, 0, 0] },
+    // FR-10：柱色按该指标信号取值（向好绿/恶化红/无信号中性灰），负值恒红
+    itemStyle: { color: (p) => barColorOf(it.trend_signal, p.value), borderRadius: [3, 3, 0, 0] },
     barMaxWidth: 44,
   }];
   if (hasGrowth) {
@@ -93,8 +113,8 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
       smooth: true,
       symbol: 'circle',
       symbolSize: 7,
-      lineStyle: { width: 2, color: '#d97706' },
-      itemStyle: { color: '#d97706' },
+      lineStyle: { width: 2, color: PALETTE.growth },
+      itemStyle: { color: PALETTE.growth },
       connectNulls: false,
     });
   }
@@ -167,7 +187,7 @@ function buildRadarOption(scores, narrow) {
       indicator: scores.map(s => ({ name: s.dimension, max: 100 })),
       center: ['50%', '52%'],
       radius: narrow ? '60%' : '66%',
-      splitArea: { areaStyle: { color: ['rgba(64,158,255,0.03)', 'rgba(64,158,255,0.06)'] } },
+      splitArea: { areaStyle: { color: ['rgba(20,154,94,0.03)', 'rgba(20,154,94,0.06)'] } },
       axisName: {
         formatter: radarAxisName,
         color: '#606266',
@@ -180,9 +200,9 @@ function buildRadarOption(scores, narrow) {
         value: scores.map(s => s.score),
         name: '财务评分',
         symbolSize: 5,
-        lineStyle: { color: '#d64040', width: 2 },
-        itemStyle: { color: '#d64040' },
-        areaStyle: { color: 'rgba(64,158,255,0.25)' },
+        lineStyle: { color: PALETTE.good, width: 2 },
+        itemStyle: { color: PALETTE.good },
+        areaStyle: { color: 'rgba(20,154,94,0.18)' },
       }],
     }],
   };
@@ -540,12 +560,12 @@ const app = createApp({
       }, 120);
     }
 
-    // 按评分档位取进度条颜色。
+    // 按评分档位取进度条颜色（FR-9：绿=优秀 → 红=较弱，色相带连续）。
     function scoreColor(score) {
-      if (score >= 90) return '#d64040'; // 优秀：红（A股红=强）
-      if (score >= 75) return '#e8833a'; // 良好：橙
-      if (score >= 60) return '#d9a240'; // 一般：琥珀
-      return '#149a5e';                   // 较弱：绿（A股绿=弱）
+      if (score >= 90) return PALETTE.good;    // 90–100 优秀：绿
+      if (score >= 75) return PALETTE.goodMid; // 75–89  良好：黄绿
+      if (score >= 60) return PALETTE.warn;    // 60–74  一般：琥珀（不变）
+      return PALETTE.bad;                      // <60    较弱：红
     }
 
     // 数值显示：整数不带小数，其余保留两位。
@@ -607,6 +627,28 @@ const app = createApp({
       return v.toFixed(2) + (unit ? ' ' + unit : '');
     }
 
+    // FR-5：信号说明文案。phrase 为该指标所属小节标题（方向解读短语），可为空。
+    // 文案不变式：s1≠0、s1≠sm、m≥2（由后端 trend_signal 的前置条件保证），故非空信号必有完整文案。
+    function trendTip(it, years, phrase) {
+      const s = it.trend_signal;
+      if (s !== 'improving' && s !== 'worsening') return '';
+      const vs = it.values || [];
+      let i1 = -1, im = -1;
+      for (let i = 0; i < vs.length; i++) {
+        if (vs[i] != null) { if (i1 < 0) i1 = i; im = i; }
+      }
+      if (i1 < 0 || i1 === im) return '';
+      const s1 = vs[i1], sm = vs[im];
+      if (s1 === 0) return '';
+      const ys = years || [];
+      const span = (ys[im] != null && ys[i1] != null) ? (ys[im] - ys[i1] + 1) : (im - i1 + 1);
+      const r = ((sm - s1) / Math.abs(s1)) * 100;
+      const move = sm > s1 ? '升至' : '降至';
+      const concl = s === 'improving' ? '向好' : '恶化';
+      const lead = (phrase && phrase !== it.name) ? phrase : ''; // 与指标名重复时省略短语
+      return `近 ${span} 年${it.name}由 ${fmtAnalysisVal(s1, it.unit)} ${move} ${fmtAnalysisVal(sm, it.unit)}（${r >= 0 ? '+' : ''}${r.toFixed(1)}%），${lead}${concl}`;
+    }
+
     // 同比文本：范围内最早年/上期无数据/上期为0 →「—」；上期为负 → 不显示百分比
     function yoyText(values, i) {
       if (i === 0) return '—';
@@ -617,12 +659,25 @@ const app = createApp({
       return (((cur - prev) / prev) * 100).toFixed(2) + '%';
     }
 
-    // 同比涨跌色：A股红涨绿跌
+    // 同比涨跌色：A股红涨绿跌（三大报表专用，FR-8 保持现状）
     function yoyClass(values, i) {
       if (i === 0) return '';
       const prev = values[i - 1], cur = values[i];
       if (cur == null || prev == null || prev === 0 || prev < 0) return '';
       return (cur - prev) / prev >= 0 ? 'up' : 'down';
+    }
+
+    // FR-7：方向感知同比色（六维分析表专用）。返回 'good' / 'bad' / ''（无色）。
+    // 与 yoyText 的显示规则一致：首年、任一年缺失、上年为 0 或负 → 无色；
+    // 与信号灯不同，此处比较相邻两年（逐年信息），且仅看符号（持平即无色），不套用 5% 阈值。
+    function yoyClassDir(values, i, direction) {
+      if (i === 0) return '';
+      const prev = values[i - 1], cur = values[i];
+      if (cur == null || prev == null || prev === 0 || prev < 0) return '';
+      if (direction !== 'higher_better' && direction !== 'lower_better') return ''; // 中性方向一律不着色
+      if (cur === prev) return '';                                                  // 持平 → 无色
+      const up = cur > prev;
+      return (direction === 'higher_better') === up ? 'good' : 'bad';
     }
 
     // 指标层级行样式：sub=子项（缩进浅色）；net/subtotal=合计/净额（加粗+上分隔线）
@@ -716,6 +771,7 @@ const app = createApp({
       doSearch, pickCode, changeRange, fmtYi, yoyText, yoyClass, stmtYears, stmtGroups, hasStmtData,
       fmt,
       analysis, analysisLoading, analysisError, analysisActive, fmtAnalysisVal, indRowClass,
+      yoyClassDir, trendTip, barColorOf, PALETTE,
       tabTouchStart, tabTouchEnd,
       analysisStartYear, analysisEndYear, changeAnalysisRange,
       chartVisible, chartIndicator, chartRef, chartNarrow, showIndicatorChart, renderIndicatorChart, disposeIndicatorChart,
@@ -897,6 +953,10 @@ const app = createApp({
                                     <button class="chart-btn" title="查看趋势" @click="showIndicatorChart(it)">
                                       <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,12 6,7 9,9 14,3"></polyline></svg>
                                     </button>
+                                    <!-- R9 趋势信号灯（向好绿 / 恶化红；中性、平稳、数据不足时 v-if 不渲染） -->
+                                    <el-tooltip v-if="it.trend_signal" :content="trendTip(it, analysis.years, s.title)" placement="top" :trigger="['hover','focus']" popper-class="ind-tip">
+                                      <span class="trend-dot" :class="it.trend_signal" tabindex="0" role="img" :aria-label="trendTip(it, analysis.years, s.title)"></span>
+                                    </el-tooltip>
                                     <el-tooltip :content="it.interpretation ? (it.name + '：' + it.interpretation) : it.name" placement="top" :trigger="['hover','focus']" popper-class="ind-tip"><span class="ind-text" tabindex="0">{{ it.name }}</span></el-tooltip>
                                     <el-tooltip v-if="it.interpretation" :content="it.interpretation" placement="top" :show-after="200" popper-class="ind-tip">
                                       <span class="help-icon">?</span>
@@ -908,7 +968,8 @@ const app = createApp({
                                 </td>
                                 <td v-for="(v, i) in it.values" :key="i" class="num">
                                   <div class="val">{{ fmtAnalysisVal(v, it.unit) }}</div>
-                                  <div class="yoy" :class="yoyClass(it.values, i)">{{ yoyText(it.values, i) }}</div>
+                                  <!-- 六维分析表：方向感知（绿=向好、红=恶化、中性/上年≤0 不着色） -->
+                                  <div class="yoy" :class="yoyClassDir(it.values, i, it.direction)">{{ yoyText(it.values, i) }}</div>
                                 </td>
                               </tr>
                             </tbody>

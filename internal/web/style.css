@@ -1,6 +1,9 @@
 /* ==========================================================================
    A股财报分析 · 设计系统
-   主色：藏青（indigo）；涨红 / 跌绿遵循 A 股惯例，仅用于行情，不作装饰。
+   两套颜色语义（FR-6，不得混用）：
+   - 好坏口径（--good 绿=向好/健康、--bad 红=恶化/坏）：六维同比、信号灯、图表主色、AI 评分。
+   - 数值/行情口径（--up 红=涨、--down 绿=跌）：股价行情卡片、三大报表原始科目同比。
+   品牌色 --brand 仅作装饰（标识/主按钮/Tab 下划线/聚焦/渐变），不承载语义。
    ========================================================================== */
 
 :root {
@@ -13,8 +16,11 @@
   --brand: #d64040;
   --brand-strong: #bf2f2f;
   --brand-soft: #fbeaea;
-  --up: #d64040;   /* A股：涨红（主色） */
-  --down: #149a5e; /* A股：跌绿 */
+  --up: #d64040;   /* 数值/行情口径：涨红（仅行情卡片与三大报表同比，FR-6/FR-8） */
+  --down: #149a5e; /* 数值/行情口径：跌绿 */
+  --good: #149a5e; /* 好坏口径：向好/健康（六维同比、信号灯、图表，FR-6/FR-11） */
+  --bad: #d64040;  /* 好坏口径：恶化/坏 */
+  --neutral-bar: #998c8c; /* 中性指标图表色（与 --muted 同值，语义独立） */
   --amber: #d97706;
   --radius: 10px;
   --shadow: 0 1px 2px rgba(60, 40, 40, 0.04), 0 4px 16px rgba(60, 40, 40, 0.05);
@@ -367,8 +373,14 @@ td.num, .val, .yoy {
 
 .stmt-table td.num .val { color: var(--ink); }
 .stmt-table td.num .yoy { font-size: 11px; margin-top: 2px; min-height: 15px; color: var(--muted); }
+/* 数值涨跌口径：三大报表同比（红涨绿跌）——保持现状不变（FR-8） */
 .stmt-table td.num .yoy.up { color: var(--up); }
 .stmt-table td.num .yoy.down { color: var(--down); }
+
+/* R9 好坏口径：六维分析表同比（绿=向好、红=恶化）——独立样式类，与上两条解耦（FR-6/FR-7）。
+   .analysis-table 同时带 stmt-table 类，故必须用 .analysis-table 前缀限定，避免污染三大报表。 */
+.analysis-table td.num .yoy.good { color: var(--good); }
+.analysis-table td.num .yoy.bad { color: var(--bad); }
 
 /* ===================== R3 指标分析 ===================== */
 
@@ -398,6 +410,16 @@ td.num, .val, .yoy {
   color: #c0c4cc; cursor: pointer; flex-shrink: 0; border-radius: 4px;
 }
 .analysis-table .chart-btn:hover { color: var(--brand); background: var(--brand-soft); }
+
+/* R9 趋势信号灯（FR-4）：指标名前的独立 8px 圆点；中性不渲染（无对应规则）。
+   不设 line-height/margin，由 .ind-name 的 flex 负责垂直居中与间距 → 不改行高。
+   flex-shrink:0 保证窄屏下不被压扁；移动端 .help-icon 的隐藏规则不匹配本类，信号灯保留（FR-13）。 */
+.analysis-table .trend-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0; cursor: help; outline: none;
+}
+.analysis-table .trend-dot.improving { background: var(--good); }
+.analysis-table .trend-dot.worsening { background: var(--bad); }
 
 /* 指标层级：sub=子项（缩进+浅色）；net/subtotal=合计/净额（加粗+上分隔线） */
 .analysis-table tr.sub-row .item-name { padding-left: 20px; }
@@ -563,6 +585,10 @@ td.num, .val, .yoy {
   .analysis-table .ind-text {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
   }
+  /* R9：信号灯占用 8px + 6px 间距，把分析表首列上限补回，保证指标名可见字数不减少（FR-13）。
+     必须写在上面 .stmt-table .item-name{max-width:72px} 之后：两者特异性相同（各两个 class），
+     同特异性下由源码顺序决定胜负；放错位置会不生效、信号灯挤掉指标名。 */
+  .analysis-table .item-name { max-width: 84px; }
 
   .val-table .item-name,
   .val-table .num {
