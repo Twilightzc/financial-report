@@ -42,7 +42,7 @@ func assertValAt(t *testing.T, dim model.AnalysisDimension, key string, yearInde
 // TestComputeAnalysisDimensions 校验六维框架：维度数量、顺序与 pending 占位。
 func TestComputeAnalysisDimensions(t *testing.T) {
 	cf := model.ReportRow{ReportDate: "2024-12-31", Fields: map[string]*float64{}}
-	res := ComputeAnalysis(nil, []model.ReportRow{cf}, nil, nil, 2020, 2024)
+	res := ComputeAnalysis(nil, []model.ReportRow{cf}, nil, 2020, 2024)
 
 	if len(res.Dimensions) != 6 {
 		t.Fatalf("维度数 = %d，期望 6", len(res.Dimensions))
@@ -122,7 +122,7 @@ func TestInvestingAnalysisDerivedIndicators(t *testing.T) {
 		},
 	}
 
-	res := ComputeAnalysis(balance, cashflow, nil, nil, 2023, 2024)
+	res := ComputeAnalysis(balance, cashflow, nil, 2023, 2024)
 	investing := res.Dimensions[0]
 
 	if len(res.Years) != 2 || res.Years[0] != 2023 || res.Years[1] != 2024 {
@@ -154,7 +154,7 @@ func TestInvestingAnalysisNilAsZero(t *testing.T) {
 		},
 	}}
 
-	res := ComputeAnalysis(nil, cashflow, nil, nil, 2024, 2024)
+	res := ComputeAnalysis(nil, cashflow, nil, 2024, 2024)
 	investing := res.Dimensions[0]
 
 	merger := findIndicator(investing, "net_merger")
@@ -169,7 +169,7 @@ func TestInvestingAnalysisNilAsZero(t *testing.T) {
 
 // TestComputeAnalysisNoData 校验无现金流年报时 investing 维度标记为 no_data。
 func TestComputeAnalysisNoData(t *testing.T) {
-	res := ComputeAnalysis(nil, nil, nil, nil, 2020, 2024)
+	res := ComputeAnalysis(nil, nil, nil, 2020, 2024)
 	if len(res.Years) != 0 {
 		t.Errorf("无数据时 Years = %v，期望空", res.Years)
 	}
@@ -186,13 +186,13 @@ func TestComputeAnalysisYearRange(t *testing.T) {
 	cf := model.ReportRow{ReportDate: "2024-12-31", Fields: map[string]*float64{}}
 
 	// 范围覆盖 2024 → 仅含 2024
-	res := ComputeAnalysis(nil, []model.ReportRow{cf}, nil, nil, 2020, 2024)
+	res := ComputeAnalysis(nil, []model.ReportRow{cf}, nil, 2020, 2024)
 	if len(res.Years) != 1 || res.Years[0] != 2024 {
 		t.Errorf("Years = %v，期望 [2024]", res.Years)
 	}
 
 	// 范围不含 2024 → 无数据
-	res2 := ComputeAnalysis(nil, []model.ReportRow{cf}, nil, nil, 2020, 2023)
+	res2 := ComputeAnalysis(nil, []model.ReportRow{cf}, nil, 2020, 2023)
 	if len(res2.Years) != 0 {
 		t.Errorf("范围外 Years = %v，期望空", res2.Years)
 	}
@@ -305,41 +305,37 @@ func TestFinancingAnalysisDerivedIndicators(t *testing.T) {
 		},
 	}
 
-	dividends := []model.DividendEvent{
-		{ExDividendDate: "2023-07-01", TotalAmount: 8},
-		{ExDividendDate: "2024-07-01", TotalAmount: 10},
-	}
-	res := ComputeAnalysis(balance, cashflow, income, dividends, 2023, 2024)
+	res := ComputeAnalysis(balance, cashflow, income, 2023, 2024)
 	financing := res.Dimensions[1]
 	if financing.Status != "done" {
 		t.Fatalf("financing status = %s，期望 done", financing.Status)
 	}
 
-	// 2024（索引 1）：战略现金需求 45；偿付利息 = 30−10−2 = 18
-	// 股东筹资净额 = 10−(30−18) = −2；债务筹资净额 = 60+0−35−18 = 7
-	// 期初金融资产 = 220；筹资需求 = 220+120−45 = 295；债务资本成本 = 18/180*100 = 10
+	// 2024（索引 1）：战略现金需求 45；偿付利息（方法二）= 0+12−0 = 12
+	// 股东筹资净额 = 10−(30−12) = −8；债务筹资净额 = 60+0−35−12 = 13
+	// 期初金融资产 = 220；筹资需求 = 220+120−45 = 295；债务资本成本 = 12/180*100
 	assertValAt(t, financing, "strategic_cash_demand", 1, 45)
 	assertValAt(t, financing, "cash_self_sufficiency", 1, 120.0/45*100)
 	assertValAt(t, financing, "financing_gap", 1, 295)
-	assertValAt(t, financing, "equity_financing_net", 1, -2)
-	assertValAt(t, financing, "debt_financing_net", 1, 7)
-	assertValAt(t, financing, "debt_capital_cost", 1, 18.0/180*100)
-	wantWACC := (190.0/740.0)*(18.0/180.0*100.0*0.75) + (550.0/740.0)*8.0
+	assertValAt(t, financing, "equity_financing_net", 1, -8)
+	assertValAt(t, financing, "debt_financing_net", 1, 13)
+	assertValAt(t, financing, "debt_capital_cost", 1, 12.0/180*100)
+	wantWACC := (190.0/740.0)*(12.0/180.0*100.0*0.75) + (550.0/740.0)*8.0
 	assertValAt(t, financing, "wacc", 1, wantWACC)
 
-	// 2023（索引 0）：偿付利息 = 25−8−2 = 15；股东筹资净额 = 20−(25−15) = 10
-	// 债务筹资净额 = 50+30−40−15 = 25；债务资本成本 = 15/160*100 = 9.375
+	// 2023（索引 0）：偿付利息 = 0+10−0 = 10；股东筹资净额 = 20−(25−10) = 5
+	// 债务筹资净额 = 50+30−40−10 = 30；债务资本成本 = 10/160*100 = 6.25
 	assertValAt(t, financing, "strategic_cash_demand", 0, 40)
 	assertValAt(t, financing, "cash_self_sufficiency", 0, 250)
 	assertValAt(t, financing, "financing_gap", 0, 260)
-	assertValAt(t, financing, "equity_financing_net", 0, 10)
-	assertValAt(t, financing, "debt_financing_net", 0, 25)
-	assertValAt(t, financing, "debt_capital_cost", 0, 15.0/160*100)
+	assertValAt(t, financing, "equity_financing_net", 0, 5)
+	assertValAt(t, financing, "debt_financing_net", 0, 30)
+	assertValAt(t, financing, "debt_capital_cost", 0, 10.0/160*100)
 }
 
 // TestFinancingAnalysisNoData 校验无现金流年报时 financing 维度标记为 no_data。
 func TestFinancingAnalysisNoData(t *testing.T) {
-	res := ComputeAnalysis(nil, nil, nil, nil, 2020, 2024)
+	res := ComputeAnalysis(nil, nil, nil, 2020, 2024)
 	if res.Dimensions[1].Status != "no_data" {
 		t.Errorf("无数据时 financing 维度 status = %s，期望 no_data", res.Dimensions[1].Status)
 	}
@@ -387,14 +383,104 @@ func TestFinancingReclassification(t *testing.T) {
 	}
 }
 
-// TestInterestPaidCash 校验偿付利息 = 分配股利利润或偿付利息现金 − 母公司股东股利 − 少数股东股利。
+// TestInterestPaidCash 校验偿付利息（文档方法二）= 期初应付利息 + 当期利息支出 − 期末应付利息。
 func TestInterestPaidCash(t *testing.T) {
-	cf := model.ReportRow{Fields: map[string]*float64{
-		"ASSIGN_DIVIDEND_PORFIT":  fp(30),
-		"SUBSIDIARY_PAY_DIVIDEND": fp(2),
-	}}
-	if got := interestPaidCash(cf, 10); got != 18 {
-		t.Errorf("偿付利息 = %v，期望 18（30 − 10 − 2）", got)
+	// ① 正常：期初 5 + 利息支出 12 − 期末 2 = 15
+	balance := map[int]model.ReportRow{
+		2023: {Fields: map[string]*float64{"INTEREST_PAYABLE": fp(5)}},
+		2024: {Fields: map[string]*float64{"INTEREST_PAYABLE": fp(2)}},
+	}
+	income := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"FE_INTEREST_EXPENSE": fp(12)}}}
+	if got := interestPaidCash(balance, income, 2024); got == nil || *got != 15 {
+		t.Errorf("偿付利息 = %v，期望 15（5 + 12 − 2）", got)
+	}
+
+	// ② 两侧应付利息缺失 → 退化为当期利息支出 12
+	empty := map[int]model.ReportRow{}
+	if got := interestPaidCash(empty, income, 2024); got == nil || *got != 12 {
+		t.Errorf("应付利息缺失时偿付利息 = %v，期望 12（退化为利息支出）", got)
+	}
+
+	// ③ 利润表利息支出缺失 → nil（不把缺失当 0）
+	if got := interestPaidCash(balance, map[int]model.ReportRow{}, 2024); got != nil {
+		t.Errorf("利息支出缺失时偿付利息 = %v，期望 nil", *got)
+	}
+
+	// ④ 结果为负（应付利息增加超过当期利息支出）→ 原值返回、不截断
+	negBalance := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"INTEREST_PAYABLE": fp(8)}}}
+	negIncome := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"FE_INTEREST_EXPENSE": fp(2)}}}
+	if got := interestPaidCash(negBalance, negIncome, 2024); got == nil || *got != -6 {
+		t.Errorf("负值偿付利息 = %v，期望 -6（0 + 2 − 8，原值不截断）", got)
+	}
+}
+
+// TestDebtCapitalCostGuard 校验债务资本成本的上期缺失/分母/分子守卫
+// （上期缺失、avg ≤ 0、偿付利息不可算或 ≤ 0 → nil）。
+func TestDebtCapitalCostGuard(t *testing.T) {
+	income := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"FE_INTEREST_EXPENSE": fp(11)}}}
+	// 两期均持有等额有息债务（avg = 100）：让后续用例真正走到分子守卫，而非被上期缺失提前拦下。
+	debt := map[int]model.ReportRow{
+		2023: {Fields: map[string]*float64{"SHORT_LOAN": fp(100)}},
+		2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(100)}},
+	}
+
+	// ① 仅期末有数、上期缺失 → nil（否则 avg 退化为 cur/2，成本翻倍）
+	onlyCurrent := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(100)}}}
+	if got := debtCapitalCost(onlyCurrent, income, 2024); got != nil {
+		t.Errorf("上期缺失时债务资本成本 = %v，期望 nil", *got)
+	}
+
+	// ② avg == 0（无有息债务）→ nil
+	if got := debtCapitalCost(map[int]model.ReportRow{}, income, 2024); got != nil {
+		t.Errorf("无有息债务时债务资本成本 = %v，期望 nil", *got)
+	}
+
+	// ③ avg < 0（构造负有息债务）→ nil
+	negDebt := map[int]model.ReportRow{
+		2023: {Fields: map[string]*float64{"SHORT_LOAN": fp(-100)}},
+		2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(-100)}},
+	}
+	if got := debtCapitalCost(negDebt, income, 2024); got != nil {
+		t.Errorf("负有息债务时债务资本成本 = %v，期望 nil（负÷负会得到误导性正值）", *got)
+	}
+
+	// ④ 偿付利息 <= 0 → nil
+	zeroInterest := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"FE_INTEREST_EXPENSE": fp(0)}}}
+	if got := debtCapitalCost(debt, zeroInterest, 2024); got != nil {
+		t.Errorf("偿付利息为 0 时债务资本成本 = %v，期望 nil", *got)
+	}
+
+	// ⑤ 利息支出字段缺失 → nil
+	if got := debtCapitalCost(debt, map[int]model.ReportRow{}, 2024); got != nil {
+		t.Errorf("利息支出缺失时债务资本成本 = %v，期望 nil", *got)
+	}
+
+	// ⑥ 正常：偿付利息 11 ÷ avg 110 × 100 = 10
+	twoYears := map[int]model.ReportRow{
+		2023: {Fields: map[string]*float64{"SHORT_LOAN": fp(100)}},
+		2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(120)}},
+	}
+	if got := debtCapitalCost(twoYears, income, 2024); got == nil || math.Abs(*got-10) > 1e-9 {
+		t.Errorf("债务资本成本 = %v，期望 10（11 ÷ 110 × 100）", got)
+	}
+}
+
+// TestWaccDegenerateToEquityCost 校验 wacc 在无/缺失债务成本时的退化行为。
+func TestWaccDegenerateToEquityCost(t *testing.T) {
+	// ① 无有息债务 → 退化为纯股权成本 8%
+	noDebt := map[int]model.ReportRow{2024: {Fields: map[string]*float64{"TOTAL_EQUITY": fp(1000)}}}
+	if got := wacc(noDebt, nil, 2024); got == nil || math.Abs(*got-8) > 1e-9 {
+		t.Errorf("无有息债务时 wacc = %v，期望 8（纯股权成本）", got)
+	}
+
+	// ② avg > 0 但利息支出缺失 → 债务成本项取 0，wacc = (股东权益/投入资本)×8
+	twoYears := map[int]model.ReportRow{
+		2023: {Fields: map[string]*float64{"SHORT_LOAN": fp(200), "TOTAL_EQUITY": fp(800)}},
+		2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(200), "TOTAL_EQUITY": fp(800)}},
+	}
+	// 投入资本 = 200 + 800 = 1000；wacc = (200/1000)×0 + (800/1000)×8 = 6.4
+	if got := wacc(twoYears, map[int]model.ReportRow{}, 2024); got == nil || math.Abs(*got-6.4) > 1e-9 {
+		t.Errorf("利息支出缺失时 wacc = %v，期望 6.4（债务成本项取 0）", got)
 	}
 }
 
@@ -557,7 +643,7 @@ func TestAssetCapitalAnalysis(t *testing.T) {
 	}
 	cashflow := []model.ReportRow{{ReportDate: "2024-12-31", Fields: map[string]*float64{}}}
 
-	res := ComputeAnalysis(balance, cashflow, nil, nil, 2024, 2024)
+	res := ComputeAnalysis(balance, cashflow, nil, 2024, 2024)
 	ac := res.Dimensions[2]
 	if ac.Status != "done" {
 		t.Fatalf("asset_capital status = %s，期望 done", ac.Status)
@@ -682,7 +768,7 @@ func TestEquityValueAddedAnalysis(t *testing.T) {
 	}}
 	cashflow := []model.ReportRow{{ReportDate: "2024-12-31", Fields: map[string]*float64{}}}
 
-	res := ComputeAnalysis(balance, cashflow, income, nil, 2024, 2024)
+	res := ComputeAnalysis(balance, cashflow, income, 2024, 2024)
 	eva := res.Dimensions[3]
 	if eva.Status != "done" {
 		t.Fatalf("equity_value_added status = %s，期望 done", eva.Status)
@@ -888,7 +974,7 @@ func TestComprehensiveAnalysis(t *testing.T) {
 	}}
 	cashflow := []model.ReportRow{{ReportDate: "2024-12-31", Fields: map[string]*float64{}}}
 
-	res := ComputeAnalysis(balance, cashflow, income, nil, 2024, 2024)
+	res := ComputeAnalysis(balance, cashflow, income, 2024, 2024)
 	comp := res.Dimensions[4]
 	if comp.Status != "done" {
 		t.Fatalf("comprehensive status = %s，期望 done", comp.Status)
@@ -988,7 +1074,7 @@ func TestOperatingAnalysis(t *testing.T) {
 		},
 	}}
 
-	res := ComputeAnalysis(nil, cashflow, income, nil, 2024, 2024)
+	res := ComputeAnalysis(nil, cashflow, income, 2024, 2024)
 	op := res.Dimensions[5]
 	if op.Status != "done" {
 		t.Fatalf("operating status = %s，期望 done", op.Status)

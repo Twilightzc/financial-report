@@ -304,29 +304,6 @@ func (c *Client) FetchRawFinancialFull(reportName, code string, pageSize int) ([
 	return c.fetchRaw(c.hcSlow, reportName, code, pageSize)
 }
 
-// FetchDividends 获取现金分红事件（按除权除息日倒序）。
-// PRETAX_BONUS_RMB 为「每 10 股派息（元，含税）」，乘 TOTAL_SHARES/10 得分红总额。
-// 用于反推「偿付利息支付的现金」= 分配股利利润或偿付利息现金 − 母公司股东股利 − 少数股东股利。
-func (c *Client) FetchDividends(code string, pageSize int) ([]model.DividendEvent, error) {
-	rows, err := c.fetchFinancialSorted(c.hc, "RPT_SHAREBONUS_DET", code, pageSize, "EX_DIVIDEND_DATE")
-	if err != nil {
-		return nil, err
-	}
-	out := make([]model.DividendEvent, 0, len(rows))
-	for _, r := range rows {
-		pretax := toFloat(r["PRETAX_BONUS_RMB"]) // 每 10 股派息（元，含税）
-		shares := toFloat(r["TOTAL_SHARES"])     // 总股本（股）
-		if pretax == 0 || shares == 0 {
-			continue
-		}
-		out = append(out, model.DividendEvent{
-			ExDividendDate: trimDate(toString(r["EX_DIVIDEND_DATE"])),
-			TotalAmount:    pretax / 10 * shares,
-		})
-	}
-	return out, nil
-}
-
 // FetchSegmentIncome 获取主营构成（最新年报，按产品），返回业务板块名称与营收占比。
 // RPT_F10_FN_MAINOP 的 MAINOP_TYPE：1=产品大类、2=产品明细、3=地区；这里优先取 2（明细），
 // 明细为空时回落 1（大类），并跳过「其他(补充)」占位项。

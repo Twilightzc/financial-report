@@ -66,13 +66,6 @@ type FieldDef struct {
 	Name string
 }
 
-// DividendEvent 单次现金分红事件（东财分红送配接口）。
-// 用于反推「偿付利息支付的现金」= 分配股利利润或偿付利息现金 − 母公司股东股利 − 少数股东股利。
-type DividendEvent struct {
-	ExDividendDate string  // 除权除息日，如 "2024-07-30"
-	TotalAmount    float64 // 分红总额（元）
-}
-
 // FieldGroup 分组科目（用于现金流量表按活动类型拆分展示）
 type FieldGroup struct {
 	Title  string

@@ -141,7 +141,7 @@ func (h *Handler) GetAnalysis(c *gin.Context) {
 		cfPageSize       = analysisMaxYears * 4       // 40 期 ≈ 10 个年报
 		bsPageSize       = (analysisMaxYears + 1) * 4 // 44 期 ≈ 11 个年报
 	)
-	cashflow, balance, income, dividends, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
+	cashflow, balance, income, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": 1, "message": analysisErrMsg(err), "data": nil})
 		return
@@ -163,22 +163,21 @@ func (h *Handler) GetAnalysis(c *gin.Context) {
 		return
 	}
 
-	data := service.ComputeAnalysis(balance, cashflow, income, dividends, startYear, endYear)
+	data := service.ComputeAnalysis(balance, cashflow, income, startYear, endYear)
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": data})
 }
 
-// fetchAnalysisReports 并发拉取全量现金流量表、资产负债表、利润表与现金分红。
-// 四个请求相互独立且 F10 接口冷启动慢（现金流 ~12s），并发可把串行耗时压缩到单请求级别。
+// fetchAnalysisReports 并发拉取全量现金流量表、资产负债表、利润表。
+// 三个请求相互独立且 F10 接口冷启动慢（现金流 ~12s），并发可把串行耗时压缩到单请求级别。
 // cfPageSize/bsPageSize 分别为现金流与资产负债的拉取期数（资产负债多 1 年用于期初净额），利润表同现金流期数。
-func (h *Handler) fetchAnalysisReports(code string, cfPageSize, bsPageSize int) (cashflow, balance, income []model.ReportRow, dividends []model.DividendEvent, err error) {
+func (h *Handler) fetchAnalysisReports(code string, cfPageSize, bsPageSize int) (cashflow, balance, income []model.ReportRow, err error) {
 	var (
-		cfErr  error
-		bsErr  error
-		isErr  error
-		divErr error
-		wg     sync.WaitGroup
+		cfErr error
+		bsErr error
+		isErr error
+		wg    sync.WaitGroup
 	)
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		cashflow, cfErr = h.c.FetchRawFinancialFull("RPT_F10_FINANCE_GCASHFLOW", code, cfPageSize)
@@ -191,24 +190,17 @@ func (h *Handler) fetchAnalysisReports(code string, cfPageSize, bsPageSize int) 
 		defer wg.Done()
 		income, isErr = h.c.FetchRawFinancialFull("RPT_F10_FINANCE_GINCOME", code, cfPageSize)
 	}()
-	go func() {
-		defer wg.Done()
-		dividends, divErr = h.c.FetchDividends(code, 40)
-	}()
 	wg.Wait()
 	if cfErr != nil {
-		return nil, nil, nil, nil, cfErr
+		return nil, nil, nil, cfErr
 	}
 	if bsErr != nil {
-		return nil, nil, nil, nil, bsErr
+		return nil, nil, nil, bsErr
 	}
 	if isErr != nil {
-		return nil, nil, nil, nil, isErr
+		return nil, nil, nil, isErr
 	}
-	if divErr != nil {
-		return nil, nil, nil, nil, divErr
-	}
-	return cashflow, balance, income, dividends, nil
+	return cashflow, balance, income, nil
 }
 
 // analysisErrMsg 将全量报表接口的空数据错误转换为更友好的提示。

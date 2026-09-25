@@ -298,7 +298,7 @@ var indicatorDirectionGolden = map[string]string{
 func producedKeys(t *testing.T) map[string]bool {
 	t.Helper()
 	empty := []model.ReportRow{{ReportDate: "2024-12-31", Fields: map[string]*float64{}}}
-	res := ComputeAnalysis(empty, empty, empty, nil, 2020, 2024)
+	res := ComputeAnalysis(empty, empty, empty, 2020, 2024)
 	keys := make(map[string]bool)
 	for _, d := range res.Dimensions {
 		for _, s := range d.Sections {
@@ -385,7 +385,7 @@ func trendFixtureRows() (balance, cashflow, income []model.ReportRow) {
 // 并覆盖用户举例（资产周转率上升向好 / 存货周转天数上升恶化）。AC-1/AC-2/AC-4。
 func TestApplyTrendSignalsBackfill(t *testing.T) {
 	balance, cashflow, income := trendFixtureRows()
-	res := ComputeAnalysis(balance, cashflow, income, nil, 2020, 2024)
+	res := ComputeAnalysis(balance, cashflow, income, 2020, 2024)
 
 	validDir := map[string]bool{dirHigherBetter: true, dirLowerBetter: true, dirNeutral: true}
 	validSig := map[string]bool{signalImproving: true, signalWorsening: true, signalNone: true}
@@ -465,12 +465,12 @@ func TestTrendSignalRangeRespected(t *testing.T) {
 		cashflow = append(cashflow, rowWith(d, map[string]float64{}))
 	}
 
-	full := findIndicator(dimByKey(t, ComputeAnalysis(balance, cashflow, income, nil, 2020, 2024), "comprehensive"), "asset_turnover")
+	full := findIndicator(dimByKey(t, ComputeAnalysis(balance, cashflow, income, 2020, 2024), "comprehensive"), "asset_turnover")
 	if full == nil || full.TrendSignal != signalImproving {
 		t.Fatalf("2020–2024 资产周转率 signal = %v，期望 improving", full)
 	}
 	// 2022→2024：0.30 → 0.118（-60.7%）→ 下降 → 恶化。窗口收窄后信号反转，证明信号随范围变化。
-	short := findIndicator(dimByKey(t, ComputeAnalysis(balance, cashflow, income, nil, 2022, 2024), "comprehensive"), "asset_turnover")
+	short := findIndicator(dimByKey(t, ComputeAnalysis(balance, cashflow, income, 2022, 2024), "comprehensive"), "asset_turnover")
 	if short == nil || short.TrendSignal != signalWorsening {
 		t.Fatalf("2022–2024 资产周转率 signal = %v，期望 worsening", short)
 	}
@@ -478,7 +478,7 @@ func TestTrendSignalRangeRespected(t *testing.T) {
 
 // TestTrendSignalEmptyYears 无年报数据时不 panic，维度为非 done、无信号。
 func TestTrendSignalEmptyYears(t *testing.T) {
-	res := ComputeAnalysis(nil, nil, nil, nil, 2020, 2024)
+	res := ComputeAnalysis(nil, nil, nil, 2020, 2024)
 	if len(res.Years) != 0 {
 		t.Errorf("Years = %v，期望空", res.Years)
 	}
@@ -564,7 +564,7 @@ func trendRateFixtureRows() (balance, cashflow, income []model.ReportRow) {
 // 核心不变式：trend_rate 非 nil ⟺ R 可计算（trendOf 的 ok 为真），且**不限于**有信号的指标。
 func TestApplyTrendSignalsTrendRate(t *testing.T) {
 	balance, cashflow, income := trendRateFixtureRows()
-	res := ComputeAnalysis(balance, cashflow, income, nil, 2020, 2024)
+	res := ComputeAnalysis(balance, cashflow, income, 2020, 2024)
 
 	doneDims := 0
 	for _, d := range res.Dimensions {
@@ -682,7 +682,7 @@ func TestTrendRateJSONContract(t *testing.T) {
 
 	// ③ 端到端：合成报表中存在首末持平的指标（总资产恒定 → R=0），整体 JSON 必须含 "trend_rate":0。
 	balance, cashflow, income := trendFixtureRows()
-	body, err := json.Marshal(ComputeAnalysis(balance, cashflow, income, nil, 2020, 2024))
+	body, err := json.Marshal(ComputeAnalysis(balance, cashflow, income, 2020, 2024))
 	if err != nil {
 		t.Fatalf("序列化分析结果失败：%v", err)
 	}

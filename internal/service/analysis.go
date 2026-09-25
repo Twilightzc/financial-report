@@ -3,7 +3,6 @@ package service
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"financial-report/internal/model"
@@ -96,12 +95,11 @@ const discretionaryThreshold = 0.10
 // ComputeAnalysis 计算六维财务指标分析（跨年度，仅年报，年份升序）。
 // 六个维度均已实现：投资活动现金流、筹资活动现金流、资产资本、股权价值增加值、
 // 股东权益回报、经营活动现金流。
-// 入参为三张全量报表（balance、cashflow、income）与现金分红事件（dividends）。
-func ComputeAnalysis(balance, cashflow, income []model.ReportRow, dividends []model.DividendEvent, startYear, endYear int) model.FinancialAnalysis {
+// 入参为三张全量报表（balance、cashflow、income）。
+func ComputeAnalysis(balance, cashflow, income []model.ReportRow, startYear, endYear int) model.FinancialAnalysis {
 	cfByYear, cfYears := annualRows(cashflow)
 	balanceByYear, _ := annualRows(balance)
 	incomeByYear, _ := annualRows(income)
-	divByYear := dividendByYear(dividends)
 	years := yearRange(cfYears, startYear, endYear)
 
 	dimensions := make([]model.AnalysisDimension, 0, len(analysisDimensionDefs))
@@ -111,7 +109,7 @@ func ComputeAnalysis(balance, cashflow, income []model.ReportRow, dividends []mo
 		case "investing":
 			dim = buildInvestingAnalysis(balanceByYear, cfByYear, years)
 		case "financing":
-			dim = buildFinancingAnalysis(balanceByYear, cfByYear, incomeByYear, divByYear, years)
+			dim = buildFinancingAnalysis(balanceByYear, cfByYear, incomeByYear, years)
 		case "asset_capital":
 			dim = buildAssetCapitalAnalysis(balanceByYear, years)
 		case "equity_value_added":
@@ -127,22 +125,6 @@ func ComputeAnalysis(balance, cashflow, income []model.ReportRow, dividends []mo
 	analysis := model.FinancialAnalysis{Years: years, Dimensions: dimensions}
 	applyTrendSignals(&analysis) // R9：回填方向属性与趋势信号（纯数值运算，不新增 IO）
 	return analysis
-}
-
-// dividendByYear 按除权除息日年份汇总母公司股东现金分红总额。
-func dividendByYear(events []model.DividendEvent) map[int]float64 {
-	byYear := make(map[int]float64)
-	for _, e := range events {
-		if len(e.ExDividendDate) < 4 {
-			continue
-		}
-		y, err := strconv.Atoi(e.ExDividendDate[:4])
-		if err != nil {
-			continue
-		}
-		byYear[y] += e.TotalAmount
-	}
-	return byYear
 }
 
 // yearRange 从升序年报年份中截取 [startYear, endYear] 范围。
@@ -231,11 +213,11 @@ func buildStrategySection(cfByYear map[int]model.ReportRow, years []int) model.A
 //   - 筹资需求 = 期初金融资产 + 经营活动现金流量净额 − 战略投资活动综合现金需求。
 //   - 股东筹资净额 = 吸收投资收到的现金 − 分配股利、利润支付的现金。
 //   - 债务筹资净额 = 借款+发债收到的现金 − 偿还债务+偿付利息支付的现金。
-//   - 偿付利息支付现金 = 分配股利、利润或偿付利息支付的现金 − 母公司股东股利 − 少数股东股利（文档方法一）。
-//   - 债务资本成本 = 偿付利息支付现金 ÷ 平均有息债务余额 × 100%（现金利息含资本化利息，近似总利息支出）。
+//   - 偿付利息支付现金 = 期初应付利息 + 当期利息支出 − 期末应付利息（文档方法二，费用化利息近似）。
+//   - 债务资本成本 = 偿付利息支付现金 ÷ 平均有息债务余额 × 100%。
 //   - 加权平均资本成本 = (有息债务/投入资本)×税后债务资本成本 + (股东权益/投入资本)×股权资本成本(8%)。
 //   - 实际所得税税率 = 所得税费用 ÷ (利润总额 − 长期股权投资收益)。
-func buildFinancingAnalysis(balanceByYear, cfByYear, incomeByYear map[int]model.ReportRow, divByYear map[int]float64, years []int) model.AnalysisDimension {
+func buildFinancingAnalysis(balanceByYear, cfByYear, incomeByYear map[int]model.ReportRow, years []int) model.AnalysisDimension {
 	dim := model.AnalysisDimension{Key: "financing", Name: "筹资活动现金流", Status: "done"}
 	if len(years) == 0 {
 		dim.Status = "no_data"
@@ -261,25 +243,25 @@ func buildFinancingAnalysis(balanceByYear, cfByYear, incomeByYear map[int]model.
 					return financingGap(balanceByYear, cfByYear, y)
 				}), years, "元", "",
 					"期初金融资产与经营现金流之和减去战略投资需求后的资金盈余，正值表示资金富余，负值表示资金缺口。", "上期数据缺失"),
-				ind("equity_financing_net", "股东筹资净额", yearValues(years, func(y int) *float64 {
-					return fp(equityFinancingNet(cfByYear[y], divByYear[y]))
-				}), "元", "",
-					"吸收投资收到的现金减去分配股利利润支付的现金，为正表示股东追加投入，为负表示分红回报或减资。"),
-				ind("debt_financing_net", "债务筹资净额", yearValues(years, func(y int) *float64 {
-					return fp(debtFinancingNet(cfByYear[y], divByYear[y]))
-				}), "元", "",
-					"借款与发债收到的现金减去偿还债务与偿付利息支付的现金，为正表示举债投入，为负表示去杠杆偿债。"),
+				indN("equity_financing_net", "股东筹资净额", yearValues(years, func(y int) *float64 {
+					return equityFinancingNet(balanceByYear, cfByYear, incomeByYear, y)
+				}), years, "元", "",
+					"吸收投资收到的现金减去分配股利利润支付的现金，为正表示股东追加投入，为负表示分红回报或减资。", "因利润表利息支出缺失"),
+				indN("debt_financing_net", "债务筹资净额", yearValues(years, func(y int) *float64 {
+					return debtFinancingNet(balanceByYear, cfByYear, incomeByYear, y)
+				}), years, "元", "",
+					"借款与发债收到的现金减去偿还债务与偿付利息支付的现金，为正表示举债投入，为负表示去杠杆偿债。", "因利润表利息支出缺失"),
 			},
 		},
 		{
 			Title: "资本成本",
 			Indicators: []model.AnalysisIndicator{
 				indN("debt_capital_cost", "债务资本成本", yearValues(years, func(y int) *float64 {
-					return debtCapitalCost(balanceByYear, cfByYear, divByYear, y)
+					return debtCapitalCost(balanceByYear, incomeByYear, y)
 				}), years, "%", "",
-					"以偿付利息（现金利息，含资本化利息）除以平均有息债务余额，衡量债务融资成本。", "无有息债务"),
+					"偿付利息（期初应付利息 + 当期利息支出 − 期末应付利息，费用化利息口径）÷ 平均有息债务余额，衡量债务融资成本。", "无有息债务或利息支出数据缺失"),
 				indN("wacc", "加权平均资本成本", yearValues(years, func(y int) *float64 {
-					return wacc(balanceByYear, cfByYear, incomeByYear, divByYear, y)
+					return wacc(balanceByYear, incomeByYear, y)
 				}), years, "%", "",
 					"有息债务与股东权益按占比加权的综合资本成本，股权资本成本默认按8%估算。", "投入资本为0"),
 			},
@@ -1632,23 +1614,50 @@ func financingGap(balanceByYear, cfByYear map[int]model.ReportRow, year int) *fl
 	return &v
 }
 
-// interestPaidCash 偿付利息支付现金（文档方法一）= 分配股利、利润或偿付利息支付的现金 − 母公司股东股利 − 子公司支付给少数股东的股利。
-// 该方法得到的现金利息包含资本化利息，比利润表「费用化利息支出」更接近总利息成本。
-func interestPaidCash(cf model.ReportRow, parentDividend float64) float64 {
-	return v0(cf, "ASSIGN_DIVIDEND_PORFIT") - parentDividend - v0(cf, "SUBSIDIARY_PAY_DIVIDEND")
+// interestPaidCash 偿付利息支付现金（文档方法二）= 期初应付利息 + 当期利息支出 − 期末应付利息。
+//
+// 与方法一（分配股利利润或偿付利息现金 − 母公司股利 − 少数股东股利）相比，本式三项全部
+// 取自同一报告年度的资产负债表/利润表，不受分红除权除息日跨年错配影响。
+// 口径为费用化利息近似（不含资本化利息），与《公司财务指标分析》「债务资本成本 = 利息支出
+// ÷ 平均有息债务余额」一致（应付利息字段为空时本式退化为该式）。
+//
+// 边界规则：
+//   - 该年利润表缺失或 FE_INTEREST_EXPENSE 为 nil → nil（不把缺失当 0，否则会得到 0% 的假债务成本）；
+//   - INTEREST_PAYABLE 为 nil → 视为 0（现行准则下多数公司已并入其他应付款，该行常年为空）；
+//   - 结果为 0 或负（应付利息增加超过当期利息支出，即利息的净融资流入）→ 原值返回、不截断，
+//     比率层面的非正守卫放在 debtCapitalCost。
+func interestPaidCash(balanceByYear, incomeByYear map[int]model.ReportRow, year int) *float64 {
+	exp := incomeByYear[year].Fields["FE_INTEREST_EXPENSE"] // 缺失的 map 索引返回 nil，天然安全
+	if exp == nil {
+		return nil
+	}
+	v := v0(balanceByYear[year-1], "INTEREST_PAYABLE") + *exp - v0(balanceByYear[year], "INTEREST_PAYABLE")
+	return &v
 }
 
 // equityFinancingNet 股东筹资净额 = 吸收投资收到的现金 − 分配股利、利润支付的现金。
-// 分配股利、利润支付的现金 = 分配股利、利润或偿付利息支付的现金 − 偿付利息支付现金。
-func equityFinancingNet(cf model.ReportRow, parentDividend float64) float64 {
-	dividend := v0(cf, "ASSIGN_DIVIDEND_PORFIT") - interestPaidCash(cf, parentDividend)
-	return v0(cf, "ACCEPT_INVEST_CASH") - dividend
+// 分配股利利润现金 = ASSIGN_DIVIDEND_PORFIT − 偿付利息现金；偿付利息无法计算时返回 nil。
+func equityFinancingNet(balanceByYear, cfByYear, incomeByYear map[int]model.ReportRow, year int) *float64 {
+	interest := interestPaidCash(balanceByYear, incomeByYear, year)
+	if interest == nil {
+		return nil
+	}
+	cf := cfByYear[year]
+	v := v0(cf, "ACCEPT_INVEST_CASH") - (v0(cf, "ASSIGN_DIVIDEND_PORFIT") - *interest)
+	return &v
 }
 
 // debtFinancingNet 债务筹资净额 = 借款+发债收到的现金 − 偿还债务+偿付利息支付的现金。
-func debtFinancingNet(cf model.ReportRow, parentDividend float64) float64 {
-	return v0(cf, "RECEIVE_LOAN_CASH") + v0(cf, "ISSUE_BOND") -
-		v0(cf, "PAY_DEBT_CASH") - interestPaidCash(cf, parentDividend)
+// 偿付利息无法计算时返回 nil。
+func debtFinancingNet(balanceByYear, cfByYear, incomeByYear map[int]model.ReportRow, year int) *float64 {
+	interest := interestPaidCash(balanceByYear, incomeByYear, year)
+	if interest == nil {
+		return nil
+	}
+	cf := cfByYear[year]
+	v := v0(cf, "RECEIVE_LOAN_CASH") + v0(cf, "ISSUE_BOND") -
+		v0(cf, "PAY_DEBT_CASH") - *interest
+	return &v
 }
 
 // interestBearingDebt 有息债务 = 短期债务 + 长期债务（nil 视为 0）。
@@ -1656,17 +1665,23 @@ func interestBearingDebt(b model.ReportRow) float64 {
 	return sum0Fields(b, shortDebtFields) + sum0Fields(b, longDebtFields)
 }
 
-// debtCapitalCost 债务资本成本 = 偿付利息支付现金 ÷ 平均有息债务余额 × 100。
-// 用现金利息（含资本化利息）近似总利息支出，见 interestPaidCash 说明。
-// 平均有息债务余额 = (年初有息债务 + 年末有息债务) / 2；为 0 时无法计算，返回 nil。
-func debtCapitalCost(balanceByYear, cfByYear map[int]model.ReportRow, divByYear map[int]float64, year int) *float64 {
-	cur := interestBearingDebt(balanceByYear[year])
-	prev := interestBearingDebt(balanceByYear[year-1])
-	avg := (cur + prev) / 2
-	if avg == 0 {
+// debtCapitalCost 债务资本成本 = 偿付利息支付现金 ÷ 平均有息债务余额 × 100%。
+// 平均有息债务余额 = (年初 + 年末) ÷ 2；上期缺失、avg ≤ 0、偿付利息无法计算、或偿付利息 ≤ 0 时
+// 返回 nil（对照股权价值维度 debtCapitalCostRate 的上期缺失 / avg <= 0 / 真实财务费用 <= 0 守卫）。
+func debtCapitalCost(balanceByYear, incomeByYear map[int]model.ReportRow, year int) *float64 {
+	prev, ok := balanceByYear[year-1]
+	if !ok {
 		return nil
 	}
-	v := interestPaidCash(cfByYear[year], divByYear[year]) / avg * 100
+	avg := (interestBearingDebt(balanceByYear[year]) + interestBearingDebt(prev)) / 2
+	if avg <= 0 {
+		return nil
+	}
+	interest := interestPaidCash(balanceByYear, incomeByYear, year)
+	if interest == nil || *interest <= 0 {
+		return nil
+	}
+	v := *interest / avg * 100
 	return &v
 }
 
@@ -1725,7 +1740,7 @@ func effectiveTaxRateNote(incomeByYear map[int]model.ReportRow, years []int) str
 // wacc 加权平均资本成本 = (有息债务/投入资本)×税后债务资本成本 + (股东权益/投入资本)×股权资本成本。
 // 投入资本 = 有息债务 + 股东权益；股权资本成本默认 8%；税后债务资本成本 = 债务资本成本×(1−实际所得税税率)。
 // 无有息债务时债务成本项为 0，退化为纯股权成本 8%。投入资本为 0 时返回 nil。
-func wacc(balanceByYear, cfByYear, incomeByYear map[int]model.ReportRow, divByYear map[int]float64, year int) *float64 {
+func wacc(balanceByYear, incomeByYear map[int]model.ReportRow, year int) *float64 {
 	b := balanceByYear[year]
 	debt := interestBearingDebt(b)
 	equity := v0(b, "TOTAL_EQUITY")
@@ -1735,7 +1750,7 @@ func wacc(balanceByYear, cfByYear, incomeByYear map[int]model.ReportRow, divByYe
 	}
 	equityCost := 8.0 // %，文档默认股权资本成本
 	afterTaxDebtCost := 0.0
-	if dc := debtCapitalCost(balanceByYear, cfByYear, divByYear, year); dc != nil {
+	if dc := debtCapitalCost(balanceByYear, incomeByYear, year); dc != nil {
 		afterTaxDebtCost = *dc * (1 - effectiveTaxRate(incomeByYear[year]))
 	}
 	v := (debt/invested)*afterTaxDebtCost + (equity/invested)*equityCost

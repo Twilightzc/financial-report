@@ -50,7 +50,7 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 		return
 	}
 
-	cashflow, balance, income, dividends, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
+	cashflow, balance, income, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": 1, "message": analysisErrMsg(err), "data": nil})
 		return
@@ -71,7 +71,7 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 		return
 	}
 
-	analysis := service.ComputeAnalysis(balance, cashflow, income, dividends, startYear, endYear)
+	analysis := service.ComputeAnalysis(balance, cashflow, income, startYear, endYear)
 
 	// 估值参数由后端按财报数据确定性推导（R7）：与年份范围、分析模式无关，保证多次分析结果一致。
 	rec := service.RecommendValuation(balance, cashflow, income)
