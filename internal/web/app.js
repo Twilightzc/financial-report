@@ -691,25 +691,13 @@ const app = createApp({
       return (((cur - prev) / prev) * 100).toFixed(2) + '%';
     }
 
-    // 同比涨跌色：A股红涨绿跌（三大报表专用，FR-8 保持现状）
+    // 同比涨跌色：A股红涨绿跌（正增长=红、负增长=绿），三大报表与六维分析表通用。
+    // 与信号灯（绿=向好、红=走弱）是两套语义：这里区分「数值正负」，信号灯表征「整体状态」。
     function yoyClass(values, i) {
       if (i === 0) return '';
       const prev = values[i - 1], cur = values[i];
       if (cur == null || prev == null || prev === 0 || prev < 0) return '';
       return (cur - prev) / prev >= 0 ? 'up' : 'down';
-    }
-
-    // FR-7：方向感知同比色（六维分析表专用）。返回 'good' / 'bad' / ''（无色）。
-    // 与 yoyText 的显示规则一致：首年、任一年缺失、上年为 0 或负 → 无色；
-    // 与信号灯不同，此处比较相邻两年（逐年信息），且仅看符号（持平即无色），不套用 5% 阈值。
-    function yoyClassDir(values, i, direction) {
-      if (i === 0) return '';
-      const prev = values[i - 1], cur = values[i];
-      if (cur == null || prev == null || prev === 0 || prev < 0) return '';
-      if (direction !== 'higher_better' && direction !== 'lower_better') return ''; // 中性方向一律不着色
-      if (cur === prev) return '';                                                  // 持平 → 无色
-      const up = cur > prev;
-      return (direction === 'higher_better') === up ? 'good' : 'bad';
     }
 
     // 指标层级行样式：sub=子项（缩进浅色）；net/subtotal=合计/净额（加粗+上分隔线）
@@ -803,7 +791,7 @@ const app = createApp({
       doSearch, pickCode, changeRange, fmtYi, yoyText, yoyClass, stmtYears, stmtGroups, hasStmtData,
       fmt,
       analysis, analysisLoading, analysisError, analysisActive, fmtAnalysisVal, indRowClass,
-      yoyClassDir, trendTip, trendDotClass, barColorOf, PALETTE, MILD_CHANGE_THRESHOLD,
+      trendTip, trendDotClass, barColorOf, PALETTE, MILD_CHANGE_THRESHOLD,
       tabTouchStart, tabTouchEnd,
       analysisStartYear, analysisEndYear, changeAnalysisRange,
       chartVisible, chartIndicator, chartRef, chartNarrow, showIndicatorChart, renderIndicatorChart, disposeIndicatorChart,
@@ -1000,8 +988,8 @@ const app = createApp({
                                 </td>
                                 <td v-for="(v, i) in it.values" :key="i" class="num">
                                   <div class="val">{{ fmtAnalysisVal(v, it.unit) }}</div>
-                                  <!-- 六维分析表：方向感知（绿=向好、红=走弱、中性/上年≤0 不着色） -->
-                                  <div class="yoy" :class="yoyClassDir(it.values, i, it.direction)">{{ yoyText(it.values, i) }}</div>
+                                  <!-- 六维分析表同比：与三大报表一致的红涨绿跌（正增长=红、负增长=绿） -->
+                                  <div class="yoy" :class="yoyClass(it.values, i)">{{ yoyText(it.values, i) }}</div>
                                 </td>
                               </tr>
                             </tbody>

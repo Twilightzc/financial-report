@@ -377,11 +377,6 @@ td.num, .val, .yoy {
 .stmt-table td.num .yoy.up { color: var(--up); }
 .stmt-table td.num .yoy.down { color: var(--down); }
 
-/* R9 好坏口径：六维分析表同比（绿=向好、红=走弱）——独立样式类，与上两条解耦（FR-6/FR-7）。
-   .analysis-table 同时带 stmt-table 类，故必须用 .analysis-table 前缀限定，避免污染三大报表。 */
-.analysis-table td.num .yoy.good { color: var(--good); }
-.analysis-table td.num .yoy.bad { color: var(--bad); }
-
 /* ===================== R3 指标分析 ===================== */
 
 .dim-title { font-weight: 600; color: var(--ink); }
