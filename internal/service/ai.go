@@ -292,6 +292,8 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	r.Valuation.BaseGrowthNote = rec.BaseGrowthNote
 	r.Valuation.Volatile = rec.Volatile
 	r.Valuation.Warning = rec.Warning
+	r.Valuation.AdjustRD = rec.AdjustRD // R8：研发调整建议（确定性回填，大模型即便返回也会被覆盖）
+	r.Valuation.RDRatio = rec.RDRatio
 	// Rationale 保持大模型返回值，不覆盖
 }
 

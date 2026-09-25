@@ -45,6 +45,11 @@ type AIValuation struct {
 	BaseGrowthNote string  `json:"base_growth_note,omitempty"` // 基准增速口径说明
 	Volatile       bool    `json:"volatile,omitempty"`         // 是否剧烈波动（g1 按基准增速 50% 取）
 	Warning        string  `json:"warning,omitempty"`          // 套用提示（如基期 FCF ≤ 0）
+
+	// R8 新增：研发调整建议（只读，服务端确定性回填）。
+	// AdjustRD 不设 omitempty：true/false 均须出现，缺字段会让客户端无法与「旧响应」区分。
+	AdjustRD bool    `json:"adjust_rd"`          // 是否建议开启研发调整
+	RDRatio  float64 `json:"rd_ratio,omitempty"` // 最新年报研发费用率 %（无法判定 / 恰为 0 时省略）
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -58,6 +63,8 @@ type ValuationRecommendation struct {
 	Volatile       bool               // 近三年同比增速极差是否 > 40 个百分点
 	RiskPoints     int                // 折现率风险点计数 0–3（可观测用）
 	Warning        string             // 套用后估值可能不适用的提示（FR-8）
+	AdjustRD       bool               // R8：是否建议开启研发调整（最新年报研发费用率 > rdAdjustThreshold）
+	RDRatio        float64            // R8：最新年报研发费用率 %（与接口字段同值，无法判定时为 0）
 }
 
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。

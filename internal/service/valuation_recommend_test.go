@@ -512,3 +512,218 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 		}
 	}
 }
+
+// —— R8《估值表单与 AI 分析界面打磨》：研发调整建议（adjust_rd / rd_ratio） ——
+
+// incomeRowsRD 构造「营业总收入 + 研发费用」年报行；研发费用不在 rd 映射中则该科目缺失。
+func incomeRowsRD(rev, rd map[int]float64, years []int) []model.ReportRow {
+	rows := make([]model.ReportRow, 0, len(years))
+	for _, y := range years {
+		fields := map[string]float64{"TOTAL_OPERATE_INCOME": rev[y]}
+		if v, ok := rd[y]; ok {
+			fields["RESEARCH_EXPENSE"] = v
+		}
+		rows = append(rows, rowAt(fmt.Sprintf("%d-12-31", y), fields))
+	}
+	return rows
+}
+
+// rdSuggestion 由利润表原始行推导研发调整建议（模拟 RecommendValuation 内部的取数路径）。
+func rdSuggestion(rows []model.ReportRow) (bool, *float64) {
+	byYear, years := annualRows(rows)
+	return rdAdjustSuggestion(byYear, years)
+}
+
+func TestRdAdjustSuggestionThreshold(t *testing.T) {
+	const rev = 1000.0
+	cases := []struct {
+		name    string
+		rd      float64
+		suggest bool
+		ratio   float64
+	}{
+		{"恰5%", 50, false, 5}, // 严格大于才开启，恰等于阈值按「不高于」处理
+		{"4.9%", 49, false, 4.9},
+		{"5.1%", 51, true, 5.1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rows := incomeRowsRD(map[int]float64{2024: rev}, map[int]float64{2024: c.rd}, []int{2024})
+			got, ratio := rdSuggestion(rows)
+			if got != c.suggest {
+				t.Errorf("研发费用率 %.1f%% → suggest=%v，期望 %v", c.rd/rev*100, got, c.suggest)
+			}
+			if ratio == nil {
+				t.Fatalf("研发费用率 %.1f%% 的 ratioPct 不应为 nil", c.rd/rev*100)
+			}
+			if math.Abs(*ratio-c.ratio) > 1e-9 {
+				t.Errorf("ratioPct = %v，期望 %v", *ratio, c.ratio)
+			}
+		})
+	}
+}
+
+func TestRdAdjustSuggestionMissingData(t *testing.T) {
+	// 无可用年报（空切片 / 空映射）。
+	if got, ratio := rdAdjustSuggestion(map[int]model.ReportRow{}, nil); got || ratio != nil {
+		t.Errorf("无可用年报应返回 (false, nil)，实际 (%v, %v)", got, ratio)
+	}
+	if got, ratio := rdSuggestion(nil); got || ratio != nil {
+		t.Errorf("空报表应返回 (false, nil)，实际 (%v, %v)", got, ratio)
+	}
+
+	// 有年报但无 RESEARCH_EXPENSE 键（无法判定，不算 ratio）。
+	noKey := []model.ReportRow{rowAt("2024-12-31", map[string]float64{"TOTAL_OPERATE_INCOME": 1000})}
+	if got, ratio := rdSuggestion(noKey); got || ratio != nil {
+		t.Errorf("研发费用字段缺失应返回 (false, nil)，实际 (%v, %v)", got, ratio)
+	}
+
+	// RESEARCH_EXPENSE 键存在但值为 nil。
+	nilValue := []model.ReportRow{{ReportDate: "2024-12-31", Fields: map[string]*float64{
+		"TOTAL_OPERATE_INCOME": fp(1000),
+		"RESEARCH_EXPENSE":     nil,
+	}}}
+	if got, ratio := rdSuggestion(nilValue); got || ratio != nil {
+		t.Errorf("研发费用为空应返回 (false, nil)，实际 (%v, %v)", got, ratio)
+	}
+
+	// Fields 为 nil map：索引安全、不 panic。
+	nilFields := []model.ReportRow{{ReportDate: "2024-12-31"}}
+	if got, ratio := rdSuggestion(nilFields); got || ratio != nil {
+		t.Errorf("Fields 为 nil 应返回 (false, nil)，实际 (%v, %v)", got, ratio)
+	}
+
+	// 仅有季报（被 annualRows 过滤）→ 无可用年报。
+	quarterlyOnly := []model.ReportRow{
+		rowAt("2025-03-31", map[string]float64{"TOTAL_OPERATE_INCOME": 100, "RESEARCH_EXPENSE": 50}),
+	}
+	if got, ratio := rdSuggestion(quarterlyOnly); got || ratio != nil {
+		t.Errorf("仅有季报应返回 (false, nil)，实际 (%v, %v)", got, ratio)
+	}
+}
+
+func TestRdAdjustSuggestionRevenueEdge(t *testing.T) {
+	// 营业总收入为 0 / 负：比率无意义 → 无法判定。
+	for _, rev := range []float64{0, -100} {
+		rows := incomeRowsRD(map[int]float64{2024: rev}, map[int]float64{2024: 50}, []int{2024})
+		if got, ratio := rdSuggestion(rows); got || ratio != nil {
+			t.Errorf("营业总收入 %v 应返回 (false, nil)，实际 (%v, %v)", rev, got, ratio)
+		}
+	}
+
+	// 研发费用存在且为 0：参与判定（结论 false），ratio 为 0 而非 nil（与「字段缺失」区分）。
+	rows := incomeRowsRD(map[int]float64{2024: 1000}, map[int]float64{2024: 0}, []int{2024})
+	got, ratio := rdSuggestion(rows)
+	if got {
+		t.Error("研发费用为 0 不应建议开启研发调整")
+	}
+	if ratio == nil || *ratio != 0 {
+		t.Errorf("研发费用为 0 时 ratioPct 应为 0（非 nil），实际 %v", ratio)
+	}
+}
+
+func TestRdAdjustSuggestionLatestAnnualYear(t *testing.T) {
+	// 首年 1%、最新年 8%：只取最新年报，不取首年、不取平均。
+	rows := incomeRowsRD(
+		map[int]float64{2022: 1000, 2024: 1000},
+		map[int]float64{2022: 10, 2024: 80},
+		[]int{2022, 2024})
+	got, ratio := rdSuggestion(rows)
+	if !got {
+		t.Errorf("最新年报研发费用率 8%% 应建议开启，实际 ratio=%v", ratio)
+	}
+	if ratio == nil || math.Abs(*ratio-8) > 1e-9 {
+		t.Errorf("ratioPct = %v，期望 8（取最新年报）", ratio)
+	}
+}
+
+func TestRdAdjustSuggestionSkipsQuarterly(t *testing.T) {
+	// 季报区间 50% 高于阈值，但被 annualRows 过滤，不得当作「最新年报」。
+	rows := append(
+		incomeRowsRD(map[int]float64{2024: 1000}, map[int]float64{2024: 30}, []int{2024}),
+		rowAt("2025-03-31", map[string]float64{"TOTAL_OPERATE_INCOME": 100, "RESEARCH_EXPENSE": 50}))
+	got, ratio := rdSuggestion(rows)
+	if got {
+		t.Errorf("季报研发费用率 50%% 不应触发（应取 2024 年报 3%%），实际 ratio=%v", ratio)
+	}
+	if ratio == nil || math.Abs(*ratio-3) > 1e-9 {
+		t.Errorf("ratioPct = %v，期望 3（季报被过滤）", ratio)
+	}
+}
+
+func TestRecommendValuationAdjustRD(t *testing.T) {
+	// 完整合成报表，最新年报研发费用率取 6% → 建议开启，且仅展示值取整到 2 位小数。
+	balance, cashflow, income := recommendFixture()
+	last := income[len(income)-1]
+	rev := v0(last, "TOTAL_OPERATE_INCOME")
+	last.Fields["RESEARCH_EXPENSE"] = fp(rev * 0.06)
+	income[len(income)-1] = last
+
+	rec := RecommendValuation(balance, cashflow, income)
+	if !rec.AdjustRD {
+		t.Errorf("研发费用率 6%% 应建议开启研发调整，实际 (AdjustRD=%v, RDRatio=%v)", rec.AdjustRD, rec.RDRatio)
+	}
+	if math.Abs(rec.RDRatio-6) > 1e-9 {
+		t.Errorf("RDRatio = %v，期望 6", rec.RDRatio)
+	}
+
+	// 空报表 → 无法判定（false / 0），其余字段与 R7 现状一致（回归）。
+	empty := RecommendValuation(nil, nil, nil)
+	if empty.AdjustRD || empty.RDRatio != 0 {
+		t.Errorf("空报表应返回 (false, 0)，实际 (%v, %v)", empty.AdjustRD, empty.RDRatio)
+	}
+	if empty.Model != valModelZero || empty.DiscountRate != valDiscountFallback || len(empty.Params) != 0 {
+		t.Errorf("空报表的模型/折现率/参数应与 R7 现状一致：%+v", empty)
+	}
+
+	// 确定性：同一份报表两次推导的研发调整结论一致。
+	if again := RecommendValuation(balance, cashflow, income); again.AdjustRD != rec.AdjustRD || again.RDRatio != rec.RDRatio {
+		t.Errorf("研发调整结论应确定性一致：%+v vs %+v", rec, again)
+	}
+}
+
+func TestApplyValuationRecommendationCopiesAdjustRD(t *testing.T) {
+	// 大模型即便返回 adjust_rd（提示词已禁止），仍被后端确定性值覆盖。
+	raw := `{"scores":[{"dimension":"盈利能力","score":88,"comment":""},{"dimension":"偿债能力","score":90,"comment":""},{"dimension":"现金获取能力","score":85,"comment":""},{"dimension":"经营效率","score":76,"comment":""},{"dimension":"成长能力","score":82,"comment":""}],"conclusion":"c","industry":{"name":"n"},"valuation":{"adjust_rd":false,"rd_ratio":1.5,"rationale":"大模型写的理由"}}`
+	res, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	rec := model.ValuationRecommendation{AdjustRD: true, RDRatio: 12.35}
+	ApplyValuationRecommendation(&res, rec)
+
+	if !res.Valuation.AdjustRD {
+		t.Error("大模型返回的 adjust_rd=false 应被确定性结果覆盖为 true")
+	}
+	if res.Valuation.RDRatio != 12.35 {
+		t.Errorf("rd_ratio = %v，期望 12.35", res.Valuation.RDRatio)
+	}
+	if res.Valuation.Rationale != "大模型写的理由" {
+		t.Errorf("rationale 应保留大模型原文，实际 %q", res.Valuation.Rationale)
+	}
+}
+
+func TestAIValuationAdjustRDJSON(t *testing.T) {
+	// FR-5：adjust_rd 始终输出（false 也出现）；rd_ratio 为 0 时省略（无法判定 / 恰为 0）。
+	blob, err := json.Marshal(model.AIValuation{})
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if !strings.Contains(string(blob), `"adjust_rd":false`) {
+		t.Errorf("adjust_rd 不设 omitempty，false 也须输出：%s", blob)
+	}
+	if strings.Contains(string(blob), `"rd_ratio"`) {
+		t.Errorf("rd_ratio 为 0 时应由 omitempty 省略：%s", blob)
+	}
+
+	// 有值时输出（百分数），前端直接复用 fmtNum 展示。
+	blob, err = json.Marshal(model.AIValuation{AdjustRD: true, RDRatio: 12.35})
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	for _, want := range []string{`"adjust_rd":true`, `"rd_ratio":12.35`} {
+		if !strings.Contains(string(blob), want) {
+			t.Errorf("估值推荐 JSON 缺少 %s：%s", want, blob)
+		}
+	}
+}

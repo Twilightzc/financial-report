@@ -25,6 +25,10 @@ const (
 	valGrowthSamplesYears = 3    // 各指标同比增速取最近多少个可计算年度
 )
 
+// R8《估值表单与 AI 分析界面打磨》FR-6：最新年报研发费用率（研发费用 ÷ 营业总收入）
+// 严格大于该阈值时建议开启研发调整。固定常量（不随股票/年份浮动），保证同一份财报推导结果唯一。
+const rdAdjustThreshold = 0.05 // 5%
+
 // valDiscountTable 风险点 0–3 → 折现率%（FR-1 网格 8.0–12.0 中的四档，等距 1%）。
 var valDiscountTable = [4]float64{9.0, 10.0, 11.0, 12.0}
 
@@ -95,6 +99,13 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		warning = "以最新年报计的基期经营资产自由现金流为负或零，套用后 R4 估值可能提示「现金流贴现法不适用」"
 	}
 
+	// R8：研发调整建议（最新年报口径，与年份范围/分析模式无关，确定性不变）。
+	adjustRD, rdPct := rdAdjustSuggestion(incomeByYear, incomeYears)
+	rdRatio := 0.0
+	if rdPct != nil {
+		rdRatio = math.Round(*rdPct*100) / 100 // 仅展示值取整到 2 位小数（判定用未取整的原始比率）
+	}
+
 	return model.ValuationRecommendation{
 		Model:          mdl,
 		ModelName:      valuationModelNames[mdl],
@@ -105,7 +116,32 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		Volatile:       volatile,
 		RiskPoints:     riskPoints,
 		Warning:        warning,
+		AdjustRD:       adjustRD,
+		RDRatio:        rdRatio,
 	}
+}
+
+// rdAdjustSuggestion 按最新年报的研发费用率判定是否建议开启研发调整（FR-5/FR-6，纯函数）。
+//   - 研发费用率 = RESEARCH_EXPENSE ÷ TOTAL_OPERATE_INCOME × 100（%）；
+//   - 严格大于 rdAdjustThreshold 时 suggest = true（恰等于阈值 → false，边界唯一）；
+//   - ratioPct 为 nil 表示无法判定：无可用年报 / 研发费用字段缺失或为空 / 营业收入 ≤ 0，
+//     此时 suggest 恒为 false 且不报错（FR-5 边界，不由大模型补猜）。
+//
+// 年份口径取利润表年报切片末位（annualRows 升序），**不是**三表最新的 latestYear：
+// 利润表可能缺该年数据，取零值行会把研发费用读成 0 而误判 false。
+func rdAdjustSuggestion(incomeByYear map[int]model.ReportRow, incomeYears []int) (suggest bool, ratioPct *float64) {
+	if len(incomeYears) == 0 {
+		return false, nil // 无可用年报
+	}
+	row := incomeByYear[incomeYears[len(incomeYears)-1]]
+	// 直接读指针字段以区分「缺失/为空」（nil → 无法判定）与「显式为 0」（参与判定）；Fields 为 nil map 时索引安全。
+	rd := row.Fields["RESEARCH_EXPENSE"]
+	rev := revenue(row)
+	if rd == nil || rev <= 0 {
+		return false, nil
+	}
+	pct := *rd / rev * 100
+	return pct > rdAdjustThreshold*100, &pct
 }
 
 // operatingCashFlowNet 经营活动现金流量净额（主表科目，缺失视为 0）。

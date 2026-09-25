@@ -75,8 +75,8 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 
 	// 估值参数由后端按财报数据确定性推导（R7）：与年份范围、分析模式无关，保证多次分析结果一致。
 	rec := service.RecommendValuation(balance, cashflow, income)
-	log.Printf("AI 估值参数确定性推荐: code=%s 基准增速=%.2f%% 波动=%v 模型=%s 折现率=%.1f%% 风险点=%d",
-		code, rec.BaseGrowth, rec.Volatile, rec.Model, rec.DiscountRate, rec.RiskPoints)
+	log.Printf("AI 估值参数确定性推荐: code=%s 基准增速=%.2f%% 波动=%v 模型=%s 折现率=%.1f%% 风险点=%d 研发调整=%v 研发费用率=%.2f%%",
+		code, rec.BaseGrowth, rec.Volatile, rec.Model, rec.DiscountRate, rec.RiskPoints, rec.AdjustRD, rec.RDRatio)
 
 	// 主营构成（业务板块及营收占比）用于喂给大模型做业务板块分析；拉取失败不影响主流程。
 	segments, _ := h.c.FetchSegmentIncome(code)
