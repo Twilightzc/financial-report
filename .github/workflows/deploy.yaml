@@ -21,7 +21,7 @@ jobs:
       - name: Build binary
         run: |
           go mod download
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o financial-report .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o financial-report ./cmd/server
           # 如果你的云主机是 ARM64，把 GOARCH=amd64 改成 GOARCH=arm64
 
       - name: Copy binary to server
