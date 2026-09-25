@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Claude Code 配置（不提交）
+.claude/
+
+# Go 编译产物
+/financial-report
+*.exe
+*.test
+*.out
+coverage.out
+
+# 日志与临时文件
+*.log
