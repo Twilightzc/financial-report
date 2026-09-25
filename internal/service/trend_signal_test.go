@@ -1,6 +1,9 @@
 package service
 
 import (
+	"bytes"
+	"encoding/json"
+	"math"
 	"testing"
 
 	"financial-report/internal/model"
@@ -506,4 +509,198 @@ func dimByKey(t *testing.T, a model.FinancialAnalysis, key string) model.Analysi
 	}
 	t.Fatalf("未找到维度 %q", key)
 	return model.AnalysisDimension{}
+}
+
+// closeEnough 浮点近似相等（相对变化率经除法后带尾差，如 1.2→0.19999999999999996）。
+func closeEnough(a, b float64) bool {
+	return math.Abs(a-b) < 1e-9
+}
+
+// TestTrendOfRate 决策更新 2：trendOf 一次产出「趋势 + 相对变化率 R」三元组（FR-2/FR-16）。
+// R=0（首末持平）是**可计算**的合法值，与「数据不足」区分开——这是前端措辞分级的判据。
+func TestTrendOfRate(t *testing.T) {
+	cases := []struct {
+		name      string
+		values    []*float64
+		wantTrend trend
+		wantRate  float64
+		wantOk    bool
+	}{
+		{"上升 +20%", []*float64{fp(1.0), fp(1.2)}, trendRising, 0.2, true},
+		{"下降 -20%", []*float64{fp(1.0), fp(0.8)}, trendFalling, -0.2, true},
+		{"平稳 +1%", []*float64{fp(1.0), fp(1.01)}, trendFlat, 0.01, true},
+		{"首末持平 R=0", []*float64{fp(1.0), fp(1.0)}, trendFlat, 0, true},
+		{"首值为 0 不可算", []*float64{fp(0), fp(100)}, trendNone, 0, false},
+		{"仅 1 个非空", []*float64{nil}, trendNone, 0, false},
+		{"首值残差零", []*float64{fp(1e-7), fp(155)}, trendNone, 0, false},
+		{"末值残差零", []*float64{fp(187), fp(1e-7)}, trendNone, 0, false},
+		{"末值恰为 0（R=-100%）", []*float64{fp(1e8), fp(0)}, trendFalling, -1, true},
+		{"跨零点 -2→3（+250%）", []*float64{fp(-2), fp(3)}, trendRising, 2.5, true},
+	}
+	for _, c := range cases {
+		gotT, gotRate, gotOk := trendOf(c.values)
+		if gotT != c.wantTrend || gotOk != c.wantOk || (c.wantOk && !closeEnough(gotRate, c.wantRate)) {
+			t.Errorf("%s: trendOf = (%v, %v, %v)，期望 (%v, %v, %v)",
+				c.name, gotT, gotRate, gotOk, c.wantTrend, c.wantRate, c.wantOk)
+		}
+		// 薄封装等价性：trendDirection 的趋势位必须与 trendOf 一致（决策更新 2 不改既有签名语义）。
+		if got := trendDirection(c.values); got != gotT {
+			t.Errorf("%s: trendDirection = %v，与 trendOf 的趋势位 %v 不一致", c.name, got, gotT)
+		}
+	}
+}
+
+// trendRateFixtureRows 在 trendFixtureRows 基础上补入逐年上升的金融资产：
+// 使中性方向指标 financial_assets_ratio 也有 R 可算（FR-5 的两类灰点文案都要显示 R）。
+func trendRateFixtureRows() (balance, cashflow, income []model.ReportRow) {
+	balance, cashflow, income = trendFixtureRows()
+	for i := range balance {
+		balance[i].Fields["TRADE_FINASSET_NOTFVTPL"] = fp(float64(50 + i*10))
+	}
+	return
+}
+
+// TestApplyTrendSignalsTrendRate 决策更新 2：回填 pass 同时产出 trend_rate（FR-16）。
+// 核心不变式：trend_rate 非 nil ⟺ R 可计算（trendOf 的 ok 为真），且**不限于**有信号的指标。
+func TestApplyTrendSignalsTrendRate(t *testing.T) {
+	balance, cashflow, income := trendRateFixtureRows()
+	res := ComputeAnalysis(balance, cashflow, income, nil, 2020, 2024)
+
+	doneDims := 0
+	for _, d := range res.Dimensions {
+		for _, s := range d.Sections {
+			for _, it := range s.Indicators {
+				_, kernelRate, ok := trendOf(it.Values)
+				if d.Status != "done" {
+					// ④ 非 done 维度：与信号同规则，R 一并跳过。
+					if it.TrendRate != nil {
+						t.Errorf("非 done 维度 %q 的指标 %q 不应回填 trend_rate，得到 %v", d.Key, it.Key, *it.TrendRate)
+					}
+					continue
+				}
+				// ① 不变式：trend_rate 非 nil ⟺ R 可计算。
+				if (it.TrendRate != nil) != ok {
+					t.Errorf("维度 %q 指标 %q：trend_rate 非 nil = %v，trendOf().ok = %v，不变式被破坏",
+						d.Key, it.Key, it.TrendRate != nil, ok)
+					continue
+				}
+				if ok && !closeEnough(*it.TrendRate, kernelRate*100) {
+					t.Errorf("维度 %q 指标 %q：trend_rate = %v，期望内核 rate×100 = %v",
+						d.Key, it.Key, *it.TrendRate, kernelRate*100)
+				}
+			}
+		}
+		if d.Status == "done" {
+			doneDims++
+		}
+	}
+	if doneDims == 0 {
+		t.Fatal("fixture 未产出任何 done 维度，用例失去意义")
+	}
+
+	// ② 恒为空指标（固定资产成新率）：R 与信号都为空（FR-12⑦）。
+	comp := dimByKey(t, res, "comprehensive")
+	newRate := findIndicator(comp, "fixed_asset_new_rate")
+	if newRate == nil {
+		t.Fatal("未找到 fixed_asset_new_rate")
+	}
+	if newRate.TrendRate != nil || newRate.TrendSignal != signalNone {
+		t.Errorf("固定资产成新率 trend_rate = %v、signal = %q，期望均为空", newRate.TrendRate, newRate.TrendSignal)
+	}
+
+	// ③ 中性方向但数值有变化：无信号，**但必须回填 R**（否则灰点文案拿不到变化率）。
+	ac := dimByKey(t, res, "asset_capital")
+	far := findIndicator(ac, "financial_assets_ratio")
+	if far == nil {
+		t.Fatal("未找到 financial_assets_ratio")
+	}
+	if far.TrendSignal != signalNone {
+		t.Errorf("金融资产占比信号 = %q，期望无色（中性方向）", far.TrendSignal)
+	}
+	if far.Direction != dirNeutral {
+		t.Errorf("金融资产占比方向 = %q，期望 neutral", far.Direction)
+	}
+	if far.TrendRate == nil {
+		t.Error("金融资产占比 trend_rate 为 nil，中性方向指标也必须回填 R（FR-16）")
+	} else if *far.TrendRate <= 0 {
+		t.Errorf("金融资产占比 trend_rate = %v，期望 > 0（fixture 中逐年上升）", *far.TrendRate)
+	}
+
+	// ⑤⑥ 有信号指标：trend_rate 与内核一致，且与 Values 自洽（(末值−首值)/|首值|×100）。
+	turnover := findIndicator(comp, "asset_turnover")
+	if turnover == nil {
+		t.Fatal("未找到 asset_turnover")
+	}
+	if turnover.TrendRate == nil || *turnover.TrendRate <= 0 {
+		t.Fatalf("资产周转率 trend_rate = %v，期望 > 0", turnover.TrendRate)
+	}
+	vs := turnover.Values
+	var first, last float64
+	n := 0
+	for _, v := range vs {
+		if v == nil {
+			continue
+		}
+		if n == 0 {
+			first = *v
+		}
+		last = *v
+		n++
+	}
+	if n < 2 {
+		t.Fatalf("资产周转率有效点 = %d，期望 ≥ 2", n)
+	}
+	want := (last - first) / math.Abs(first) * 100
+	if !closeEnough(*turnover.TrendRate, want) {
+		t.Errorf("资产周转率 trend_rate = %v，与 Values 首末自洽值 %v 不符", *turnover.TrendRate, want)
+	}
+}
+
+// TestTrendRateJSONContract 决策更新 2 的 JSON 契约护栏（13.3/13.7）：
+// trend_rate 非 nil 时必须序列化（**含合法的 0**），nil 时省略；trend_signal 仍按 omitempty 省略。
+func TestTrendRateJSONContract(t *testing.T) {
+	// ① R=0（首末持平）必须输出 "trend_rate":0——防止字段被「简化」为 float64 + omitempty 而静默省略 0。
+	zero := model.AnalysisIndicator{
+		Key: "asset_turnover", Name: "资产周转率", Unit: "次",
+		Direction: dirHigherBetter, TrendRate: fp(0),
+	}
+	raw := marshalFields(t, zero)
+	if v, ok := raw["trend_rate"]; !ok {
+		t.Error("R=0 的指标 JSON 中缺少 trend_rate 键（首末持平被误判为「数据不足」）")
+	} else if string(v) != "0" {
+		t.Errorf("trend_rate 序列化值 = %s，期望 0", v)
+	}
+	if _, ok := raw["trend_signal"]; ok {
+		t.Error("无信号指标的 JSON 中不应出现 trend_signal 键（omitempty）")
+	}
+
+	// ② R 不可计算（nil）时省略 trend_rate 键。
+	none := model.AnalysisIndicator{Key: "fixed_asset_new_rate", Name: "固定资产成新率", Direction: dirNeutral}
+	if _, ok := marshalFields(t, none)["trend_rate"]; ok {
+		t.Error("trend_rate 为 nil 的指标 JSON 中不应出现 trend_rate 键")
+	}
+
+	// ③ 端到端：合成报表中存在首末持平的指标（总资产恒定 → R=0），整体 JSON 必须含 "trend_rate":0。
+	balance, cashflow, income := trendFixtureRows()
+	body, err := json.Marshal(ComputeAnalysis(balance, cashflow, income, nil, 2020, 2024))
+	if err != nil {
+		t.Fatalf("序列化分析结果失败：%v", err)
+	}
+	if !bytes.Contains(body, []byte(`"trend_rate":0`)) {
+		t.Error("分析结果 JSON 中未出现 \"trend_rate\":0（R=0 的指标未被输出）")
+	}
+}
+
+// marshalFields 序列化任意值并返回其顶层 JSON 对象字段（键 → 原始 JSON 值）。
+func marshalFields(t *testing.T, v any) map[string]json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("序列化 %T 失败：%v", v, err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("反序列化 %T 失败：%v", v, err)
+	}
+	return m
 }

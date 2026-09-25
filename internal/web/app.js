@@ -15,6 +15,11 @@ const PALETTE = {
   growth: '#d97706',
 };
 
+// ★决策更新 2（FR-16）：tooltip 措辞幅度分级阈值——|R|（%，与 trend_rate 同口径）小于该值时用温和词。
+// 与后端 trendThreshold（0.05）**相互独立、不得互相替代**：前者只决定「用词轻重」，后者决定「有无信号」。
+// 单点可调（如 15/10），调整后仅改措辞、**不改任何颜色与信号**（AC-27）。
+const MILD_CHANGE_THRESHOLD = 20; // %
+
 // FR-10：指标趋势图柱色 —— 向好绿 / 恶化红 / 无信号或中性灰；负值无论信号一律红。
 function barColorOf(signal, value) {
   if (value != null && value < 0) return PALETTE.bad;
@@ -627,26 +632,53 @@ const app = createApp({
       return v.toFixed(2) + (unit ? ' ' + unit : '');
     }
 
-    // FR-5：信号说明文案。phrase 为该指标所属小节标题（方向解读短语），可为空。
-    // 文案不变式：s1≠0、s1≠sm、m≥2（由后端 trend_signal 的前置条件保证），故非空信号必有完整文案。
-    function trendTip(it, years, phrase) {
-      const s = it.trend_signal;
-      if (s !== 'improving' && s !== 'worsening') return '';
+    // FR-5 / FR-16：信号说明文案。phrase = 该指标所属小节标题（方向解读短语，可为空）；
+    // dimStatus = 所属维度状态（决策更新 2 新增，非 'done' 时给维度级灰点文案）。
+    // **三态都必须返回非空文案**（FR-5 / AC-10）：绿/红 → 幅度分级措辞；灰 → 四类温和文案。
+    // 措辞分级只读后端 trend_rate（单一真值，不在前端重算 R）：|R| < MILD_CHANGE_THRESHOLD 用温和词。
+    function trendTip(it, years, phrase, dimStatus) {
+      const name = it.name || '该指标';
+      // ① 维度非 'done'（FR-12①）：整维度不参与趋势判定。当前模板不渲染非 done 维度的指标行，属防御分支。
+      if (dimStatus && dimStatus !== 'done') return `${name}：该维度暂无数据，暂无法判断趋势`;
       const vs = it.values || [];
       let i1 = -1, im = -1;
       for (let i = 0; i < vs.length; i++) {
         if (vs[i] != null) { if (i1 < 0) i1 = i; im = i; }
       }
-      if (i1 < 0 || i1 === im) return '';
+      // ② 数据不足（FR-12②③⑥⑦）：R 不可计算（缺字段/非数字）或有效点 < 2。
+      //    注意用 typeof 判缺失而非真值判断——trend_rate === 0（首末持平）是合法值。
+      const rate = it.trend_rate;
+      if (typeof rate !== 'number' || !isFinite(rate) || i1 < 0 || i1 === im) {
+        return `${name}在所选范围内数据不足，暂无法判断趋势`;
+      }
       const s1 = vs[i1], sm = vs[im];
-      if (s1 === 0) return '';
       const ys = years || [];
       const span = (ys[im] != null && ys[i1] != null) ? (ys[im] - ys[i1] + 1) : (im - i1 + 1);
-      const r = ((sm - s1) / Math.abs(s1)) * 100;
-      const move = sm > s1 ? '升至' : '降至';
-      const concl = s === 'improving' ? '向好' : '恶化';
+      const pct = `${rate >= 0 ? '+' : ''}${rate.toFixed(1)}%`;
+      const vals = (sm === s1)
+        ? `保持在 ${fmtAnalysisVal(s1, it.unit)}`                                          // R=0：避免「由 X 降至 X」
+        : `由 ${fmtAnalysisVal(s1, it.unit)} ${sm > s1 ? '升至' : '降至'} ${fmtAnalysisVal(sm, it.unit)}`;
+      const s = it.trend_signal;
+      // ③ 灰点（无信号）：温和陈述，禁用「向好/恶化/改善/走弱」评价词（FR-5）。
+      if (s !== 'improving' && s !== 'worsening') {
+        // 方向 neutral（可算出 R）→ 用「无明确好坏方向」；方向有向且无信号 → 必为趋势平稳（|R| < 5%）。
+        if (it.direction === 'neutral') return `近 ${span} 年${name}${vals}（${pct}），该指标无明确好坏方向`;
+        return `近 ${span} 年${name}变化不大（${pct}），趋势平稳`;
+      }
+      // ④ 绿点/红点：末词按**向好/恶化极性**取（FR-16 Q10.1），数值动向已由「升至/降至」表达。
       const lead = (phrase && phrase !== it.name) ? phrase : ''; // 与指标名重复时省略短语
-      return `近 ${span} 年${it.name}由 ${fmtAnalysisVal(s1, it.unit)} ${move} ${fmtAnalysisVal(sm, it.unit)}（${r >= 0 ? '+' : ''}${r.toFixed(1)}%），${lead}${concl}`;
+      const mild = Math.abs(rate) < MILD_CHANGE_THRESHOLD;
+      const concl = (s === 'improving') ? (mild ? '略有改善' : '向好') : (mild ? '略有走弱' : '恶化');
+      return `近 ${span} 年${name}${vals}（${pct}），${lead}${concl}`;
+    }
+
+    // ★决策更新 2（FR-4）：信号灯圆点类名——向好 improving / 恶化 worsening / 其余一律 neutral（灰）。
+    // 三态全覆盖：任何指标都必须落到这三个类之一，故**不存在空类**（AC-24 每行恰一个圆点）。
+    // trend_rate 守卫：后端不变式为「有信号 ⟺ trend_rate 非 nil」，故该守卫只对**旧响应/脏数据**生效，
+    // 此时保守降级为灰，保证「圆点颜色」与「tooltip 文案（数据不足）」不会自相矛盾。
+    function trendDotClass(it) {
+      if (typeof it.trend_rate !== 'number') return 'neutral';
+      return (it.trend_signal === 'improving' || it.trend_signal === 'worsening') ? it.trend_signal : 'neutral';
     }
 
     // 同比文本：范围内最早年/上期无数据/上期为0 →「—」；上期为负 → 不显示百分比
@@ -771,7 +803,7 @@ const app = createApp({
       doSearch, pickCode, changeRange, fmtYi, yoyText, yoyClass, stmtYears, stmtGroups, hasStmtData,
       fmt,
       analysis, analysisLoading, analysisError, analysisActive, fmtAnalysisVal, indRowClass,
-      yoyClassDir, trendTip, barColorOf, PALETTE,
+      yoyClassDir, trendTip, trendDotClass, barColorOf, PALETTE, MILD_CHANGE_THRESHOLD,
       tabTouchStart, tabTouchEnd,
       analysisStartYear, analysisEndYear, changeAnalysisRange,
       chartVisible, chartIndicator, chartRef, chartNarrow, showIndicatorChart, renderIndicatorChart, disposeIndicatorChart,
@@ -953,9 +985,9 @@ const app = createApp({
                                     <button class="chart-btn" title="查看趋势" @click="showIndicatorChart(it)">
                                       <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,12 6,7 9,9 14,3"></polyline></svg>
                                     </button>
-                                    <!-- R9 趋势信号灯（向好绿 / 恶化红；中性、平稳、数据不足时 v-if 不渲染） -->
-                                    <el-tooltip v-if="it.trend_signal" :content="trendTip(it, analysis.years, s.title)" placement="top" :trigger="['hover','focus']" popper-class="ind-tip">
-                                      <span class="trend-dot" :class="it.trend_signal" tabindex="0" role="img" :aria-label="trendTip(it, analysis.years, s.title)"></span>
+                                    <!-- ★R9 决策更新 2：趋势信号灯**三态全渲染**（向好绿 / 恶化红 / 其余灰），无 v-if（AC-24） -->
+                                    <el-tooltip :content="trendTip(it, analysis.years, s.title, dim.status)" placement="top" :trigger="['hover','focus']" popper-class="ind-tip">
+                                      <span class="trend-dot" :class="trendDotClass(it)" tabindex="0" role="img" :aria-label="trendTip(it, analysis.years, s.title, dim.status)"></span>
                                     </el-tooltip>
                                     <el-tooltip :content="it.interpretation ? (it.name + '：' + it.interpretation) : it.name" placement="top" :trigger="['hover','focus']" popper-class="ind-tip"><span class="ind-text" tabindex="0">{{ it.name }}</span></el-tooltip>
                                     <el-tooltip v-if="it.interpretation" :content="it.interpretation" placement="top" :show-after="200" popper-class="ind-tip">

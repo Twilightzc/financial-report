@@ -14,6 +14,12 @@ type AnalysisIndicator struct {
 	// Direction 不设 omitempty：每个指标都必须带方向属性，缺字段会让「neutral」与「旧响应」不可区分。
 	Direction   string `json:"direction"`              // higher_better / lower_better / neutral
 	TrendSignal string `json:"trend_signal,omitempty"` // improving / worsening；无色（平稳/无信号/中性/维度非 done）时省略
+
+	// ★决策更新 2 新增：首末相对变化率 R（FR-2 同一口径、同一次计算），**百分比口径 0–100**
+	//（如 11.5 表示 +11.5%，与 model 内其余 unit=="%" 的字段同为 0–100，见 analysis.go 的 ratioPct ×100）。
+	// R 不可计算（趋势 = trendNone）时为 nil；**必须是指针**：R=0（首末持平）是合法值，须输出 0，
+	// 否则前端无法区分「持平」与「数据不足」。前端只把它用于措辞分级与文案，不参与信号判定（FR-16）。
+	TrendRate *float64 `json:"trend_rate,omitempty"`
 }
 
 // AnalysisSection 分析维度下的小节（如投资活动现金流入/流出、长期经营资产、并购活动等）。

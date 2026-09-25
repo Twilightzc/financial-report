@@ -411,7 +411,8 @@ td.num, .val, .yoy {
 }
 .analysis-table .chart-btn:hover { color: var(--brand); background: var(--brand-soft); }
 
-/* R9 趋势信号灯（FR-4）：指标名前的独立 8px 圆点；中性不渲染（无对应规则）。
+/* R9 趋势信号灯（FR-4）：指标名前的独立 8px 圆点；★决策更新 2：三态全渲染（绿/红/灰），
+   尺寸/位置/间距三态完全一致，仅颜色不同（AC-24）。
    不设 line-height/margin，由 .ind-name 的 flex 负责垂直居中与间距 → 不改行高。
    flex-shrink:0 保证窄屏下不被压扁；移动端 .help-icon 的隐藏规则不匹配本类，信号灯保留（FR-13）。 */
 .analysis-table .trend-dot {
@@ -420,6 +421,15 @@ td.num, .val, .yoy {
 }
 .analysis-table .trend-dot.improving { background: var(--good); }
 .analysis-table .trend-dot.worsening { background: var(--bad); }
+.analysis-table .trend-dot.neutral { background: var(--neutral-bar); } /* 中性/无信号/数据不足/维度非 done */
+
+/* ★决策更新 2：圆点的键盘焦点环用「自身语义色」显式声明（灰点尤其不能是品牌红，FR-4）。
+   ⚠️ 必须显式声明的原因：上面基础规则的 outline:none 特异性 (0,2,0) 高于全局 :focus-visible (0,1,0)，
+   会把全局品牌红聚焦环**整个吃掉**——即现状下圆点聚焦时看不到任何焦点提示（既有实现的隐性 a11y 缺口）。
+   这里三条规则的特异性 (0,3,0)/(0,4,0) 均高于 (0,2,0)，故能生效且不受源码顺序影响。 */
+.analysis-table .trend-dot:focus-visible { outline: 2px solid var(--neutral-bar); outline-offset: 1px; }
+.analysis-table .trend-dot.improving:focus-visible { outline-color: var(--good); }
+.analysis-table .trend-dot.worsening:focus-visible { outline-color: var(--bad); }
 
 /* 指标层级：sub=子项（缩进+浅色）；net/subtotal=合计/净额（加粗+上分隔线） */
 .analysis-table tr.sub-row .item-name { padding-left: 20px; }
