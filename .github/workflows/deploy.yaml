@@ -42,5 +42,5 @@ jobs:
           script: |
             cd /root/app/financial-report
             chmod +x financial-report
-            cp /root/app/financial-report/financial-report /root/apprun/financial_report/
+            cp /root/app/financial-report/financial-report /root/apprun/financial-report/
             systemctl restart financial-report
