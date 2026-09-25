@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"os"
 
@@ -72,10 +73,15 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 
 	analysis := service.ComputeAnalysis(balance, cashflow, income, dividends, startYear, endYear)
 
+	// 估值参数由后端按财报数据确定性推导（R7）：与年份范围、分析模式无关，保证多次分析结果一致。
+	rec := service.RecommendValuation(balance, cashflow, income)
+	log.Printf("AI 估值参数确定性推荐: code=%s 基准增速=%.2f%% 波动=%v 模型=%s 折现率=%.1f%% 风险点=%d",
+		code, rec.BaseGrowth, rec.Volatile, rec.Model, rec.DiscountRate, rec.RiskPoints)
+
 	// 主营构成（业务板块及营收占比）用于喂给大模型做业务板块分析；拉取失败不影响主流程。
 	segments, _ := h.c.FetchSegmentIncome(code)
 
-	system, user := service.BuildAIPrompt(analysis, *quote, reasoningEffort, segments)
+	system, user := service.BuildAIPrompt(analysis, *quote, reasoningEffort, segments, rec)
 
 	llm := client.NewDeepSeek(apiKey, baseURL, modelName, reasoningEffort)
 	raw, usage, err := llm.Chat(system, user)
@@ -89,6 +95,8 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 1, "message": err.Error(), "data": nil})
 		return
 	}
+	// 用确定性参数覆盖大模型返回的估值字段，仅保留其 rationale。
+	service.ApplyValuationRecommendation(&result, rec)
 	result.Usage = &usage
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": result})
 }

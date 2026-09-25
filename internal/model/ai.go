@@ -38,6 +38,26 @@ type AIValuation struct {
 	DiscountRate float64            `json:"discount_rate"` // 折现率 %
 	Params       []AIValuationParam `json:"params"`        // 增长率 / 年数等参数
 	Rationale    string             `json:"rationale"`     // 选择理由（简洁）
+
+	// R7 新增：由财报数据确定性回填的只读信息（omitempty 保证旧客户端不因缺字段报错）。
+	// BaseGrowth 不设 omitempty：X=0（数据不足或增长持平时）也须输出，前端才能显示「基准增速 0%」。
+	BaseGrowth     float64 `json:"base_growth"`                // 基准增速 X%
+	BaseGrowthNote string  `json:"base_growth_note,omitempty"` // 基准增速口径说明
+	Volatile       bool    `json:"volatile,omitempty"`         // 是否剧烈波动（g1 按基准增速 50% 取）
+	Warning        string  `json:"warning,omitempty"`          // 套用提示（如基期 FCF ≤ 0）
+}
+
+// ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
+type ValuationRecommendation struct {
+	Model          string             // zero / perpetual / two_stage / three_stage
+	ModelName      string             // 中文名（复用 service.valuationModelNames）
+	DiscountRate   float64            // 折现率 %（8.0–12.0，0.5 一档）
+	Params         []AIValuationParam // 模型对应的增长率/年数参数（zero 为空切片）
+	BaseGrowth     float64            // 基准增速 X%（%）
+	BaseGrowthNote string             // 基准增速口径说明（FR-7）
+	Volatile       bool               // 近三年同比增速极差是否 > 40 个百分点
+	RiskPoints     int                // 折现率风险点计数 0–3（可观测用）
+	Warning        string             // 套用后估值可能不适用的提示（FR-8）
 }
 
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。

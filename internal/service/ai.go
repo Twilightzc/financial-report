@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"financial-report/internal/model"
 )
 
 // AI 分析的系统提示词（skill），只含静态框架：
-// 角色、任务、输出 JSON 结构、五个评分维度与评分标准、估值模型推荐规则、行业分析规则。
+// 角色、任务、输出 JSON 结构、五个评分维度与评分标准、估值模型推荐（只解释、不改数）、行业分析规则。
 // 指标含义随指标数值一起放进用户消息（避免「字典」与「数值」重复发送指标名）。
 const aiSystemFramework = `你是资深财务分析师兼行业研究员。你将收到一家 A 股上市公司的财务指标数据（指标名、单位、含义与按年度顺序的数值），请据此完成财务诊断，并**只输出一个 JSON 对象**（不要输出任何解释，不要用 markdown 代码块包裹）。
 
@@ -26,7 +27,7 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
   "conclusion": "总体结论（{conclusion}，分段分点、用换行分隔，覆盖：①公司质地与商业模式，②核心竞争优势/护城河，③财务健康与盈利质量（结合盈利能力/偿债能力/现金获取能力三个维度），④主要风险与隐忧，⑤综合评级与是否值得关注）",
   "industry": {"name": "行业名称", "prospect": "前景(1-2句)", "competition": "竞争格局(1-2句)", "application": "应用方向/需求(1-2句)"},
   "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)"}],
-  "valuation": {"model": "two_stage", "model_name": "两阶段模型", "discount_rate": 8.0, "params": [{"key": "g1", "label": "高增长期增长率", "value": 10.0}], "rationale": "选择理由(1-2句)"}
+  "valuation": {"rationale": "选择理由(2-3句，只能解释、不能改数)"}
 }
 
 说明：scores 必须恰好 5 项，维度名只能用「盈利能力、偿债能力、现金获取能力、经营效率、成长能力」这 5 个精确写法；score 为 0-100 的整数。
@@ -40,17 +41,11 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 4. 经营效率：看资产周转率、经营资产周转率、长期经营资产/固定资产/周转性经营投入周转率、存货/应收账款/应付账款周转率与周转天数、营业周期、现金周期。
 5. 成长能力：看营业收入、净利润、经营活动现金流量净额的同比增速，长期经营资产扩张性资本支出及比例、战略投资活动总体规模扩张、并购活动净合并额、研发费用率趋势。
 
-## 估值模型推荐规则
-- 公司价值 = 金融资产价值 + 长期股权投资价值 + 经营资产价值；股权价值 = 公司价值 − 债务价值。
-- **参数必须严格依据实际财务指标、据实预估，不要凭空拍脑袋**：
-  - 先算出近三年营业收入、净利润、经营活动现金流量净额的同比增速，取较稳健的一个作为基准增速（记作 X%）。
-  - 高增长期增长率 g1 必须贴近基准增速，允许 ±3% 的合理偏差（如基准 15%，g1 取 12%-18%），不要偏离到另一个量级。
-  - 基准增速 ≥20% → three_stage，g1≈基准增速，n1 取 5-10 年；8%-20% → two_stage，g1≈基准增速；0%-8% → perpetual，g 取 2%-4%（贴近长期 GDP 增速）；负增长或剧烈波动 → zero 或 two_stage（g1 取低值并说明风险）。
-  - 永续增长率 g2/g3 取 2%-4%，必须小于 discount_rate。
-- 折现率 discount_rate 依据实际风险指标：看财务杠杆倍数、债务对股东权益比率、利息保障倍数、盈利波动——低负债、高 ROE、盈利稳定 → 8%-9%；高负债、盈利波动大 → 10%-12%。
-- 行业分析只做微调（±1-2% 或 ±1-2 年），不改变基于财务数据的基准判断。
-- params 的 key 取值规则：perpetual → [{"key":"g","label":"永续增长率"}...]；two_stage → g1(高增长期增长率)、n1(高增长期年数)、g2(永续增长率)；three_stage → g1、n1、g2(第二阶段增长率)、n2(第二阶段年数)、g3(永续增长率)；zero → 无 params。年数 n1/n2 的 value 用整数。
-- **结果要稳定可复现**：增长率 g/g1/g2/g3 一律四舍五入到整数百分比（1% 一档），折现率 discount_rate 四舍五入到 0.5% 的倍数（如 8.0、8.5、9.0），年数取整数。同一家公司、同一份指标数据，必须给出相同的模型选择与参数，不要每次不同。
+## 估值模型推荐（只解释、不改数）
+- 估值参数已由系统按该公司实际财报数据**确定性推导**，并会在用户消息中给出（模型、折现率、各阶段增长率与年数、基准增速 X% 及其口径）。同一家公司每次分析结果完全相同。
+- 你的任务**仅为这些参数写 rationale（2-3 句）**：说明为什么该模型合适、该折现率与增长率反映了哪些财务与行业因素（可结合行业前景/竞争格局做定性解释）。
+- 硬性要求：rationale 中出现的任何数字必须与给定参数完全一致；**不得**建议或写出其它模型/折现率/增长率取值。
+- 输出 JSON 中 valuation 只返回 {"rationale": "..."}；其余字段由系统回填，即使填写也会被忽略。
 
 ## 行业分析规则
 - 行业 name 由公司名称推断；prospect（前景）、competition（竞争格局）、application（应用方向/需求）各写 1-2 句，结论简洁，不堆砌。
@@ -76,16 +71,17 @@ func aiConclusionSpec(reasoning string) string {
 	}
 }
 
-// BuildAIPrompt 组装 AI 分析的系统提示词（skill）与用户消息（公司信息 + 主营构成 + 指标数值与含义）。
+// BuildAIPrompt 组装 AI 分析的系统提示词（skill）与用户消息（公司信息 + 主营构成 + 指标数值与含义 + 确定性估值参数）。
 // reasoning 为 low/medium/high，控制结论详略（简洁/标准/详细），进而影响速度与详细度。
-func BuildAIPrompt(a model.FinancialAnalysis, q model.Quote, reasoning string, segments []model.SegmentIncome) (system, user string) {
+// rec 为后端按财报数据确定性推导的估值参数（R7）：作为事实喂给大模型，供其撰写与此自洽的 rationale。
+func BuildAIPrompt(a model.FinancialAnalysis, q model.Quote, reasoning string, segments []model.SegmentIncome, rec model.ValuationRecommendation) (system, user string) {
 	system = strings.Replace(aiSystemFramework, "{conclusion}", aiConclusionSpec(reasoning), 1)
-	user = buildUserMessage(a, q, segments)
+	user = buildUserMessage(a, q, segments, rec)
 	return system, user
 }
 
-// buildUserMessage 用户消息：公司信息 + 主营构成 + 年度 + 各维度指标（每行含单位与含义）。
-func buildUserMessage(a model.FinancialAnalysis, q model.Quote, segments []model.SegmentIncome) string {
+// buildUserMessage 用户消息：公司信息 + 主营构成 + 年度 + 各维度指标（每行含单位与含义）+ 确定性估值参数。
+func buildUserMessage(a model.FinancialAnalysis, q model.Quote, segments []model.SegmentIncome, rec model.ValuationRecommendation) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("公司：%s（代码 %s），总市值约 %.0f 亿元。\n", q.Name, q.Code, q.MarketCap/1e8))
 	if summary := segmentSummary(segments); summary != "" {
@@ -94,7 +90,36 @@ func buildUserMessage(a model.FinancialAnalysis, q model.Quote, segments []model
 	b.WriteString(fmt.Sprintf("年度：%s。\n", joinYears(a.Years)))
 	b.WriteString("以下为各维度财务指标，每行格式为「指标名（单位；含义）：按年度顺序的数值」（— 表示无数据）：\n")
 	b.WriteString(serializeIndicators(a))
+	b.WriteString("\n")
+	b.WriteString(valuationPromptBlock(rec))
 	return b.String()
+}
+
+// valuationPromptBlock 把确定性推导的估值参数序列化为用户消息中的一段（大模型只据此写 rationale）。
+func valuationPromptBlock(rec model.ValuationRecommendation) string {
+	var b strings.Builder
+	b.WriteString("估值参数（系统按实际财报数据确定性推导，请据实解释、不得改动）：\n")
+	b.WriteString(fmt.Sprintf("- 基准增速 X：%.2f%%（%s）\n", rec.BaseGrowth, rec.BaseGrowthNote))
+	b.WriteString(fmt.Sprintf("- 模型：%s（%s）；折现率：%.1f%%\n", rec.ModelName, rec.Model, rec.DiscountRate))
+	if len(rec.Params) > 0 {
+		parts := make([]string, 0, len(rec.Params))
+		for _, p := range rec.Params {
+			parts = append(parts, fmt.Sprintf("%s %s=%s", p.Label, p.Key, formatParamValue(p.Value)))
+		}
+		b.WriteString("- 参数：" + strings.Join(parts, "；") + "\n")
+	}
+	if rec.Warning != "" {
+		b.WriteString("- 提示：" + rec.Warning + "\n")
+	}
+	return b.String()
+}
+
+// formatParamValue 格式化估值参数字面值：整数不带小数，其余保留原始精度（如 13.2）。
+func formatParamValue(v float64) string {
+	if v == math.Trunc(v) {
+		return strconv.Itoa(int(v))
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // segmentSummary 把主营构成序列化为「板块名（营收/利润/毛利率）、…」的紧凑文本，供大模型阅读。
@@ -245,7 +270,7 @@ func ParseAIResult(raw string) (model.AIAnalysisResult, error) {
 		byDim[dim] = model.AIScore{Dimension: dim, Score: score, Comment: sc.Comment}
 	}
 
-	r := model.AIAnalysisResult{Conclusion: parsed.Conclusion, Industry: parsed.Industry, Businesses: parsed.Businesses, Valuation: normalizeValuation(parsed.Valuation)}
+	r := model.AIAnalysisResult{Conclusion: parsed.Conclusion, Industry: parsed.Industry, Businesses: parsed.Businesses, Valuation: parsed.Valuation}
 	for _, dim := range aiScoreDimensions {
 		sc, ok := byDim[dim]
 		if !ok {
@@ -256,14 +281,18 @@ func ParseAIResult(raw string) (model.AIAnalysisResult, error) {
 	return r, nil
 }
 
-// normalizeValuation 把估值参数量化到固定档位（折现率 0.5% 一档、增长率/年数取整数），
-// 降低多次分析之间因大模型随机性带来的参数波动。
-func normalizeValuation(v model.AIValuation) model.AIValuation {
-	v.DiscountRate = math.Round(v.DiscountRate*2) / 2
-	for i := range v.Params {
-		v.Params[i].Value = math.Round(v.Params[i].Value)
-	}
-	return v
+// ApplyValuationRecommendation 用确定性推导结果覆盖大模型返回的估值参数字段，只保留其 rationale。
+// 大模型返回的 model / discount_rate / params 一律丢弃（FR-5：参数以后端确定性结果为准）。
+func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.ValuationRecommendation) {
+	r.Valuation.Model = rec.Model
+	r.Valuation.ModelName = rec.ModelName
+	r.Valuation.DiscountRate = rec.DiscountRate
+	r.Valuation.Params = rec.Params
+	r.Valuation.BaseGrowth = rec.BaseGrowth
+	r.Valuation.BaseGrowthNote = rec.BaseGrowthNote
+	r.Valuation.Volatile = rec.Volatile
+	r.Valuation.Warning = rec.Warning
+	// Rationale 保持大模型返回值，不覆盖
 }
 
 // normalizeDimension 把大模型返回的维度名模糊匹配到规范名，无法识别返回空串。

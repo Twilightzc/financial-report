@@ -126,7 +126,7 @@ func TestBuildAIPrompt(t *testing.T) {
 	system, user := BuildAIPrompt(a, q, "medium", []model.SegmentIncome{
 		{Name: "茅台酒", RevenueRatio: 0.87, ProfitRatio: 0.89, GrossMargin: 0.94},
 		{Name: "其他系列酒", RevenueRatio: 0.13, ProfitRatio: 0.11, GrossMargin: 0.76},
-	})
+	}, sampleRecommendation())
 	if !strings.Contains(system, "盈利能力") {
 		t.Fatalf("系统提示词缺少框架: %s", system)
 	}
