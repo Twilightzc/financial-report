@@ -6,6 +6,7 @@
 
 # Go 编译产物
 /financial-report
+/cmd/server/financial_report
 *.exe
 *.test
 *.out
