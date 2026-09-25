@@ -1,5 +1,140 @@
 const { createApp, ref, computed, nextTick } = Vue;
 
+// 指标趋势图：图表可用宽度窄于此值时启用窄屏布局（图例移底、字号 11px、边距收紧）。
+// 注意「窄屏」按图表实测宽度判断（弹窗宽度是 min(680px, 92vw)，非固定）；「移动端」按视口宽度，见 style.css。
+const CHART_NARROW_WIDTH = 480;
+
+// 百分比刻度：至多 1 位小数（12.5% / 10% / 0% / -5%）；左轴与右轴（同比增速）共用。
+function fmtAxisPct(v) {
+  if (v === 0) return '0%';
+  const r = Math.round(v * 10) / 10;
+  return (Number.isInteger(r) ? r.toFixed(0) : r.toFixed(1)) + '%';
+}
+
+// 左 y 轴刻度：单位语义由刻度标签承载（FR-1），不再用孤立单位符号作轴名。
+function fmtAxisValue(v, unit) {
+  if (unit === '元') {
+    if (v === 0) return '0';
+    const yi = v / 1e8;
+    if (Math.abs(yi) >= 1) return yi.toFixed(1) + '亿';
+    return (v / 1e4).toFixed(0) + '万';
+  }
+  if (unit === '%') return fmtAxisPct(v);
+  if (unit === '倍') return v.toFixed(2) + '倍';
+  return Number(v).toFixed(2);
+}
+
+// 窄屏图例缩略：超过 6 个汉字截断为 6 字 + 「…」（完整指标名仍在弹窗标题与 tooltip 中）。
+function legendLabel(name, narrow) {
+  return narrow && name.length > 6 ? name.slice(0, 6) + '…' : name;
+}
+
+// R2 数值格式化：元 → 亿/万（图表 tooltip 与指标表共用）。
+function fmtYi(v) {
+  if (v == null || isNaN(v)) return '—';
+  const yi = v / 1e8;
+  if (Math.abs(yi) < 0.01) return (v / 1e4).toFixed(2) + '万';
+  return yi.toFixed(2) + '亿';
+}
+
+// 同比增速（%）：首年/上期缺失/上期为 0 或负 → null（口径不变）。
+function growthSeries(values) {
+  return values.map((v, i) => {
+    if (i === 0) return null;
+    const prev = values[i - 1];
+    if (v == null || prev == null || prev === 0 || prev < 0) return null;
+    return ((v - prev) / prev) * 100;
+  });
+}
+
+// 构造指标趋势图 option：柱状 = 指标值（左轴），折线 = 同比增速（右轴）。
+// narrow 为窄屏布局：图例移底、字号 11px、grid 左右边距收紧、长指标名缩略。
+// 增速全为 null（如仅 1 年数据）时不渲染折线系列与右 y 轴，避免图例与系列错配。
+function buildIndicatorChartOption(it, years, values, growth, narrow) {
+  const unit = it.unit || '';
+  const hasGrowth = growth.some(v => v != null);
+  const seriesName = legendLabel(it.name, narrow);
+  const fontSize = narrow ? 11 : 12;
+  const legendData = hasGrowth ? [seriesName, '同比增速'] : [seriesName];
+  const legend = narrow
+    ? { data: legendData, bottom: 0, left: 'center', itemGap: 12, textStyle: { color: '#5d5151', fontSize } }
+    : { data: legendData, top: 0, textStyle: { color: '#5d5151', fontSize } };
+
+  const yAxis = [{
+    type: 'value',
+    // 单位已由刻度标签承载，左轴不再设仅含单位符号的轴名（FR-1）
+    axisLabel: { formatter: (v) => fmtAxisValue(v, unit), fontSize },
+    splitLine: { lineStyle: { type: 'dashed' } },
+  }];
+  if (hasGrowth) {
+    yAxis.push({
+      type: 'value',
+      name: '增速 %',
+      nameGap: 8,
+      nameTextStyle: { color: '#998c8c', fontSize },
+      axisLabel: { formatter: fmtAxisPct, fontSize },
+      splitLine: { show: false },
+    });
+  }
+
+  const series = [{
+    name: seriesName,
+    type: 'bar',
+    data: values.map(v => v == null ? null : v),
+    itemStyle: { color: '#d64040', borderRadius: [3, 3, 0, 0] },
+    barMaxWidth: 44,
+  }];
+  if (hasGrowth) {
+    series.push({
+      name: '同比增速',
+      type: 'line',
+      yAxisIndex: 1,
+      data: growth,
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 7,
+      lineStyle: { width: 2, color: '#d97706' },
+      itemStyle: { color: '#d97706' },
+      connectNulls: false,
+    });
+  }
+
+  const fmtVal = (v) => {
+    if (v == null) return '—';
+    if (unit === '元') return fmtYi(v);
+    if (unit === '%') return v.toFixed(2) + '%';
+    if (unit === '倍') return v.toFixed(2) + ' 倍';
+    return v.toFixed(2);
+  };
+
+  return {
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      formatter: (params) => {
+        const idx = params[0].dataIndex;
+        let html = '<b>' + years[idx] + ' 年</b><br/>';
+        html += it.name + '：' + fmtVal(values[idx]) + '<br/>';
+        html += '同比增速：' + (growth[idx] == null ? '—' : growth[idx].toFixed(2) + '%');
+        return html;
+      },
+    },
+    legend,
+    // containLabel: 轴刻度标签占位不计入边距，左右可压到 8/12px 而不会裁切「1.2亿」这类长刻度（FR-3）。
+    grid: narrow
+      ? { left: 8, right: 12, top: 28, bottom: 46, containLabel: true }
+      : { left: 12, right: 16, top: 48, bottom: 24, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: years.map(String),
+      boundaryGap: true,
+      axisLabel: { fontSize, hideOverlap: true },
+    },
+    yAxis,
+    series,
+  };
+}
+
 const app = createApp({
   setup() {
     const code = ref('');
@@ -26,6 +161,8 @@ const app = createApp({
     const chartVisible = ref(false);
     const chartIndicator = ref(null);
     const chartRef = ref(null);
+    const chartNarrow = ref(false); // 当前图表是否处于窄屏布局（宽度 < 480px）
+    let chartResizeTimer = null;
 
     // R4 公司估值状态
     const valModels = [
@@ -187,95 +324,47 @@ const app = createApp({
     }
 
     // 在弹窗打开后渲染指标图：柱状=指标值，折线=同比增速（双轴）。
+    // 是否窄屏由图表容器实测宽度决定（弹窗宽度非固定），据此选图例位置、字号与边距。
     function renderIndicatorChart() {
       if (!chartRef.value || !chartIndicator.value || !analysis.value) return;
-      const it = chartIndicator.value;
-      const years = analysis.value.years || [];
-      const values = it.values || [];
-      const unit = it.unit || '';
-      const isYuan = unit === '元';
-
-      // 同比增速（%）：首年/上期缺失/上期为0或负 → 无法计算，置 null
-      const growth = values.map((v, i) => {
-        if (i === 0) return null;
-        const prev = values[i - 1];
-        if (v == null || prev == null || prev === 0 || prev < 0) return null;
-        return ((v - prev) / prev) * 100;
-      });
-
-      const fmtAxis = (v) => {
-        if (isYuan) {
-          const yi = v / 1e8;
-          if (Math.abs(yi) >= 1) return yi.toFixed(1) + '亿';
-          return (v / 1e4).toFixed(0) + '万';
-        }
-        return v;
-      };
-      const fmtVal = (v) => {
-        if (v == null) return '—';
-        if (isYuan) return fmtYi(v);
-        if (unit === '%') return v.toFixed(2) + '%';
-        if (unit === '倍') return v.toFixed(2) + ' 倍';
-        return v.toFixed(2);
-      };
-
       const el = chartRef.value;
+      const values = chartIndicator.value.values || [];
+      const growth = growthSeries(values);
+
       let chart = echarts.getInstanceByDom(el);
       if (chart) chart.dispose();
       chart = echarts.init(el);
-      chart.setOption({
-        tooltip: {
-          trigger: 'axis',
-          axisPointer: { type: 'cross' },
-          formatter: (params) => {
-            const idx = params[0].dataIndex;
-            let html = '<b>' + years[idx] + ' 年</b><br/>';
-            html += it.name + '：' + fmtVal(values[idx]) + '<br/>';
-            html += '同比增速：' + (growth[idx] == null ? '—' : growth[idx].toFixed(2) + '%');
-            return html;
-          },
-        },
-        legend: { data: [it.name, '同比增速'], top: 0, textStyle: { color: '#5d5151' } },
-        grid: { left: 64, right: 64, top: 40, bottom: 32 },
-        xAxis: { type: 'category', data: years.map(String), boundaryGap: true },
-        yAxis: [
-          {
-            type: 'value',
-            name: unit,
-            nameTextStyle: { color: '#998c8c' },
-            axisLabel: { formatter: fmtAxis },
-            splitLine: { lineStyle: { type: 'dashed' } },
-          },
-          {
-            type: 'value',
-            name: '增速 %',
-            nameTextStyle: { color: '#998c8c' },
-            axisLabel: { formatter: '{value}%' },
-            splitLine: { show: false },
-          },
-        ],
-        series: [
-          {
-            name: it.name,
-            type: 'bar',
-            data: values.map(v => v == null ? null : v),
-            itemStyle: { color: '#d64040', borderRadius: [3, 3, 0, 0] },
-            barMaxWidth: 44,
-          },
-          {
-            name: '同比增速',
-            type: 'line',
-            yAxisIndex: 1,
-            data: growth,
-            smooth: true,
-            symbol: 'circle',
-            symbolSize: 7,
-            lineStyle: { width: 2, color: '#d97706' },
-            itemStyle: { color: '#d97706' },
-            connectNulls: false,
-          },
-        ],
-      });
+      chartNarrow.value = el.clientWidth < CHART_NARROW_WIDTH;
+      chart.setOption(buildIndicatorChartOption(
+        chartIndicator.value, analysis.value.years || [], values, growth, chartNarrow.value));
+    }
+
+    // 窗口 resize / 手机横竖屏切换：防抖后重算布局；跨 480px 阈值时整体重设 option（图例位置/grid/字号需重算）。
+    function handleChartResize() {
+      if (!chartVisible.value || !chartRef.value) return;
+      clearTimeout(chartResizeTimer);
+      chartResizeTimer = setTimeout(() => {
+        if (!chartVisible.value || !chartRef.value) return;
+        const el = chartRef.value;
+        const chart = echarts.getInstanceByDom(el);
+        if (!chart) return;
+        const next = el.clientWidth < CHART_NARROW_WIDTH;
+        if (next !== chartNarrow.value) {
+          chartNarrow.value = next;
+          const values = (chartIndicator.value && chartIndicator.value.values) || [];
+          chart.setOption(buildIndicatorChartOption(
+            chartIndicator.value, (analysis.value && analysis.value.years) || [],
+            values, growthSeries(values), next));
+        }
+        chart.resize();
+      }, 120);
+    }
+
+    // 弹窗关闭时销毁图表实例，避免实例挂在已移除的 DOM 上。
+    function disposeIndicatorChart() {
+      if (!chartRef.value) return;
+      const chart = echarts.getInstanceByDom(chartRef.value);
+      if (chart) chart.dispose();
     }
 
     async function fetchValuation() {
@@ -447,14 +536,6 @@ const app = createApp({
       return v.toFixed(2) + (unit ? ' ' + unit : '');
     }
 
-    // R2 数值格式化：元 → 亿/万
-    function fmtYi(v) {
-      if (v == null || isNaN(v)) return '—';
-      const yi = v / 1e8;
-      if (Math.abs(yi) < 0.01) return (v / 1e4).toFixed(2) + '万';
-      return yi.toFixed(2) + '亿';
-    }
-
     // R3 分析指标数值格式化：按单位区分（元→亿/万、%→百分比）
     function fmtAnalysisVal(v, unit) {
       if (v == null || isNaN(v)) return '—';
@@ -562,6 +643,9 @@ const app = createApp({
 
     loadHistory();
 
+    // 单页应用，监听器与页面同生命周期，无需解绑（FR-5：窗口 resize / 横竖屏切换重排）。
+    window.addEventListener('resize', handleChartResize);
+
     return {
       code, loading, error, data, fetchData,
       financials, activeTab, startYear, endYear, yearOptions, finLoading,
@@ -570,7 +654,7 @@ const app = createApp({
       analysis, analysisLoading, analysisError, analysisActive, fmtAnalysisVal, indRowClass,
       tabTouchStart, tabTouchEnd,
       analysisStartYear, analysisEndYear, changeAnalysisRange,
-      chartVisible, chartIndicator, chartRef, showIndicatorChart, renderIndicatorChart,
+      chartVisible, chartIndicator, chartRef, chartNarrow, showIndicatorChart, renderIndicatorChart, disposeIndicatorChart,
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
       valFCFModes, valFCFMode, valFCFYears, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
@@ -772,8 +856,8 @@ const app = createApp({
                   </el-tab-pane>
                 </el-tabs>
               </div>
-              <el-dialog v-model="chartVisible" :title="chartIndicator ? chartIndicator.name : ''" width="min(680px, 92vw)" destroy-on-close @opened="renderIndicatorChart">
-                <div ref="chartRef" style="width:100%;height:380px"></div>
+              <el-dialog v-model="chartVisible" :title="chartIndicator ? chartIndicator.name : ''" width="min(680px, 92vw)" destroy-on-close @opened="renderIndicatorChart" @close="disposeIndicatorChart">
+                <div ref="chartRef" class="chart-box"></div>
               </el-dialog>
             </div>
           </section>
@@ -985,8 +1069,12 @@ const app = createApp({
                     <span class="ai-model">{{ aiResult.valuation.model_name }}</span>
                     <span class="ai-v">折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%</span>
                     <span v-for="p in aiResult.valuation.params" :key="p.key" class="ai-v">{{ p.label }} {{ fmtNum(p.value) }}</span>
+                    <span v-if="aiResult.valuation.base_growth != null" class="ai-v">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%</span>
                     <el-button size="small" type="primary" plain @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
                   </div>
+                  <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
+                  <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动剧烈：高增长期增长率已按基准增速的 50% 取值。</p>
+                  <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" />
                   <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
                 </div>
                 <div v-if="aiResult.usage" class="ai-usage">本次分析消耗约 {{ aiResult.usage.total_tokens }} tokens（输入 {{ aiResult.usage.prompt_tokens }} / 输出 {{ aiResult.usage.completion_tokens }}）</div>

@@ -498,6 +498,10 @@ td.num, .val, .yoy {
 .ai-model { font-weight: 700; color: var(--brand); font-size: 14px; }
 .ai-usage { margin-top: 16px; color: #c0c4cc; font-size: 12px; }
 
+/* 指标趋势图容器：桌面 380px，移动端见下方媒体查询（FR-4）。
+   高度交给 CSS，横竖屏切换时浏览器自动改高，ECharts 靠 resize() 重新测量。 */
+.chart-box { width: 100%; height: 380px; }
+
 /* ===================== 移动端 ===================== */
 
 @media (max-width: 768px) {
@@ -544,6 +548,10 @@ td.num, .val, .yoy {
     max-width: none; overflow: visible; text-overflow: clip;
     white-space: normal; overflow-wrap: break-word;
   }
+
+  /* 指标趋势图：高度 380 → 320（FR-4），并在 320px 视口收紧弹窗内边距给图表留宽度 */
+  .chart-box { height: 320px; }
+  .el-dialog { --el-dialog-padding-primary: 12px; }
 }
 
 /* 无障碍：键盘焦点可见 */
