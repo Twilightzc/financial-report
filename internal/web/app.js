@@ -135,6 +135,59 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
   };
 }
 
+// AI 雷达图：容器可用宽度窄于此值时用移动端规格（收窄 radius、降字号）。
+// 与指标趋势图的 CHART_NARROW_WIDTH 分开设常量：两个图表的尺寸特征不同（雷达图半径由宽度主导），
+// 且雷达图容器在 ≤768px 视口下仍可能宽达 710px，按视口判断会把宽容器一并降规格。
+const RADAR_NARROW_WIDTH = 420;
+const RADAR_NAME_MAX = 4; // 轴名单行最多字数，超出按语义边界折两行（FR-10）
+const RADAR_NAME_SUFFIXES = ['能力', '效率', '水平', '状况', '质量', '结构', '趋势'];
+
+// 轴名折行：优先在语义后缀前断开（「现金获取能力」→「现金获取」+「能力」），
+// 保证两行均 ≥2 字、不出现单字孤立行；无后缀可依时从中点折行（向左取整）。
+// 规则只看字数与后缀词、不含任何维度名常量，维度名扩展时自适应（FR-11 异常）。
+function radarAxisName(name) {
+  const n = String(name == null ? '' : name).trim();
+  if (n.length <= RADAR_NAME_MAX) return n;
+  for (const suf of RADAR_NAME_SUFFIXES) {
+    if (n.length > suf.length + 1 && n.endsWith(suf)) {
+      const head = n.slice(0, n.length - suf.length);
+      if (head.length >= 2) return head + '\n' + suf;
+    }
+  }
+  const cut = Math.max(2, Math.floor(n.length / 2));
+  return n.slice(0, cut) + '\n' + n.slice(cut);
+}
+
+// 构造五维雷达图 option。narrow 为移动端规格（radius 60%、轴名 12px）。
+// 折行只放在 axisName.formatter：indicator[].name 保留原文，避免 \n 污染 tooltip 渲染。
+function buildRadarOption(scores, narrow) {
+  return {
+    tooltip: {},
+    radar: {
+      indicator: scores.map(s => ({ name: s.dimension, max: 100 })),
+      center: ['50%', '52%'],
+      radius: narrow ? '60%' : '66%',
+      splitArea: { areaStyle: { color: ['rgba(64,158,255,0.03)', 'rgba(64,158,255,0.06)'] } },
+      axisName: {
+        formatter: radarAxisName,
+        color: '#606266',
+        fontSize: narrow ? 12 : 13,
+      },
+    },
+    series: [{
+      type: 'radar',
+      data: [{
+        value: scores.map(s => s.score),
+        name: '财务评分',
+        symbolSize: 5,
+        lineStyle: { color: '#d64040', width: 2 },
+        itemStyle: { color: '#d64040' },
+        areaStyle: { color: 'rgba(64,158,255,0.25)' },
+      }],
+    }],
+  };
+}
+
 const app = createApp({
   setup() {
     const code = ref('');
@@ -163,6 +216,8 @@ const app = createApp({
     const chartRef = ref(null);
     const chartNarrow = ref(false); // 当前图表是否处于窄屏布局（宽度 < 480px）
     let chartResizeTimer = null;
+    const radarNarrow = ref(false); // 雷达图是否处于移动端规格（容器宽 < 420px）
+    let radarResizeTimer = null;
 
     // R4 公司估值状态
     const valModels = [
@@ -456,34 +511,33 @@ const app = createApp({
     }
 
     // 绘制财务指标五维雷达图（维度 × 百分制评分）。
+    // 窄屏判据取容器实测宽度（卡片内边距决定，非视口推断），跨阈值时整体重设 option。
     function renderRadar() {
       if (!aiRadarRef.value || !aiResult.value) return;
-      const scores = aiResult.value.scores || [];
       const el = aiRadarRef.value;
+      radarNarrow.value = el.clientWidth < RADAR_NARROW_WIDTH;
       let chart = echarts.getInstanceByDom(el);
       if (chart) chart.dispose();
       chart = echarts.init(el);
-      chart.setOption({
-        tooltip: {},
-        radar: {
-          indicator: scores.map(s => ({ name: s.dimension, max: 100 })),
-          center: ['50%', '52%'],
-          radius: '66%',
-          splitArea: { areaStyle: { color: ['rgba(64,158,255,0.03)', 'rgba(64,158,255,0.06)'] } },
-          axisName: { color: '#606266', fontSize: 13 },
-        },
-        series: [{
-          type: 'radar',
-          data: [{
-            value: scores.map(s => s.score),
-            name: '财务评分',
-            symbolSize: 5,
-            lineStyle: { color: '#d64040', width: 2 },
-            itemStyle: { color: '#d64040' },
-            areaStyle: { color: 'rgba(64,158,255,0.25)' },
-          }],
-        }],
-      });
+      chart.setOption(buildRadarOption(aiResult.value.scores || [], radarNarrow.value));
+    }
+
+    // 窗口 resize / 手机横竖屏切换：防抖后跨阈值重设 option，并 resize() 重新测量容器高度。
+    function handleRadarResize() {
+      if (!aiResult.value || !aiRadarRef.value) return;
+      clearTimeout(radarResizeTimer);
+      radarResizeTimer = setTimeout(() => {
+        if (!aiResult.value || !aiRadarRef.value) return;
+        const el = aiRadarRef.value;
+        const chart = echarts.getInstanceByDom(el);
+        if (!chart) return;
+        const next = el.clientWidth < RADAR_NARROW_WIDTH;
+        if (next !== radarNarrow.value) {
+          radarNarrow.value = next;
+          chart.setOption(buildRadarOption(aiResult.value.scores || [], next));
+        }
+        chart.resize(); // 容器高度随 CSS 断点变化后重新测量
+      }, 120);
     }
 
     // 按评分档位取进度条颜色。
@@ -498,6 +552,13 @@ const app = createApp({
     function fmtNum(v) {
       if (v == null || isNaN(v)) return '';
       return Number.isInteger(v) ? String(v) : v.toFixed(2);
+    }
+
+    // FR-7/FR-8：研发调整开关单向联动 —— 推荐为 true 时打开；
+    // false / 字段缺失时保持用户当前选择（不主动关闭）。
+    // 用 === true 严格判断：旧响应 / 缓存无该字段时为 undefined → 保持现状；字符串脏数据也不会误开。
+    function resolveAdjustRD(current, recommended) {
+      return recommended === true ? true : current;
     }
 
     // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
@@ -516,6 +577,8 @@ const app = createApp({
       if (get('g2') != null) valG2.value = get('g2');
       if (get('n2') != null) valN2.value = Math.round(get('n2'));
       if (get('g3') != null) valG3.value = get('g3');
+      // ref 写入同步生效，紧随其后的 fetchValuation() 读到的已是新值，故开关与请求参数一致。
+      valAdjustRD.value = resolveAdjustRD(valAdjustRD.value, v.adjust_rd);
       fetchValuation();
       ElementPlus.ElMessage.success('已套用 AI 推荐的估值参数并计算');
     }
@@ -645,6 +708,7 @@ const app = createApp({
 
     // 单页应用，监听器与页面同生命周期，无需解绑（FR-5：窗口 resize / 横竖屏切换重排）。
     window.addEventListener('resize', handleChartResize);
+    window.addEventListener('resize', handleRadarResize);
 
     return {
       code, loading, error, data, fetchData,
@@ -659,6 +723,7 @@ const app = createApp({
       valFCFModes, valFCFMode, valFCFYears, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
+      radarAxisName, buildRadarOption, resolveAdjustRD,
       scoreColor, fmtNum, applyAIValuation,
       history, querySearch, handleSelect, clearHistory,
     };
@@ -877,30 +942,30 @@ const app = createApp({
                     </div>
                     <div class="val-field">
                       <span class="val-label">折现率</span>
-                      <el-input-number v-model="valDiscount" :min="0.1" :max="100" :step="0.5" :precision="1" style="width:110px" />
+                      <el-input-number v-model="valDiscount" :min="0.1" :max="100" :step="0.5" :precision="1" />
                       <span class="val-unit">%</span>
                     </div>
 
                     <div class="val-field" v-if="valModel === 'perpetual'">
                       <span class="val-label">永续增长率</span>
-                      <el-input-number v-model="valG" :min="-50" :max="50" :step="0.5" :precision="1" style="width:110px" />
+                      <el-input-number v-model="valG" :min="-50" :max="50" :step="0.5" :precision="1" />
                       <span class="val-unit">%</span>
                     </div>
 
                     <template v-if="valModel === 'two_stage'">
                       <div class="val-field">
                         <span class="val-label">高增长期增长率</span>
-                        <el-input-number v-model="valG1" :min="-50" :max="100" :step="0.5" :precision="1" style="width:110px" />
+                        <el-input-number v-model="valG1" :min="-50" :max="100" :step="0.5" :precision="1" />
                         <span class="val-unit">%</span>
                       </div>
                       <div class="val-field">
                         <span class="val-label">高增长期年数</span>
-                        <el-input-number v-model="valN1" :min="1" :max="50" :step="1" style="width:90px" />
+                        <el-input-number v-model="valN1" :min="1" :max="50" :step="1" />
                         <span class="val-unit">年</span>
                       </div>
                       <div class="val-field">
                         <span class="val-label">永续增长率</span>
-                        <el-input-number v-model="valG2" :min="-50" :max="50" :step="0.5" :precision="1" style="width:110px" />
+                        <el-input-number v-model="valG2" :min="-50" :max="50" :step="0.5" :precision="1" />
                         <span class="val-unit">%</span>
                       </div>
                     </template>
@@ -908,27 +973,27 @@ const app = createApp({
                     <template v-if="valModel === 'three_stage'">
                       <div class="val-field">
                         <span class="val-label">第一阶段增长率</span>
-                        <el-input-number v-model="valG1" :min="-50" :max="100" :step="0.5" :precision="1" style="width:110px" />
+                        <el-input-number v-model="valG1" :min="-50" :max="100" :step="0.5" :precision="1" />
                         <span class="val-unit">%</span>
                       </div>
                       <div class="val-field">
                         <span class="val-label">第一阶段年数</span>
-                        <el-input-number v-model="valN1" :min="1" :max="50" :step="1" style="width:90px" />
+                        <el-input-number v-model="valN1" :min="1" :max="50" :step="1" />
                         <span class="val-unit">年</span>
                       </div>
                       <div class="val-field">
                         <span class="val-label">第二阶段增长率</span>
-                        <el-input-number v-model="valG2" :min="-50" :max="100" :step="0.5" :precision="1" style="width:110px" />
+                        <el-input-number v-model="valG2" :min="-50" :max="100" :step="0.5" :precision="1" />
                         <span class="val-unit">%</span>
                       </div>
                       <div class="val-field">
                         <span class="val-label">第二阶段年数</span>
-                        <el-input-number v-model="valN2" :min="1" :max="50" :step="1" style="width:90px" />
+                        <el-input-number v-model="valN2" :min="1" :max="50" :step="1" />
                         <span class="val-unit">年</span>
                       </div>
                       <div class="val-field">
                         <span class="val-label">永续增长率</span>
-                        <el-input-number v-model="valG3" :min="-50" :max="50" :step="0.5" :precision="1" style="width:110px" />
+                        <el-input-number v-model="valG3" :min="-50" :max="50" :step="0.5" :precision="1" />
                         <span class="val-unit">%</span>
                       </div>
                     </template>
@@ -947,7 +1012,7 @@ const app = createApp({
                     </div>
                     <div class="val-field" v-if="valFCFMode !== 'latest'">
                       <span class="val-label">选取年数</span>
-                      <el-input-number v-model="valFCFYears" :min="1" :max="10" :step="1" style="width:90px" />
+                      <el-input-number v-model="valFCFYears" :min="1" :max="10" :step="1" />
                       <span class="val-unit">年</span>
                     </div>
                     <div class="val-field">
@@ -1029,7 +1094,7 @@ const app = createApp({
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
               <template v-if="aiResult">
-                <div class="ai-radar"><div ref="aiRadarRef" style="width:100%;height:340px"></div></div>
+                <div class="ai-radar"><div ref="aiRadarRef" class="ai-radar-box"></div></div>
                 <div class="ai-scores">
                   <div v-for="s in aiResult.scores" :key="s.dimension" class="ai-score-row">
                     <span class="ai-score-name">{{ s.dimension }}</span>
@@ -1073,6 +1138,7 @@ const app = createApp({
                     <el-button size="small" type="primary" plain @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
                   </div>
                   <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
+                  <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，研发投入占比较高，建议开启研发调整（点「套用到估值」会自动打开该开关）。</p>
                   <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动剧烈：高增长期增长率已按基准增速的 50% 取值。</p>
                   <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" />
                   <p class="ai-text">{{ aiResult.valuation.rationale }}</p>

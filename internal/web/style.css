@@ -412,7 +412,12 @@ td.num, .val, .yoy {
 
 /* ===================== R4 估值 ===================== */
 
-.val-form { display: flex; flex-direction: column; gap: 20px; }
+.val-form {
+  /* 对齐锚点与统一宽度：label 定宽 + 数值输入框统一宽，保证取值完整可见且跨行列对齐（FR-1/FR-2/FR-3） */
+  --val-label-w: 92px;   /* label 定宽：最长 7 个汉字 ×13px = 91px ≤ 92px */
+  --val-input-w: 130px;  /* 数值输入框统一宽度：完整容纳「-50.0」与两位年数 */
+  display: flex; flex-direction: column; gap: 20px;
+}
 .val-block-title {
   font-size: 13px;
   font-weight: 600;
@@ -435,7 +440,20 @@ td.num, .val, .yoy {
   gap: 12px 28px;
 }
 .val-field { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.val-label { width: 92px; color: var(--ink-2); font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+.val-label { width: var(--val-label-w); color: var(--ink-2); font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+
+/* 所有数值输入框同宽（覆盖 Element Plus 默认 150px，替代模板内联宽度 FR-2）。
+   130px 取值按设计 12.7「需实测确认」的兜底顺序升级而来：element-plus@2.7.0 的
+   .el-input-number .el-input__wrapper 左右各 42px 内边距，120px 下文本区仅 36px < 40px 阈值，
+   最宽合法取值「100.0」会裁掉一位小数；130px 下文本区 46px，可完整显示。
+   28px = label→输入框 gap 8 + 输入框→单位 gap 8 + 单位最宽 12px；max-width 仅在容器窄于约 250px
+   时兜底，即 320px 视口（字段内容 250px ≤ 可用 262px）不触发，极窄屏优先「不横向溢出」（FR-1 边界 / FR-4）。 */
+.val-field .el-input-number {
+  width: var(--val-input-w);
+  max-width: calc(100% - var(--val-label-w) - 28px);
+}
+/* 下拉框宽度由模板内联给定（模型 160px / 基期现金流 150px），仅加同款兜底（label 92 + gap 8，无单位） */
+.val-field .el-select { max-width: calc(100% - var(--val-label-w) - 8px); }
 .val-desc { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
 .val-unit { color: var(--muted); font-size: 12px; }
 .val-actions { display: flex; align-items: center; }
@@ -456,6 +474,9 @@ td.num, .val, .yoy {
 .ai-mode-label { color: var(--ink-2); font-size: 13px; flex-shrink: 0; }
 
 .ai-radar { margin: 4px 0; }
+/* 雷达图容器：高度交给 CSS，横竖屏切换时浏览器自动改高，ECharts 靠 resize() 重新测量（FR-11）。
+   移动端加高为折行后的两行轴名留垂直空间。 */
+.ai-radar-box { width: 100%; height: 340px; }
 .ai-scores { display: flex; flex-direction: column; gap: 12px; margin: 12px 0 4px; }
 .ai-score-row { display: flex; align-items: center; gap: 12px; }
 .ai-score-name { width: 96px; color: var(--ink); font-size: 13px; flex-shrink: 0; }
@@ -551,6 +572,8 @@ td.num, .val, .yoy {
 
   /* 指标趋势图：高度 380 → 320（FR-4），并在 320px 视口收紧弹窗内边距给图表留宽度 */
   .chart-box { height: 320px; }
+  /* AI 雷达图：340 → 360，为折行后的两行轴名留垂直空间（FR-11） */
+  .ai-radar-box { height: 360px; }
   .el-dialog { --el-dialog-padding-primary: 12px; }
 }
 
