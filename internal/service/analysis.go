@@ -124,7 +124,9 @@ func ComputeAnalysis(balance, cashflow, income []model.ReportRow, dividends []mo
 		dimensions = append(dimensions, dim)
 	}
 
-	return model.FinancialAnalysis{Years: years, Dimensions: dimensions}
+	analysis := model.FinancialAnalysis{Years: years, Dimensions: dimensions}
+	applyTrendSignals(&analysis) // R9：回填方向属性与趋势信号（纯数值运算，不新增 IO）
+	return analysis
 }
 
 // dividendByYear 按除权除息日年份汇总母公司股东现金分红总额。

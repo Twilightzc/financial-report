@@ -9,6 +9,11 @@ type AnalysisIndicator struct {
 	Kind           string     `json:"kind,omitempty"`           // ""=普通 / "sub"=子项 / "subtotal"=小计 / "net"=净额
 	Interpretation string     `json:"interpretation,omitempty"` // 指标解读
 	Note           string     `json:"note,omitempty"`           // 异常标注（如极端值被截断/回落的提示）
+
+	// R9 趋势信号灯（见技术设计 13.5/13.6）。
+	// Direction 不设 omitempty：每个指标都必须带方向属性，缺字段会让「neutral」与「旧响应」不可区分。
+	Direction   string `json:"direction"`              // higher_better / lower_better / neutral
+	TrendSignal string `json:"trend_signal,omitempty"` // improving / worsening；无色（平稳/无信号/中性/维度非 done）时省略
 }
 
 // AnalysisSection 分析维度下的小节（如投资活动现金流入/流出、长期经营资产、并购活动等）。
