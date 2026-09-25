@@ -16,7 +16,7 @@ const (
 	dirNeutral      = "neutral"
 )
 
-// 趋势信号（FR-3）：向好 / 恶化 / 无色（空串）。
+// 趋势信号（FR-3）：向好 / 走弱 / 无色（空串）。
 const (
 	signalImproving = "improving"
 	signalWorsening = "worsening"

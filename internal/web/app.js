@@ -5,7 +5,7 @@ const { createApp, ref, computed, nextTick } = Vue;
 const CHART_NARROW_WIDTH = 480;
 
 // 语义色统一色值（FR-11）：与 style.css 的 --good / --bad 同值，改色只改此处（CSS 侧同步改令牌）。
-// good=向好/健康；goodMid/warn=AI 评分中间档（黄绿/琥珀）；bad=恶化/坏；neutral=图表中性灰；growth=增速折线琥珀。
+// good=向好/健康；goodMid/warn=AI 评分中间档（黄绿/琥珀）；bad=走弱/坏；neutral=图表中性灰；growth=增速折线琥珀。
 const PALETTE = {
   good: '#149a5e',
   goodMid: '#6aa84f',
@@ -20,7 +20,7 @@ const PALETTE = {
 // 单点可调（如 15/10），调整后仅改措辞、**不改任何颜色与信号**（AC-27）。
 const MILD_CHANGE_THRESHOLD = 20; // %
 
-// FR-10：指标趋势图柱色 —— 向好绿 / 恶化红 / 无信号或中性灰；负值无论信号一律红。
+// FR-10：指标趋势图柱色 —— 向好绿 / 走弱红 / 无信号或中性灰；负值无论信号一律红。
 function barColorOf(signal, value) {
   if (value != null && value < 0) return PALETTE.bad;
   if (signal === 'improving') return PALETTE.good;
@@ -105,7 +105,7 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
     name: seriesName,
     type: 'bar',
     data: values.map(v => v == null ? null : v),
-    // FR-10：柱色按该指标信号取值（向好绿/恶化红/无信号中性灰），负值恒红
+    // FR-10：柱色按该指标信号取值（向好绿/走弱红/无信号中性灰），负值恒红
     itemStyle: { color: (p) => barColorOf(it.trend_signal, p.value), borderRadius: [3, 3, 0, 0] },
     barMaxWidth: 44,
   }];
@@ -659,20 +659,20 @@ const app = createApp({
         ? `保持在 ${fmtAnalysisVal(s1, it.unit)}`                                          // R=0：避免「由 X 降至 X」
         : `由 ${fmtAnalysisVal(s1, it.unit)} ${sm > s1 ? '升至' : '降至'} ${fmtAnalysisVal(sm, it.unit)}`;
       const s = it.trend_signal;
-      // ③ 灰点（无信号）：温和陈述，禁用「向好/恶化/改善/走弱」评价词（FR-5）。
+      // ③ 灰点（无信号）：温和陈述，禁用「向好/走弱/改善」评价词（FR-5）。
       if (s !== 'improving' && s !== 'worsening') {
         // 方向 neutral（可算出 R）→ 用「无明确好坏方向」；方向有向且无信号 → 必为趋势平稳（|R| < 5%）。
         if (it.direction === 'neutral') return `近 ${span} 年${name}${vals}（${pct}），该指标无明确好坏方向`;
         return `近 ${span} 年${name}变化不大（${pct}），趋势平稳`;
       }
-      // ④ 绿点/红点：末词按**向好/恶化极性**取（FR-16 Q10.1），数值动向已由「升至/降至」表达。
+      // ④ 绿点/红点：末词按**向好/走弱极性**取（FR-16 Q10.1），数值动向已由「升至/降至」表达。
       const lead = (phrase && phrase !== it.name) ? phrase : ''; // 与指标名重复时省略短语
       const mild = Math.abs(rate) < MILD_CHANGE_THRESHOLD;
-      const concl = (s === 'improving') ? (mild ? '略有改善' : '向好') : (mild ? '略有走弱' : '恶化');
+      const concl = (s === 'improving') ? (mild ? '略有改善' : '向好') : (mild ? '略有走弱' : '走弱');
       return `近 ${span} 年${name}${vals}（${pct}），${lead}${concl}`;
     }
 
-    // ★决策更新 2（FR-4）：信号灯圆点类名——向好 improving / 恶化 worsening / 其余一律 neutral（灰）。
+    // ★决策更新 2（FR-4）：信号灯圆点类名——向好 improving / 走弱 worsening / 其余一律 neutral（灰）。
     // 三态全覆盖：任何指标都必须落到这三个类之一，故**不存在空类**（AC-24 每行恰一个圆点）。
     // trend_rate 守卫：后端不变式为「有信号 ⟺ trend_rate 非 nil」，故该守卫只对**旧响应/脏数据**生效，
     // 此时保守降级为灰，保证「圆点颜色」与「tooltip 文案（数据不足）」不会自相矛盾。
@@ -985,7 +985,7 @@ const app = createApp({
                                     <button class="chart-btn" title="查看趋势" @click="showIndicatorChart(it)">
                                       <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,12 6,7 9,9 14,3"></polyline></svg>
                                     </button>
-                                    <!-- ★R9 决策更新 2：趋势信号灯**三态全渲染**（向好绿 / 恶化红 / 其余灰），无 v-if（AC-24） -->
+                                    <!-- ★R9 决策更新 2：趋势信号灯**三态全渲染**（向好绿 / 走弱红 / 其余灰），无 v-if（AC-24） -->
                                     <el-tooltip :content="trendTip(it, analysis.years, s.title, dim.status)" placement="top" :trigger="['hover','focus']" popper-class="ind-tip">
                                       <span class="trend-dot" :class="trendDotClass(it)" tabindex="0" role="img" :aria-label="trendTip(it, analysis.years, s.title, dim.status)"></span>
                                     </el-tooltip>
@@ -1000,7 +1000,7 @@ const app = createApp({
                                 </td>
                                 <td v-for="(v, i) in it.values" :key="i" class="num">
                                   <div class="val">{{ fmtAnalysisVal(v, it.unit) }}</div>
-                                  <!-- 六维分析表：方向感知（绿=向好、红=恶化、中性/上年≤0 不着色） -->
+                                  <!-- 六维分析表：方向感知（绿=向好、红=走弱、中性/上年≤0 不着色） -->
                                   <div class="yoy" :class="yoyClassDir(it.values, i, it.direction)">{{ yoyText(it.values, i) }}</div>
                                 </td>
                               </tr>

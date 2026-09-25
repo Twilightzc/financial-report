@@ -98,7 +98,7 @@ func TestTrendDirectionHoles(t *testing.T) {
 	}
 }
 
-// TestTrendDirectionCrossZero 分母取 |s1|：跨零点得正号，负值区间继续恶化得负号。
+// TestTrendDirectionCrossZero 分母取 |s1|：跨零点得正号，负值区间继续走弱得负号。
 func TestTrendDirectionCrossZero(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -107,7 +107,7 @@ func TestTrendDirectionCrossZero(t *testing.T) {
 	}{
 		{"扭亏为盈（-2→3）", []*float64{fp(-2), fp(3)}, trendRising},
 		{"由盈转亏（2→-3）", []*float64{fp(2), fp(-3)}, trendFalling},
-		{"负值区间继续恶化（-2→-3）", []*float64{fp(-2), fp(-3)}, trendFalling},
+		{"负值区间继续走弱（-2→-3）", []*float64{fp(-2), fp(-3)}, trendFalling},
 		{"负值区间改善（-3→-2）", []*float64{fp(-3), fp(-2)}, trendRising},
 	}
 	for _, c := range cases {
@@ -382,7 +382,7 @@ func trendFixtureRows() (balance, cashflow, income []model.ReportRow) {
 }
 
 // TestApplyTrendSignalsBackfill 端到端回填：方向恒在、信号取值合法、恒空与中性指标无信号、
-// 并覆盖用户举例（资产周转率上升向好 / 存货周转天数上升恶化）。AC-1/AC-2/AC-4。
+// 并覆盖用户举例（资产周转率上升向好 / 存货周转天数上升走弱）。AC-1/AC-2/AC-4。
 func TestApplyTrendSignalsBackfill(t *testing.T) {
 	balance, cashflow, income := trendFixtureRows()
 	res := ComputeAnalysis(balance, cashflow, income, 2020, 2024)
@@ -469,7 +469,7 @@ func TestTrendSignalRangeRespected(t *testing.T) {
 	if full == nil || full.TrendSignal != signalImproving {
 		t.Fatalf("2020–2024 资产周转率 signal = %v，期望 improving", full)
 	}
-	// 2022→2024：0.30 → 0.118（-60.7%）→ 下降 → 恶化。窗口收窄后信号反转，证明信号随范围变化。
+	// 2022→2024：0.30 → 0.118（-60.7%）→ 下降 → 走弱。窗口收窄后信号反转，证明信号随范围变化。
 	short := findIndicator(dimByKey(t, ComputeAnalysis(balance, cashflow, income, 2022, 2024), "comprehensive"), "asset_turnover")
 	if short == nil || short.TrendSignal != signalWorsening {
 		t.Fatalf("2022–2024 资产周转率 signal = %v，期望 worsening", short)
