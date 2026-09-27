@@ -289,6 +289,40 @@ const app = createApp({
     const HISTORY_KEY = 'stockSearchHistory';
     const history = ref([]);
 
+    // 联想检索（FR-1~FR-9）：防抖交给 el-autocomplete 的 :debounce，searchSeq 兜住乱序返回
+    const SEARCH_DEBOUNCE_MS = 250; // NFR 推荐 200~300ms；不叠加自定义 setTimeout，避免变成 ~550ms
+    const SEARCH_EMPTY_TEXT = '未找到匹配的股票，请检查名称或 6 位代码'; // D6 空态文案
+    const MARKET_LABELS = { sh: '沪', sz: '深', bj: '京' };
+    let searchSeq = 0; // 过期响应丢弃（非响应式）
+    const searchHint = ref(''); // 无命中 / 服务不可用 的行内提示
+
+    // 输入归一化：去首尾与内部空白 + 大写（与后端 service.NormalizeQuery 同口径）
+    function normalizeQueryInput(s) {
+      return (s == null ? '' : String(s)).replace(/\s+/g, '').toUpperCase();
+    }
+    // 由 6 位代码推断市场（与后端 quotePrefix 同口径；历史记录缺 market 时兜底）
+    function guessMarket(code) {
+      const c = String(code || '');
+      if (/^(920|43|83|87|88)/.test(c)) return 'bj';
+      if (/^(6|9)/.test(c)) return 'sh';
+      return 'sz';
+    }
+    function marketLabelOf(m) { return MARKET_LABELS[m] || ''; }
+
+    // 唯一的前端取数入口：任何失败（HTTP/HTML/业务码）都静默降级为 ok:false，不抛给调用方（FR-4 边界）
+    async function fetchSearch(q) {
+      try {
+        const res = await fetch(`/api/stock/search?q=${encodeURIComponent(q)}`);
+        const json = await readJSON(res);
+        if (json.code !== 0 || !Array.isArray(json.data)) {
+          return { ok: false, items: [], message: json.message || '搜索服务暂不可用' };
+        }
+        return { ok: true, items: json.data, message: '' };
+      } catch (e) {
+        return { ok: false, items: [], message: '搜索服务暂不可用' };
+      }
+    }
+
     const currentYear = new Date().getFullYear();
     const yearOptions = computed(() => {
       const ys = [];
@@ -480,12 +514,43 @@ const app = createApp({
       }
     }
 
-    function doSearch() {
-      // 切换股票时清空上一支股票的 AI 分析结果，避免残留
-      aiResult.value = null;
-      aiError.value = '';
-      aiLoading.value = false;
-      fetchData(); fetchFinancials(); fetchAnalysis(); fetchValuation();
+    // 查询入口（按钮 / 回车 / 选候选）。
+    // 6 位代码直通（行为不变）；其它输入先经检索解析出 6 位代码再查询（FR-5/FR-7）——
+    // 无命中与服务不可用时都不发起 /api/stock/:code 请求，避免露出后端的原始参数报错。
+    let searchBusy = false; // 回车可能同时触发 @select 与 @keyup.enter，避免并发两轮请求
+    async function doSearch() {
+      const raw = (code.value || '').trim();
+      if (!raw) return; // 空输入不请求、不报错（FR-5 异常）
+      if (searchBusy) return;
+      searchBusy = true;
+      try {
+        searchHint.value = '';
+        const norm = normalizeQueryInput(raw);
+        if (!/^\d{6}$/.test(norm)) {
+          const r = await fetchSearch(raw);
+          if (!r.ok) {
+            searchHint.value = '搜索服务暂不可用，请直接输入 6 位股票代码';
+            return;
+          }
+          if (!r.items.length) {
+            searchHint.value = SEARCH_EMPTY_TEXT;
+            return;
+          }
+          const first = r.items[0]; // D3：多命中取排序第 1 条
+          code.value = first.code;  // FR-7：最终必须用 6 位代码
+          addHistory(first.code, first.name, first.market);
+        } else {
+          // FR-1「代码匹配忽略输入中的空格」：回写归一化值，使判定口径与后续拼 URL 的取值一致
+          code.value = norm;
+        }
+        // 切换股票时清空上一支股票的 AI 分析结果，避免残留
+        aiResult.value = null;
+        aiError.value = '';
+        aiLoading.value = false;
+        fetchData(); fetchFinancials(); fetchAnalysis(); fetchValuation();
+      } finally {
+        searchBusy = false;
+      }
     }
 
     // 空态示例代码点击：填入代码并直接查询。
@@ -725,8 +790,11 @@ const app = createApp({
 
     function loadHistory() {
       try {
-        const raw = localStorage.getItem(HISTORY_KEY);
-        history.value = raw ? JSON.parse(raw) : [];
+        const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+        // 旧数据只有 {code,name}：补 market，保证展示有市场徽标（FR-6/FR-8）
+        history.value = (Array.isArray(raw) ? raw : []).map(h => ({
+          code: h.code, name: h.name || '', market: h.market || guessMarket(h.code),
+        }));
       } catch (e) {
         history.value = [];
       }
@@ -734,11 +802,11 @@ const app = createApp({
     function saveHistory() {
       try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history.value)); } catch (e) {}
     }
-    function addHistory(cd, name) {
+    function addHistory(cd, name, market) {
       if (!cd) return;
       const list = history.value.filter(h => h.code !== cd);
-      list.unshift({ code: cd, name: name || '' });
-      if (list.length > MAX_HISTORY) list.length = MAX_HISTORY; // 超限丢弃最早
+      list.unshift({ code: cd, name: name || '', market: market || guessMarket(cd) });
+      if (list.length > MAX_HISTORY) list.length = MAX_HISTORY; // 超限丢弃已存的：合并后仍 ≤10
       history.value = list;
       saveHistory();
     }
@@ -746,14 +814,36 @@ const app = createApp({
       history.value = [];
       saveHistory();
     }
+
+    // 联想回调：空输入只看历史；非空为「历史命中 ∪ 服务端候选」，历史优先、按代码去重、合并后 ≤10。
     function querySearch(query, cb) {
-      const q = (query || '').trim();
-      cb(history.value
-        .filter(h => !q || h.code.includes(q) || (h.name && h.name.includes(q)))
-        .map(h => ({ value: h.code, name: h.name })));
+      const raw = (query || '').trim();
+      const q = normalizeQueryInput(raw);
+      const hist = history.value
+        .filter(h => !q || h.code.includes(q) || normalizeQueryInput(h.name).includes(q))
+        .map(h => ({ value: h.code, code: h.code, name: h.name,
+                     market: h.market, marketLabel: marketLabelOf(h.market), kind: 'hist' }));
+      if (!q) { cb(hist); return; }
+
+      const seq = ++searchSeq;
+      fetchSearch(raw).then(r => {
+        if (seq !== searchSeq) return; // 丢弃过期响应（FR-4）
+        if (!r.ok) { cb(hist); return; } // 静默降级：只给历史命中（FR-4 边界）
+        const seen = new Set(), items = [];
+        const push = (it) => { if (it.code && !seen.has(it.code)) { seen.add(it.code); items.push(it); } };
+        hist.forEach(push); // FR-6：历史命中优先
+        r.items.forEach(c => push({ value: c.code, code: c.code, name: c.name,
+                                    market: c.market, marketLabel: c.marketLabel, kind: 'result' }));
+        const list = items.slice(0, MAX_HISTORY);
+        // 空态用哨兵行：value 取原始输入（EP 选中时会先回写 modelValue），点它完全无副作用
+        if (!list.length) list.push({ value: raw, kind: 'empty', text: SEARCH_EMPTY_TEXT });
+        cb(list);
+      });
     }
     function handleSelect(item) {
-      code.value = item.value;
+      if (!item || item.kind === 'empty' || !item.code) return; // 空态行不得触发查询、不得清空输入
+      code.value = item.code;
+      addHistory(item.code, item.name, item.market);
       doSearch();
     }
 
@@ -802,6 +892,7 @@ const app = createApp({
       radarAxisName, buildRadarOption, resolveAdjustRD,
       scoreColor, fmtNum, applyAIValuation,
       history, querySearch, handleSelect, clearHistory,
+      searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
     };
   },
   template: `
@@ -816,16 +907,20 @@ const app = createApp({
             <el-autocomplete
               v-model="code"
               :fetch-suggestions="querySearch"
-              placeholder="输入A股代码，如 600519"
+              :debounce="SEARCH_DEBOUNCE_MS"
+              placeholder="输入代码/名称/首字母，如 600519 / 茅台 / gzmt"
               clearable
               :trigger-on-focus="true"
+              popper-class="stock-search-popper"
               @select="handleSelect"
               @keyup.enter="doSearch"
             >
               <template #default="{ item }">
-                <div class="hist-item">
-                  <span class="hist-code">{{ item.value }}</span>
+                <div v-if="item.kind === 'empty'" class="hist-empty">{{ item.text }}</div>
+                <div v-else class="hist-item">
+                  <span class="hist-code">{{ item.code }}</span>
                   <span class="hist-name">{{ item.name }}</span>
+                  <span class="hist-badge">{{ item.marketLabel }}</span>
                 </div>
               </template>
             </el-autocomplete>
@@ -843,6 +938,7 @@ const app = createApp({
         <div v-if="error" class="topbar-alert">
           <el-alert :title="error" type="error" :closable="false" />
         </div>
+        <div v-if="searchHint" class="topbar-hint">{{ searchHint }}</div>
       </header>
 
       <main class="main">

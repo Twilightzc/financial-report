@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -74,6 +75,28 @@ func (h *Handler) GetIndicators(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": overview})
+}
+
+// maxSearchQueryRunes 搜索关键字最大长度，防御超长 q 打上游（非需求约定，可调）。
+const maxSearchQueryRunes = 32
+
+// GetSearch 按关键字（代码/名称/首字母）检索 A 股候选，供前端联想与「名称→代码」解析。
+// data 为候选数组（≤10），未命中返回空数组；上游失败返回 code:1 供前端区分「无命中」与「服务不可用」。
+// HTTP 状态码恒 200（与既有业务失败写法一致，本接口无强制参数校验）。
+func (h *Handler) GetSearch(c *gin.Context) {
+	q := service.NormalizeQuery(c.Query("q"))
+	if q == "" || utf8.RuneCountInString(q) > maxSearchQueryRunes {
+		// 空/超长：静默返回空列表，不打上游
+		c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": []model.StockCandidate{}})
+		return
+	}
+	raw, err := h.c.SearchStocks(q)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 1, "message": "搜索服务暂不可用", "data": nil})
+		return
+	}
+	items := service.RankCandidates(q, raw, service.SearchMaxResults)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": items})
 }
 
 // GetFinancials 返回三张表全科目（范围内年报），供前端 Tab 展示与同比计算

@@ -12,6 +12,7 @@ func NewRouter(h *Handler) *gin.Engine {
 	r.GET("/api/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok"})
 	})
+	r.GET("/api/stock/search", h.GetSearch)
 	r.GET("/api/stock/:code/indicators", h.GetIndicators)
 	r.GET("/api/stock/:code/financials", h.GetFinancials)
 	r.GET("/api/stock/:code/analysis", h.GetAnalysis)

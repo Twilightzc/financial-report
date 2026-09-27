@@ -29,12 +29,17 @@ var ErrEmptyData = errors.New("东财接口返回数据为空")
 // Client 东方财富免费数据接口客户端。
 // 字段名与 AkShare 底层同源，若接口变动，仅需调整本文件中的字段映射。
 type Client struct {
-	hc     *http.Client // 常规接口（行情/摘要报表），15s 超时
-	hcSlow *http.Client // 全量报表接口（F10，冷启动慢），60s 超时
+	hc       *http.Client // 常规接口（行情/摘要报表），15s 超时
+	hcSlow   *http.Client // 全量报表接口（F10，冷启动慢），60s 超时
+	hcSearch *http.Client // 搜索联想接口，2s 超时（上游实测 0.21s，留约 10 倍余量）
 
 	// 报表缓存：财务报告按季度更新，短 TTL 内复用可省去「分析→AI 分析」的重复拉取（F10 冷启动 ~12s）。
 	mu    sync.Mutex
 	cache map[string]reportCacheEntry
+
+	// 搜索候选缓存：吸收「多用户重复首字」与快速回删重输，独立锁避免与报表缓存相互阻塞。
+	searchMu    sync.Mutex
+	searchCache map[string]searchCacheEntry
 }
 
 // reportCacheEntry 报表缓存项。
@@ -48,9 +53,11 @@ const reportCacheTTL = 15 * time.Minute
 
 func New() *Client {
 	return &Client{
-		hc:     &http.Client{Timeout: 15 * time.Second},
-		hcSlow: &http.Client{Timeout: 60 * time.Second},
-		cache:  make(map[string]reportCacheEntry),
+		hc:          &http.Client{Timeout: 15 * time.Second},
+		hcSlow:      &http.Client{Timeout: 60 * time.Second},
+		hcSearch:    &http.Client{Timeout: 2 * time.Second},
+		cache:       make(map[string]reportCacheEntry),
+		searchCache: make(map[string]searchCacheEntry),
 	}
 }
 
@@ -76,12 +83,27 @@ func (c *Client) cacheSet(key string, rows []map[string]any) {
 	c.cache[key] = reportCacheEntry{rows: rows, expires: time.Now().Add(reportCacheTTL)}
 }
 
-// quotePrefix 根据 6 位代码推断交易所前缀：6/9 开头→上证(sh)，其余→深证(sz)
+// quotePrefix 根据 6 位代码推断腾讯行情接口的交易所前缀。
+//
+//	sh：沪市主板/科创板（6 开头）、沪B（9 开头，含 900xxx）
+//	sz：深市主板/创业板（0/3 开头）、深B（200xxx）
+//	bj：北交所（920xxx 新码段，以及 43/83/87/88 开头的存量码段兜底）
+//
+// 注意：920xxx 与沪B 的 900xxx 同以 9 开头，故必须**先判 920** 再判 9。
+// 腾讯行情已支持 bj 前缀（实测 bj920185 可用、sz920185/sh920185 无效）。
 func quotePrefix(code string) string {
-	if strings.HasPrefix(code, "6") || strings.HasPrefix(code, "9") {
+	switch {
+	case strings.HasPrefix(code, "920"),
+		strings.HasPrefix(code, "43"),
+		strings.HasPrefix(code, "83"),
+		strings.HasPrefix(code, "87"),
+		strings.HasPrefix(code, "88"):
+		return "bj"
+	case strings.HasPrefix(code, "6"), strings.HasPrefix(code, "9"):
 		return "sh"
+	default:
+		return "sz"
 	}
-	return "sz"
 }
 
 func (c *Client) get(hc *http.Client, rawURL string) ([]byte, error) {

@@ -129,9 +129,22 @@ td.num, .val, .yoy {
 .hist-item { display: flex; align-items: center; gap: 8px; }
 .hist-code { font-weight: 600; color: var(--ink); }
 .hist-name { color: var(--muted); font-size: 12px; }
+/* 候选行的市场徽标（FR-8）：推到行尾，窄屏下由名称先省略、代码与徽标保持完整 */
+.hist-badge {
+  margin-left: auto; flex: 0 0 auto;
+  font-size: 11px; line-height: 1; padding: 3px 5px;
+  border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
+}
+/* 联想无命中时的下拉空态行（D6） */
+.hist-empty { color: var(--muted); font-size: 13px; padding: 2px 0; }
 
 .topbar-alert { max-width: 1120px; margin: 0 auto; padding: 0 20px 12px; }
 .topbar-alert .el-alert { margin: 0; }
+/* 行内提示（无命中 / 搜索服务不可用），与 topbar-alert 同级 */
+.topbar-hint { max-width: 1120px; margin: 0 auto; padding: 0 20px 12px; color: var(--muted); font-size: 13px; }
+
+/* 联想下拉宽度不超视口（FR-9）：popper 默认挂 body，靠 popper-class 约束 */
+.stock-search-popper { max-width: calc(100vw - 24px); }
 
 /* ===================== 主体 ===================== */
 
@@ -556,6 +569,13 @@ td.num, .val, .yoy {
   .main { padding: 12px; gap: 12px; }
   .topbar-inner { padding: 10px 12px; gap: 10px; }
   .searchbar { flex-basis: 100%; order: 3; }
+
+  /* 联想下拉（FR-9）：约束宽度、保证触控目标高度，320px 下代码与徽标不截断 */
+  .stock-search-popper { max-width: calc(100vw - 16px); }
+  .stock-search-popper .hist-item { min-height: 34px; }
+  .stock-search-popper .hist-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stock-search-popper .hist-code,
+  .stock-search-popper .hist-badge { flex: 0 0 auto; }
 
   .card-head { padding: 14px 16px; }
   .card-body { padding: 16px; }
