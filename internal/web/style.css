@@ -456,6 +456,7 @@ td.num, .val, .yoy {
   /* 对齐锚点与统一宽度：label 定宽 + 数值输入框统一宽，保证取值完整可见且跨行列对齐（FR-1/FR-2/FR-3） */
   --val-label-w: 92px;   /* label 定宽：最长 7 个汉字 ×13px = 91px ≤ 92px */
   --val-input-w: 130px;  /* 数值输入框统一宽度：完整容纳「-50.0」与两位年数 */
+  --val-unit-w: 72px;    /* R12 自定义基期现金流的单位下拉列宽（千/万/亿/元） */
   display: flex; flex-direction: column; gap: 20px;
 }
 .val-block-title {
@@ -494,6 +495,13 @@ td.num, .val, .yoy {
 }
 /* 下拉框宽度由模板内联给定（模型 160px / 基期现金流 150px），仅加同款兜底（label 92 + gap 8，无单位） */
 .val-field .el-select { max-width: calc(100% - var(--val-label-w) - 8px); }
+/* R12 自定义行：数值框复用 --val-input-w 保持对齐，单位下拉用固定列宽紧随其后（覆盖上面的 max-width 兜底） */
+.val-field-custom .el-select { width: var(--val-unit-w); max-width: none; flex: 0 0 auto; }
+/* R12 列宽放不下「label 92 + 数值框 + 单位 72（共 310px）」时换行（单位下拉移至第二行）。
+   网格 auto-fill 在 856~1065px 视口下仅 3 列、列宽 240~310px，会触发此规则；
+   数值框保持同宽公式 min(130px, 列宽−label−28)（flex 不收缩，用上面的 max-width 兜底）→ 与其它行跨列对齐、绝不横向溢出（FR-8）。 */
+.val-field-custom { flex-wrap: wrap; row-gap: 8px; }
+.val-field-custom .el-input-number { flex: 0 0 auto; }
 .val-desc { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
 .val-unit { color: var(--muted); font-size: 12px; }
 .val-actions { display: flex; align-items: center; }
@@ -593,6 +601,7 @@ td.num, .val, .yoy {
   .year-filter .el-select { flex: 1 1 0; }
 
   .val-fields { grid-template-columns: 1fr; }
+  /* R12 自定义行的换行规则已上提为全局（见 .val-field-custom），此处不再重复覆盖。 */
 
   .ai-score-row { flex-wrap: wrap; gap: 4px 10px; }
   .ai-score-name { width: auto; }

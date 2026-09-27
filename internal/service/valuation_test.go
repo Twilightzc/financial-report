@@ -2,6 +2,7 @@ package service
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"financial-report/internal/model"
@@ -275,48 +276,174 @@ func TestValuationLongEquityNote(t *testing.T) {
 	}
 }
 
-// TestSelectBaseFCF 基期自由现金流选取：最近一年 / 平均值 / 中位数。
+// TestSelectBaseFCF 基期自由现金流选取：最近一年 / 平均值 / 中位数 / 自定义。
 func TestSelectBaseFCF(t *testing.T) {
 	fcf := map[int]float64{2021: 100, 2022: 200, 2023: 300, 2024: 400}
 	years := []int{2021, 2022, 2023, 2024}
 
-	v, name, used, err := selectBaseFCF(fcf, years, "latest", 0)
+	v, name, used, err := selectBaseFCF(fcf, years, "latest", 0, 0)
 	if err != nil || v != 400 || name != "最近一年" || len(used) != 1 || used[0] != 2024 {
 		t.Errorf("latest: v=%v name=%v used=%v err=%v", v, name, used, err)
 	}
-	if v, _, used, _ = selectBaseFCF(fcf, years, "average", 3); !approx(v, 300) || len(used) != 3 {
+	if v, _, used, _ = selectBaseFCF(fcf, years, "average", 3, 0); !approx(v, 300) || len(used) != 3 {
 		t.Errorf("average3: v=%v used=%v，期望 300 / 3年", v, used) // (200+300+400)/3
 	}
-	if v, _, _, _ = selectBaseFCF(fcf, years, "median", 3); !approx(v, 300) {
+	if v, _, _, _ = selectBaseFCF(fcf, years, "median", 3, 0); !approx(v, 300) {
 		t.Errorf("median3: v=%v，期望 300", v)
 	}
-	if v, _, _, _ = selectBaseFCF(fcf, years, "median", 4); !approx(v, 250) {
+	if v, _, _, _ = selectBaseFCF(fcf, years, "median", 4, 0); !approx(v, 250) {
 		t.Errorf("median4: v=%v，期望 250", v) // (200+300)/2
 	}
 	// 去极值平均：去掉最高最低后平均
-	if v, _, _, _ = selectBaseFCF(fcf, years, "trim_mean", 3); !approx(v, 300) {
+	if v, _, _, _ = selectBaseFCF(fcf, years, "trim_mean", 3, 0); !approx(v, 300) {
 		t.Errorf("trim_mean3: v=%v，期望 300", v) // [200,300,400] 去极值 → [300]
 	}
-	if v, _, _, _ = selectBaseFCF(fcf, years, "trim_mean", 4); !approx(v, 250) {
+	if v, _, _, _ = selectBaseFCF(fcf, years, "trim_mean", 4, 0); !approx(v, 250) {
 		t.Errorf("trim_mean4: v=%v，期望 250", v) // [100,200,300,400] 去极值 → [200,300]
 	}
 	// 少于 3 年退化为普通平均值
-	if v, _, _, _ = selectBaseFCF(fcf, years, "trim_mean", 2); !approx(v, 350) {
+	if v, _, _, _ = selectBaseFCF(fcf, years, "trim_mean", 2, 0); !approx(v, 350) {
 		t.Errorf("trim_mean2: v=%v，期望 350", v) // [300,400] 平均
 	}
 	// 年数超过可用年份 → 截断为全部可用年份
-	if v, _, used, _ = selectBaseFCF(fcf, years, "average", 10); !approx(v, 250) || len(used) != 4 {
+	if v, _, used, _ = selectBaseFCF(fcf, years, "average", 10, 0); !approx(v, 250) || len(used) != 4 {
 		t.Errorf("average10: v=%v used=%v，期望 250 / 4年", v, used)
 	}
 	// 空 mode 按最近一年处理
-	if v, _, _, _ = selectBaseFCF(fcf, years, "", 0); v != 400 {
+	if v, _, _, _ = selectBaseFCF(fcf, years, "", 0, 0); v != 400 {
 		t.Errorf("空 mode: v=%v，期望 400", v)
 	}
-	if _, _, _, err = selectBaseFCF(fcf, years, "foo", 0); err == nil {
+	// 自定义：直接返回用户给定值，不依赖年份、不产生「取 X 年」提示（usedYears=nil）。
+	if v, name, used, err = selectBaseFCF(fcf, years, "custom", 0, 123456789); err != nil || v != 123456789 || name != "自定义" || used != nil {
+		t.Errorf("custom: v=%v name=%v used=%v err=%v", v, name, used, err)
+	}
+	// 自定义早于空年份守卫返回：现金流量表为空（years=nil）时仍可用。
+	if v, name, _, err = selectBaseFCF(nil, nil, "custom", 0, 123456789); err != nil || v != 123456789 || name != "自定义" {
+		t.Errorf("custom 空年份: v=%v name=%v err=%v", v, name, err)
+	}
+	// 未知方式仍报错。
+	if _, _, _, err = selectBaseFCF(fcf, years, "foo", 0, 0); err == nil {
 		t.Errorf("未知方式应返回错误")
 	}
-	if _, _, _, err = selectBaseFCF(fcf, nil, "latest", 0); err == nil {
+	if _, _, _, err = selectBaseFCF(fcf, nil, "latest", 0, 0); err == nil {
 		t.Errorf("空年份应返回错误")
+	}
+}
+
+// TestParseCustomFCF 自定义基期现金流单位换算（精确、不四舍五入），含上限边界。
+func TestParseCustomFCF(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		unit  string
+		want  float64
+	}{
+		{"6.5亿", "6.5", "yi", 650000000},
+		{"650000千", "650000", "qian", 650000000},
+		{"65000万", "65000", "wan", 650000000},
+		{"650000000元", "650000000", "yuan", 650000000},
+		{"6.50亿与6.5亿等值", "6.50", "yi", 650000000},
+		{"空单位按亿", "6.5", "", 650000000},
+		{"1.23两位小数保留精度", "1.23", "yuan", 1.23},
+		{"首尾空格容错", "  6.5  ", "yi", 650000000},
+		{"上限恰好1e14", "1000000", "yi", 1e14},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ParseCustomFCF(c.value, c.unit)
+			if err != nil {
+				t.Fatalf("ParseCustomFCF(%q,%q) 返回错误：%v", c.value, c.unit, err)
+			}
+			if !approx(got, c.want) {
+				t.Errorf("ParseCustomFCF(%q,%q) = %v，期望 %v", c.value, c.unit, got, c.want)
+			}
+		})
+	}
+}
+
+// TestParseCustomFCFErrors 自定义基期现金流非法输入的错误与文案。
+func TestParseCustomFCFErrors(t *testing.T) {
+	cases := []struct{ name, value, unit, wantMsg string }{
+		{"空值", "", "yi", "请输入基期现金流"},
+		{"仅空格", "   ", "yi", "请输入基期现金流"},
+		{"零", "0", "yi", "基期现金流需大于 0"},
+		{"零两位小数", "0.00", "yi", "基期现金流需大于 0"},
+		{"三位小数", "1.234", "yi", "格式不正确"},
+		{"负号", "-1", "yi", "格式不正确"},
+		{"科学计数法", "1e5", "yi", "格式不正确"},
+		{"字母", "abc", "yi", "格式不正确"},
+		{"省略整数位", ".5", "yi", "格式不正确"},
+		{"省略小数位", "5.", "yi", "格式不正确"},
+		{"未知单位", "1", "foo", "未知的基期现金流单位"},
+		{"超限（10亿亿）", "1000000000", "yi", "过大"},
+		{"略超上限（1e14+1e8）", "1000001", "yi", "过大"},
+		{"略超上限（1e14+0.01级）", "1000000.01", "yi", "过大"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ParseCustomFCF(c.value, c.unit)
+			if err == nil {
+				t.Fatalf("ParseCustomFCF(%q,%q) 期望错误，实际 nil", c.value, c.unit)
+			}
+			if !strings.Contains(err.Error(), c.wantMsg) {
+				t.Errorf("错误信息 = %q，期望含 %q", err.Error(), c.wantMsg)
+			}
+		})
+	}
+}
+
+// TestComputeValuationCustom 自定义基期自由现金流完整链路：直接取用户值、忽略年数、兜底校验。
+func TestComputeValuationCustom(t *testing.T) {
+	b, cf, inc := valuationFixture()
+
+	res, err := ComputeValuation([]model.ReportRow{b}, []model.ReportRow{cf}, []model.ReportRow{inc},
+		model.ValuationParams{Model: "zero", DiscountRate: 10, FCFMode: "custom", FCFCustomValue: 6.5e8, FCFCustomUnit: "yi"}, 1000)
+	if err != nil {
+		t.Fatalf("自定义返回错误：%v", err)
+	}
+	if !approx(res.BaseFCF, 6.5e8) || res.FCFModeName != "自定义" || res.FCFYears != 0 {
+		t.Errorf("BaseFCF=%v name=%v years=%v，期望 6.5e8 / 自定义 / 0", res.BaseFCF, res.FCFModeName, res.FCFYears)
+	}
+	if !approx(res.FCFCustomValue, 6.5e8) || res.FCFCustomUnit != "yi" {
+		t.Errorf("自定义回显 = %v/%v，期望 6.5e8/yi", res.FCFCustomValue, res.FCFCustomUnit)
+	}
+
+	// custom 忽略 fcf_years（传 5 不改变结果）。
+	res, err = ComputeValuation([]model.ReportRow{b}, []model.ReportRow{cf}, []model.ReportRow{inc},
+		model.ValuationParams{Model: "zero", DiscountRate: 10, FCFMode: "custom", FCFCustomValue: 6.5e8, FCFYears: 5}, 1000)
+	if err != nil || !approx(res.BaseFCF, 6.5e8) || res.FCFYears != 0 {
+		t.Errorf("custom 忽略年数：BaseFCF=%v years=%v err=%v", res.BaseFCF, res.FCFYears, err)
+	}
+
+	// 自定义值 <= 0 → 后端兜底「现金流贴现法不适用」。
+	if _, err := ComputeValuation([]model.ReportRow{b}, []model.ReportRow{cf}, []model.ReportRow{inc},
+		model.ValuationParams{Model: "zero", DiscountRate: 10, FCFMode: "custom", FCFCustomValue: 0}, 1000); err == nil {
+		t.Errorf("自定义值 <= 0 期望返回错误")
+	}
+}
+
+// TestComputeValuationCustomRD 自定义模式研发扩张叠加：最终基期 FCF = 自定义值 + 研发扩张额。
+func TestComputeValuationCustomRD(t *testing.T) {
+	balance := []model.ReportRow{row(map[string]float64{
+		"MONETARYFUNDS": 1000, "LONG_EQUITY_INVEST": 200,
+		"SHORT_LOAN": 300, "LONG_LOAN": 200, "TOTAL_EQUITY": 1500, "TOTAL_ASSETS": 3000,
+	})}
+	cf := []model.ReportRow{
+		rowAt("2023-12-31", map[string]float64{"NETCASH_OPERATE": 300, "FA_IR_DEPR": 80}),
+		rowAt("2024-12-31", map[string]float64{"NETCASH_OPERATE": 400, "FA_IR_DEPR": 80}),
+	}
+	income := []model.ReportRow{
+		rowAt("2023-12-31", map[string]float64{"INVEST_JOINT_INCOME": 20, "RESEARCH_EXPENSE": 100}),
+		rowAt("2024-12-31", map[string]float64{"INVEST_JOINT_INCOME": 20, "RESEARCH_EXPENSE": 150}),
+	}
+	// 自定义 500 + 研发扩张（150−100=50）= 550。
+	res, err := ComputeValuation(balance, cf, income,
+		model.ValuationParams{Model: "zero", DiscountRate: 10, FCFMode: "custom", FCFCustomValue: 500, AdjustRD: true}, 1000)
+	if err != nil {
+		t.Fatalf("返回错误：%v", err)
+	}
+	if !approx(res.BaseFCF, 550) || !approx(res.RDAdjustment, 50) {
+		t.Errorf("BaseFCF=%v rd=%v，期望 550 / 50", res.BaseFCF, res.RDAdjustment)
 	}
 }
 

@@ -268,9 +268,21 @@ const app = createApp({
       { key: 'average', label: '近几年平均值' },
       { key: 'median', label: '近几年中位数' },
       { key: 'trim_mean', label: '去极值平均值' },
+      { key: 'custom', label: '自定义' }, // R12 第 5 项：基期现金流由用户手动录入
     ];
     const valFCFMode = ref('latest'); // 基期自由现金流选取方式
-    const valFCFYears = ref(3);       // 选取年数（平均值/中位数）
+    const valFCFYears = ref(3);       // 选取年数（平均值/中位数/去极值）
+    const valFCFCustomValue = ref(null); // R12 自定义基期现金流数值（单位见 valFCFCustomUnit）
+    const valFCFCustomUnit = ref('yi');  // R12 单位 key：yi/wan/qian/yuan，默认「亿」
+    const valFCFUnits = [
+      { key: 'yi', label: '亿' },
+      { key: 'wan', label: '万' },
+      { key: 'qian', label: '千' },
+      { key: 'yuan', label: '元' }, // 「元」= 不选单位，直接按元输入完整数值
+    ];
+    // 与后端 service.valFCFCustomUnits / valFCFCustomMaxYuan 同源（改动需两处同步）
+    const VAL_FCF_UNIT_FACTOR = { yuan: 1, qian: 1e3, wan: 1e4, yi: 1e8 };
+    const VAL_FCF_MAX_YUAN = 1e14;
     const valAdjustRD = ref(false);   // 是否调整研发费用
     const valuation = ref(null);
     const valLoading = ref(false);
@@ -483,6 +495,15 @@ const app = createApp({
 
     async function fetchValuation() {
       if (!code.value.trim()) return;
+      // R12：自定义模式先本地校验，非法只提示、不发起请求。
+      if (valFCFMode.value === 'custom') {
+        const msg = validateCustomFCF(valFCFCustomValue.value, valFCFCustomUnit.value);
+        if (msg) {
+          valError.value = msg;
+          valuation.value = null;
+          return;
+        }
+      }
       valLoading.value = true;
       valError.value = '';
       try {
@@ -496,7 +517,13 @@ const app = createApp({
           q.set('g2', valG2.value); q.set('n2', valN2.value); q.set('g3', valG3.value);
         }
         q.set('fcf_mode', valFCFMode.value);
-        if (valFCFMode.value !== 'latest') q.set('fcf_years', valFCFYears.value);
+        if (valFCFMode.value === 'custom') {
+          // R12：自定义携带数值与单位，不携带年数。
+          q.set('fcf_custom_value', String(valFCFCustomValue.value));
+          q.set('fcf_custom_unit', valFCFCustomUnit.value);
+        } else if (['average', 'median', 'trim_mean'].includes(valFCFMode.value)) {
+          q.set('fcf_years', valFCFYears.value);
+        }
         q.set('adjust_rd', valAdjustRD.value ? 'true' : 'false');
         const res = await fetch(`/api/stock/${code.value.trim()}/valuation?${q.toString()}`);
         const json = await readJSON(res);
@@ -649,6 +676,19 @@ const app = createApp({
     // 用 === true 严格判断：旧响应 / 缓存无该字段时为 undefined → 保持现状；字符串脏数据也不会误开。
     function resolveAdjustRD(current, recommended) {
       return recommended === true ? true : current;
+    }
+
+    // R12 自定义基期现金流前端校验：合法返回空串，非法返回中文提示（与后端 ParseCustomFCF 同口径）。
+    // 「非数字」「≤2 位小数」由 el-input-number(:precision=2) 控件约束；粘贴/绕过的极端输入由后端兜底。
+    function validateCustomFCF(v, unit) {
+      if (v == null || v === '') return '请输入基期现金流';
+      const num = Number(v);
+      if (!isFinite(num)) return '基期现金流格式不正确（最多 2 位小数）';
+      if (num <= 0) return '基期现金流需大于 0';
+      const factor = VAL_FCF_UNIT_FACTOR[unit] || 0;
+      if (factor <= 0) return '未知的基期现金流单位';
+      if (num * factor > VAL_FCF_MAX_YUAN) return '基期现金流换算后金额过大（上限 100 万亿元）';
+      return '';
     }
 
     // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
@@ -886,10 +926,10 @@ const app = createApp({
       analysisStartYear, analysisEndYear, changeAnalysisRange,
       chartVisible, chartIndicator, chartRef, chartNarrow, showIndicatorChart, renderIndicatorChart, disposeIndicatorChart,
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
-      valFCFModes, valFCFMode, valFCFYears, valAdjustRD,
+      valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
-      radarAxisName, buildRadarOption, resolveAdjustRD,
+      radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF,
       scoreColor, fmtNum, applyAIValuation,
       history, querySearch, handleSelect, clearHistory,
       searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
@@ -1187,7 +1227,16 @@ const app = createApp({
                         <el-option v-for="m in valFCFModes" :key="m.key" :label="m.label" :value="m.key" />
                       </el-select>
                     </div>
-                    <div class="val-field" v-if="valFCFMode !== 'latest'">
+                    <!-- R12 自定义：数值 + 单位紧贴，数值框复用 --val-input-w -->
+                    <div class="val-field val-field-custom" v-if="valFCFMode === 'custom'">
+                      <span class="val-label">自定义值</span>
+                      <el-input-number v-model="valFCFCustomValue" :min="0" :precision="2" :controls="false"
+                                       placeholder="请输入数值" />
+                      <el-select v-model="valFCFCustomUnit" class="val-unit-select" style="width:72px">
+                        <el-option v-for="u in valFCFUnits" :key="u.key" :label="u.label" :value="u.key" />
+                      </el-select>
+                    </div>
+                    <div class="val-field" v-if="valFCFMode !== 'latest' && valFCFMode !== 'custom'">
                       <span class="val-label">选取年数</span>
                       <el-input-number v-model="valFCFYears" :min="1" :max="10" :step="1" />
                       <span class="val-unit">年</span>
@@ -1198,6 +1247,10 @@ const app = createApp({
                     </div>
                   </div>
                   <div class="val-desc">研发调整：适用成长科技股，把研发投入扩张部分加回自由现金流。</div>
+                  <div class="val-desc" v-if="valFCFMode === 'custom'">
+                    自定义基期现金流由你手动给定；单位为千/万/亿时按 ×1e3/×1e4/×1e8 换算为元（「元」即不选单位、直接按元输入）。
+                    研发调整开启时，最终基期自由现金流 = 自定义值 + 研发投入扩张额。
+                  </div>
                 </div>
 
                 <div class="val-actions">

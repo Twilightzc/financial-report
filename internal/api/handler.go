@@ -326,6 +326,17 @@ func parseValuationParams(c *gin.Context) (model.ValuationParams, error) {
 	if p.DiscountRate <= 0 {
 		return p, fmt.Errorf("折现率需大于 0")
 	}
+	// 自定义基期现金流：仅 fcf_mode=custom 时解析校验；其余模式忽略 fcf_custom_*（向后兼容）。
+	// 校验失败立即返回，不发起行情/报表拉取（fail-fast）。
+	if p.FCFMode == "custom" { // 值与 service 层 valFCFCustom 对齐
+		unit := c.DefaultQuery("fcf_custom_unit", "yi")
+		v, err := service.ParseCustomFCF(c.Query("fcf_custom_value"), unit)
+		if err != nil {
+			return p, err
+		}
+		p.FCFCustomValue = v
+		p.FCFCustomUnit = unit
+	}
 	return p, nil
 }
 

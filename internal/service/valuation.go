@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,16 +21,27 @@ const (
 	valModelThreeStage = "three_stage"
 )
 
-// 基期自由现金流选取方式 key 常量（《公司股票估值》文档：最近一年 / 近几年平均值 / 近几年中位数 / 去极值平均值）。
+// 基期自由现金流选取方式 key 常量（《公司股票估值》文档：最近一年 / 近几年平均值 / 近几年中位数 / 去极值平均值 / 自定义）。
 const (
 	valFCFLatest   = "latest"
 	valFCFAverage  = "average"
 	valFCFMedian   = "median"
 	valFCFTrimMean = "trim_mean"
+	valFCFCustom   = "custom" // 自定义：基期自由现金流由用户手动录入
 )
 
 // defaultFCFYears 基期自由现金流选取年数默认值（average/median/trim_mean 用）。
 const defaultFCFYears = 3
+
+// valFCFCustomMaxYuan 自定义基期现金流换算为元后的上限，防溢出/防误输入（100 万亿元）。
+const valFCFCustomMaxYuan = 1e14
+
+// valFCFCustomUnits 自定义基期现金流单位 → 元的精确整数系数（元 = 不选单位，显式枚举以杜绝歧义）。
+var valFCFCustomUnits = map[string]int64{"yuan": 1, "qian": 1e3, "wan": 1e4, "yi": 1e8}
+
+// valFCFCustomValueRe 自定义基期现金流数值原文的格式：整数或最多 2 位小数。
+// 天然拒绝正负号、字母、科学计数法（1e5）、".5"、"5."、"1.234"。
+var valFCFCustomValueRe = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,2})?$`)
 
 // longEquityThreshold 长期股权投资占总资产比例超过该阈值时，提示对投资公司单独估值。
 const longEquityThreshold = 0.10
@@ -45,6 +58,42 @@ var valFCFModeNames = map[string]string{
 	valFCFAverage:  "近几年平均值",
 	valFCFMedian:   "近几年中位数",
 	valFCFTrimMean: "去极值平均值",
+	valFCFCustom:   "自定义",
+}
+
+// ParseCustomFCF 把用户录入的自定义基期现金流（数值原文 + 单位 key）精确换算为「元」。
+//
+// 校验顺序：单位合法 → 非空 → 十进制格式（最多 2 位小数）→ 换算值 > 0 → 换算值 ≤ 1e14 元。
+// 换算用 math/big.Rat 在精确有理数域完成（乘系数、比上限），全程不四舍五入，仅在最后转一次 float64。
+// unit 为空时按默认单位「亿」（yi）处理。
+func ParseCustomFCF(value, unit string) (float64, error) {
+	if unit == "" {
+		unit = "yi"
+	}
+	factor, ok := valFCFCustomUnits[unit]
+	if !ok {
+		return 0, errors.New("未知的基期现金流单位")
+	}
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return 0, errors.New("请输入基期现金流")
+	}
+	if !valFCFCustomValueRe.MatchString(s) {
+		return 0, errors.New("基期现金流格式不正确（最多 2 位小数）")
+	}
+	r, ok := new(big.Rat).SetString(s)
+	if !ok { // 已被格式校验拦截，此处作防御
+		return 0, errors.New("基期现金流格式不正确（最多 2 位小数）")
+	}
+	r.Mul(r, new(big.Rat).SetInt64(factor))
+	if r.Sign() <= 0 {
+		return 0, errors.New("基期现金流需大于 0")
+	}
+	if r.Cmp(new(big.Rat).SetInt64(valFCFCustomMaxYuan)) > 0 {
+		return 0, errors.New("基期现金流换算后金额过大（上限 100 万亿元）")
+	}
+	v, _ := r.Float64()
+	return v, nil
 }
 
 // ComputeValuation 计算公司股票估值（现金流贴现法，基于最新年报）。
@@ -98,7 +147,7 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 	for _, y := range cfYears {
 		fcfByYear[y] = operatingFreeCashFlow(incomeByYear[y], cfByYear[y])
 	}
-	fcf, fcfModeName, usedYears, err := selectBaseFCF(fcfByYear, cfYears, params.FCFMode, params.FCFYears)
+	fcf, fcfModeName, usedYears, err := selectBaseFCF(fcfByYear, cfYears, params.FCFMode, params.FCFYears, params.FCFCustomValue)
 	if err != nil {
 		return model.ValuationResult{}, err
 	}
@@ -147,6 +196,11 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 		FinancialAssetValue: finValue, LongEquityValue: longValue, OperatingAssetValue: opValue,
 		CompanyValue: companyValue, EquityValue: equityValue,
 	}
+	// 自定义参数仅 custom 模式回显，其余模式留零值（omitempty 不输出），避免非 custom 传入脏值时泄漏。
+	if params.FCFMode == valFCFCustom {
+		res.FCFCustomValue = params.FCFCustomValue
+		res.FCFCustomUnit = params.FCFCustomUnit
+	}
 	if totalShares > 0 {
 		res.EquityValuePerShare = equityValue / totalShares
 	}
@@ -165,10 +219,15 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 	return res, nil
 }
 
-// selectBaseFCF 按方式选取基期自由现金流：latest 取最近一年、average/median/trim_mean 取最近 n 年。
-// trim_mean 为去掉最高、最低值后的平均值（少于 3 年时退化为普通平均值）。
-// 返回选取值、方式中文名与所用年份（升序）。
-func selectBaseFCF(fcfByYear map[int]float64, years []int, mode string, n int) (float64, string, []int, error) {
+// selectBaseFCF 按方式选取基期自由现金流：latest 取最近一年、average/median/trim_mean 取最近 n 年、
+// custom 直接取用户录入的 customValue。trim_mean 为去掉最高、最低值后的平均值（少于 3 年时退化为普通平均值）。
+// 返回选取值、方式中文名与所用年份（升序；custom 不涉及年份，返回 nil）。
+func selectBaseFCF(fcfByYear map[int]float64, years []int, mode string, n int, customValue float64) (float64, string, []int, error) {
+	// 自定义：基期自由现金流完全由用户给定，不依赖报表 FCF 推导。
+	// 早于空年份守卫返回，故现金流量表为空但另有年报时仍可用（16.5.4）。
+	if mode == valFCFCustom {
+		return customValue, valFCFModeNames[valFCFCustom], nil, nil
+	}
 	if len(years) == 0 {
 		return 0, "", nil, errors.New("未获取到年报数据，请确认代码是否正确")
 	}
