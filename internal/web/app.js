@@ -1248,7 +1248,6 @@ const app = createApp({
                   </div>
                   <div class="val-desc">研发调整：适用成长科技股，把研发投入扩张部分加回自由现金流。</div>
                   <div class="val-desc" v-if="valFCFMode === 'custom'">
-                    自定义基期现金流由你手动给定；单位为千/万/亿时按 ×1e3/×1e4/×1e8 换算为元（「元」即不选单位、直接按元输入）。
                     研发调整开启时，最终基期自由现金流 = 自定义值 + 研发投入扩张额。
                   </div>
                 </div>
