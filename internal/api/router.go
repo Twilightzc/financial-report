@@ -16,6 +16,7 @@ func NewRouter(h *Handler) *gin.Engine {
 	r.GET("/api/stock/:code/indicators", h.GetIndicators)
 	r.GET("/api/stock/:code/financials", h.GetFinancials)
 	r.GET("/api/stock/:code/analysis", h.GetAnalysis)
+	r.GET("/api/stock/:code/company-value", h.GetCompanyValue)
 	r.GET("/api/stock/:code/valuation", h.GetValuation)
 	r.GET("/api/stock/:code/ai-analysis", h.GetAIAnalysis)
 

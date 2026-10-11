@@ -23,11 +23,11 @@ const (
 	signalNone      = ""
 )
 
-// indicatorDirections 指标方向映射（需求附录 A）：只列非中性项（67 条），
+// indicatorDirections 指标方向映射（需求附录 A）：只列非中性项（68 条），
 // 其余中性 key 与任何未来新增 key 一律按 dirNeutral 处理（见 IndicatorDirection）。
 // 本映射同时驱动「趋势信号灯」与「六维分析表同比色」，漏标时默认中性（不误报、不误染）。
 var indicatorDirections = map[string]string{
-	// —— higher_better（41）——
+	// —— higher_better（42）——
 	"cash_self_sufficiency":            dirHigherBetter,
 	"equity":                           dirHigherBetter,
 	"equity_ratio":                     dirHigherBetter,
@@ -69,6 +69,7 @@ var indicatorDirections = map[string]string{
 	"nopat_cash_ratio":                 dirHigherBetter,
 	"net_profit_cash_ratio":            dirHigherBetter,
 	"operating_cash_flow":              dirHigherBetter,
+	"operating_fcf":                    dirHigherBetter, // R14 公司价值卡片：经营资产自由现金流
 
 	// —— lower_better（26）——
 	"debt_capital_cost":         dirLowerBetter,
@@ -213,20 +214,25 @@ func applyTrendSignals(a *model.FinancialAnalysis) {
 	for di := range a.Dimensions {
 		dim := &a.Dimensions[di]
 		for si := range dim.Sections {
-			items := dim.Sections[si].Indicators
-			for ii := range items {
-				it := &items[ii]
-				it.Direction = IndicatorDirection(it.Key)
-				if dim.Status != "done" {
-					continue
-				}
-				t, rate, ok := trendOf(it.Values) // 趋势与 R 同一次算出（单一真值）
-				it.TrendSignal = signalOf(t, it.Direction)
-				if ok {
-					pct := rate * 100   // API 百分比口径（0–100），与 model 内其余 % 字段一致
-					it.TrendRate = &pct // pct 为循环体内新声明的变量，取址安全（每轮一块新内存）
-				}
-			}
+			applyTrendSignalsToIndicators(dim.Sections[si].Indicators, dim.Status)
+		}
+	}
+}
+
+// applyTrendSignalsToIndicators 回填一列指标的 direction / trend_signal / trend_rate（R14 抽出供六维与公司价值卡片共用）。
+// status 非 "done" 时只回填方向、不算趋势（与既有语义一致）。
+func applyTrendSignalsToIndicators(items []model.AnalysisIndicator, status string) {
+	for ii := range items {
+		it := &items[ii]
+		it.Direction = IndicatorDirection(it.Key)
+		if status != "done" {
+			continue
+		}
+		t, rate, ok := trendOf(it.Values) // 趋势与 R 同一次算出（单一真值）
+		it.TrendSignal = signalOf(t, it.Direction)
+		if ok {
+			pct := rate * 100   // API 百分比口径（0–100），与 model 内其余 % 字段一致
+			it.TrendRate = &pct // pct 为循环体内新声明的变量，取址安全（每轮一块新内存）
 		}
 	}
 }

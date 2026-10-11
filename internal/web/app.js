@@ -235,6 +235,13 @@ const app = createApp({
     const analysisStartYear = ref(null);
     const analysisEndYear = ref(null);
 
+    // R14 公司价值卡片状态（独立于六维卡片，自带年份范围）
+    const companyValue = ref(null);
+    const cvLoading = ref(false);
+    const cvError = ref('');
+    const cvStartYear = ref(null);
+    const cvEndYear = ref(null);
+
     // 指标趋势图状态
     const chartVisible = ref(false);
     const chartIndicator = ref(null);
@@ -438,6 +445,42 @@ const app = createApp({
       fetchAnalysis();
     }
 
+    // R14 公司价值卡片取数（独立接口 + 独立年份范围，与六维分析互不影响）
+    async function fetchCompanyValue() {
+      cvLoading.value = true;
+      cvError.value = '';
+      try {
+        const p = (cvStartYear.value && cvEndYear.value)
+          ? `?startYear=${cvStartYear.value}&endYear=${cvEndYear.value}` : '';
+        const res = await fetch(`/api/stock/${code.value.trim()}/company-value${p}`);
+        const json = await readJSON(res);
+        if (json.code !== 0) {
+          cvError.value = json.message || '公司价值获取失败';
+          return;
+        }
+        companyValue.value = json.data;
+        // 首次加载用返回范围回填年份选择
+        if (!cvStartYear.value && !cvEndYear.value) {
+          const ys = json.data.years || [];
+          if (ys.length) {
+            cvStartYear.value = ys[0];
+            cvEndYear.value = ys[ys.length - 1];
+          }
+        }
+      } catch (e) {
+        cvError.value = '请求失败：' + e.message;
+      } finally {
+        cvLoading.value = false;
+      }
+    }
+
+    function changeCvRange() {
+      if (cvStartYear.value && cvEndYear.value && cvStartYear.value > cvEndYear.value) {
+        [cvStartYear.value, cvEndYear.value] = [cvEndYear.value, cvStartYear.value];
+      }
+      fetchCompanyValue();
+    }
+
     // 点击指标行上的趋势图图标，弹出该指标的折线图。
     function showIndicatorChart(it) {
       const hasData = (it.values || []).some(v => v != null);
@@ -574,7 +617,7 @@ const app = createApp({
         aiResult.value = null;
         aiError.value = '';
         aiLoading.value = false;
-        fetchData(); fetchFinancials(); fetchAnalysis(); fetchValuation();
+        fetchData(); fetchFinancials(); fetchAnalysis(); fetchValuation(); fetchCompanyValue();
       } finally {
         searchBusy = false;
       }
@@ -942,6 +985,7 @@ const app = createApp({
       trendTip, trendDotClass, barColorOf, PALETTE, MILD_CHANGE_THRESHOLD,
       tabTouchStart, tabTouchEnd,
       analysisStartYear, analysisEndYear, changeAnalysisRange,
+      companyValue, cvLoading, cvError, cvStartYear, cvEndYear, changeCvRange,
       chartVisible, chartIndicator, chartRef, chartNarrow, showIndicatorChart, renderIndicatorChart, disposeIndicatorChart,
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
@@ -1159,6 +1203,64 @@ const app = createApp({
               <el-dialog v-model="chartVisible" :title="chartIndicator ? chartIndicator.name : ''" width="min(680px, 92vw)" destroy-on-close @opened="renderIndicatorChart" @close="disposeIndicatorChart">
                 <div ref="chartRef" class="chart-box"></div>
               </el-dialog>
+            </div>
+          </section>
+
+          <section class="card" v-loading="cvLoading">
+            <div class="card-head">
+              <h2 class="card-title">公司价值<span class="sub">逐年</span></h2>
+              <div class="year-filter">
+                <el-select v-model="cvStartYear" placeholder="起始年" @change="changeCvRange">
+                  <el-option v-for="y in yearOptions" :key="y" :label="y" :value="y" />
+                </el-select>
+                <span class="sep">—</span>
+                <el-select v-model="cvEndYear" placeholder="结束年" @change="changeCvRange">
+                  <el-option v-for="y in yearOptions" :key="y" :label="y" :value="y" />
+                </el-select>
+              </div>
+            </div>
+            <div class="card-body">
+              <el-alert v-if="cvError" :title="cvError" type="warning" style="margin-bottom:12px" />
+              <template v-if="companyValue">
+                <el-empty v-if="companyValue.status === 'no_data'" description="无年报数据" />
+                <template v-else>
+                  <el-alert v-if="companyValue.notes && companyValue.notes.length" type="info" :closable="false" style="margin-bottom:12px">
+                    <div v-for="(n, i) in companyValue.notes" :key="i" style="font-size:12px;line-height:1.6">{{ n }}</div>
+                  </el-alert>
+                  <div class="table-wrap">
+                    <table class="stmt-table analysis-table">
+                      <thead>
+                        <tr>
+                          <th class="item-col">指标</th>
+                          <th v-for="y in companyValue.years" :key="y">{{ y }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="it in companyValue.indicators" :key="it.key">
+                          <td class="item-name">
+                            <div class="ind-name">
+                              <el-tooltip :content="trendTip(it, companyValue.years, '公司价值', companyValue.status)" placement="top" :trigger="['hover','focus']" popper-class="ind-tip">
+                                <span class="trend-dot" :class="trendDotClass(it)" tabindex="0" role="img" :aria-label="trendTip(it, companyValue.years, '公司价值', companyValue.status)"></span>
+                              </el-tooltip>
+                              <el-tooltip :content="it.interpretation ? (it.name + '：' + it.interpretation) : it.name" placement="top" :trigger="['hover','focus']" popper-class="ind-tip"><span class="ind-text" tabindex="0">{{ it.name }}</span></el-tooltip>
+                              <el-tooltip v-if="it.interpretation" :content="it.interpretation" placement="top" :show-after="200" popper-class="ind-tip">
+                                <span class="help-icon">?</span>
+                              </el-tooltip>
+                              <el-tooltip v-if="it.note" :content="it.note" placement="top" :trigger="['hover','focus']" popper-class="ind-tip">
+                                <span class="warn-icon" tabindex="0">!</span>
+                              </el-tooltip>
+                            </div>
+                          </td>
+                          <td v-for="(v, i) in it.values" :key="i" class="num">
+                            <div class="val">{{ fmtAnalysisVal(v, it.unit) }}</div>
+                            <div class="yoy" :class="yoyClass(it.values, i)">{{ yoyText(it.values, i) }}</div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </template>
             </div>
           </section>
 

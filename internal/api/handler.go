@@ -190,6 +190,41 @@ func (h *Handler) GetAnalysis(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": data})
 }
 
+// GetCompanyValue 返回「公司价值」卡片三指标逐年值（跨年度，仅年报）。
+// 复用 fetchAnalysisReports：与六维分析打同一组 F10 全量报表，不新增外部数据源。
+func (h *Handler) GetCompanyValue(c *gin.Context) {
+	code := c.Param("code")
+	if len(code) != 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1, "message": "股票代码需为6位数字", "data": nil})
+		return
+	}
+
+	cashflow, balance, income, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 1, "message": analysisErrMsg(err), "data": nil})
+		return
+	}
+
+	startYear, endYear, ok := parseYearRange(c)
+	if !ok {
+		// 缺省：最近 5 个年报（年份由现金流量表年报年份派生，与六维分析一致）
+		latest := latestAnnualYear(cashflow)
+		if latest == 0 {
+			c.JSON(http.StatusOK, gin.H{"code": 1, "message": "未获取到年报数据，请确认代码是否正确", "data": nil})
+			return
+		}
+		endYear = latest
+		startYear = latest - 4
+	}
+	if startYear <= 0 || endYear <= 0 || startYear > endYear {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1, "message": "年份范围无效", "data": nil})
+		return
+	}
+
+	data := service.ComputeCompanyValue(balance, cashflow, income, startYear, endYear)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": data})
+}
+
 // fetchAnalysisReports 并发拉取全量现金流量表、资产负债表、利润表。
 // 三个请求相互独立且 F10 接口冷启动慢（现金流 ~12s），并发可把串行耗时压缩到单请求级别。
 // cfPageSize/bsPageSize 分别为现金流与资产负债的拉取期数（资产负债多 1 年用于期初净额），利润表同现金流期数。

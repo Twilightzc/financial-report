@@ -155,9 +155,9 @@ func TestTrendSignalMatrix(t *testing.T) {
 	}
 }
 
-// indicatorDirectionGolden 全部 122 个已产出指标 key 的期望方向（需求附录 A）。
-// 41 higher_better + 26 lower_better + 55 neutral = 122。
-// 本表是「护栏」：新增指标（第 123 个）时测试会失败，强制补一次方向决策（FR-1/FR-14）。
+// indicatorDirectionGolden 全部 125 个已产出指标 key 的期望方向（需求附录 A + R14 公司价值卡片）。
+// 42 higher_better + 26 lower_better + 57 neutral = 125。
+// 本表是「护栏」：新增指标（第 126 个）时测试会失败，强制补一次方向决策（FR-1/FR-14）。
 var indicatorDirectionGolden = map[string]string{
 	// —— 维度一 投资活动现金流（6，全中性）——
 	"net_long_asset":        dirNeutral,
@@ -292,9 +292,15 @@ var indicatorDirectionGolden = map[string]string{
 	"nopat_cash_ratio":      dirHigherBetter,
 	"net_profit_cash_ratio": dirHigherBetter,
 	"operating_cash_flow":   dirHigherBetter,
+
+	// —— R14 公司价值卡片（3：高 1 / 中 2）——
+	"operating_fcf":          dirHigherBetter,
+	"financial_assets_value": dirNeutral,
+	"long_equity_value":      dirNeutral,
 }
 
-// producedKeys 用空报表调用 ComputeAnalysis，收集全部分析指标 key（各构造函数无条件产出指标）。
+// producedKeys 用空报表调用 ComputeAnalysis 与 ComputeCompanyValue，收集全部已产出指标 key
+// （各构造函数无条件产出指标）。
 func producedKeys(t *testing.T) map[string]bool {
 	t.Helper()
 	empty := []model.ReportRow{{ReportDate: "2024-12-31", Fields: map[string]*float64{}}}
@@ -307,18 +313,22 @@ func producedKeys(t *testing.T) map[string]bool {
 			}
 		}
 	}
+	cv := ComputeCompanyValue(empty, empty, empty, 2020, 2024)
+	for _, it := range cv.Indicators {
+		keys[it.Key] = true
+	}
 	return keys
 }
 
 // TestIndicatorDirectionCoverage golden 表全覆盖：每个已产出 key 都在 golden 表内且方向相符；
-// 映射表恰 67 条、无「死条目」（拼写错误导致永不命中）；未标注 key 兜底 neutral（FR-1/FR-14、AC-14）。
+// 映射表恰 68 条、无「死条目」（拼写错误导致永不命中）；未标注 key 兜底 neutral（FR-1/FR-14、AC-14）。
 func TestIndicatorDirectionCoverage(t *testing.T) {
 	keys := producedKeys(t)
-	if len(keys) != 122 {
-		t.Fatalf("已产出指标 key 数 = %d，期望 122（新增指标时需同步补 golden 表与方向映射）", len(keys))
+	if len(keys) != 125 {
+		t.Fatalf("已产出指标 key 数 = %d，期望 125（新增指标时需同步补 golden 表与方向映射）", len(keys))
 	}
-	if len(indicatorDirectionGolden) != 122 {
-		t.Fatalf("golden 表条目数 = %d，期望 122", len(indicatorDirectionGolden))
+	if len(indicatorDirectionGolden) != 125 {
+		t.Fatalf("golden 表条目数 = %d，期望 125", len(indicatorDirectionGolden))
 	}
 	for k := range keys {
 		want, ok := indicatorDirectionGolden[k]
@@ -336,8 +346,8 @@ func TestIndicatorDirectionCoverage(t *testing.T) {
 			t.Errorf("golden 表含未产出 key %q", k)
 		}
 	}
-	if len(indicatorDirections) != 67 {
-		t.Errorf("方向映射表条目数 = %d，期望 67", len(indicatorDirections))
+	if len(indicatorDirections) != 68 {
+		t.Errorf("方向映射表条目数 = %d，期望 68", len(indicatorDirections))
 	}
 	// 映射表中每个 key 都必须出现在 golden 表内（无死条目）。
 	for k := range indicatorDirections {

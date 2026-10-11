@@ -43,3 +43,14 @@ type FinancialAnalysis struct {
 	Years      []int               `json:"years"`
 	Dimensions []AnalysisDimension `json:"dimensions"`
 }
+
+// CompanyValue 公司价值卡片（R14，独立于六维分析）：三个逐年指标 + 卡片级口径提示。
+// Years 与 Indicators[].Values 对齐（升序，nil=无数据，前端显示「—」）。
+// Status：done=已实现且有年报数据；no_data=无年报数据。
+// 无合计行（流量与存量不可相加，见 Notes）。
+type CompanyValue struct {
+	Years      []int               `json:"years"`
+	Status     string              `json:"status"`          // done / no_data
+	Indicators []AnalysisIndicator `json:"indicators"`      // 恰 3 项，顺序固定
+	Notes      []string            `json:"notes,omitempty"` // 卡片级口径提示（流量/存量不可加）
+}
