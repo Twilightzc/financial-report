@@ -33,13 +33,13 @@ const (
 // defaultFCFYears 基期自由现金流选取年数默认值（average/median/trim_mean 用）。
 const defaultFCFYears = 3
 
-// valFCFCustomMaxYuan 自定义基期现金流换算为元后的上限，防溢出/防误输入（100 万亿元）。
+// valFCFCustomMaxYuan 自定义基期自由现金流换算为元后的上限，防溢出/防误输入（100 万亿元）。
 const valFCFCustomMaxYuan = 1e14
 
-// valFCFCustomUnits 自定义基期现金流单位 → 元的精确整数系数（元 = 不选单位，显式枚举以杜绝歧义）。
+// valFCFCustomUnits 自定义基期自由现金流单位 → 元的精确整数系数（元 = 不选单位，显式枚举以杜绝歧义）。
 var valFCFCustomUnits = map[string]int64{"yuan": 1, "qian": 1e3, "wan": 1e4, "yi": 1e8}
 
-// valFCFCustomValueRe 自定义基期现金流数值原文的格式：整数或最多 2 位小数。
+// valFCFCustomValueRe 自定义基期自由现金流数值原文的格式：整数或最多 2 位小数。
 // 天然拒绝正负号、字母、科学计数法（1e5）、".5"、"5."、"1.234"。
 var valFCFCustomValueRe = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,2})?$`)
 
@@ -61,7 +61,7 @@ var valFCFModeNames = map[string]string{
 	valFCFCustom:   "自定义",
 }
 
-// ParseCustomFCF 把用户录入的自定义基期现金流（数值原文 + 单位 key）精确换算为「元」。
+// ParseCustomFCF 把用户录入的自定义基期自由现金流（数值原文 + 单位 key）精确换算为「元」。
 //
 // 校验顺序：单位合法 → 非空 → 十进制格式（最多 2 位小数）→ 换算值 > 0 → 换算值 ≤ 1e14 元。
 // 换算用 math/big.Rat 在精确有理数域完成（乘系数、比上限），全程不四舍五入，仅在最后转一次 float64。
@@ -72,25 +72,25 @@ func ParseCustomFCF(value, unit string) (float64, error) {
 	}
 	factor, ok := valFCFCustomUnits[unit]
 	if !ok {
-		return 0, errors.New("未知的基期现金流单位")
+		return 0, errors.New("未知的基期自由现金流单位")
 	}
 	s := strings.TrimSpace(value)
 	if s == "" {
-		return 0, errors.New("请输入基期现金流")
+		return 0, errors.New("请输入基期自由现金流")
 	}
 	if !valFCFCustomValueRe.MatchString(s) {
-		return 0, errors.New("基期现金流格式不正确（最多 2 位小数）")
+		return 0, errors.New("基期自由现金流格式不正确（最多 2 位小数）")
 	}
 	r, ok := new(big.Rat).SetString(s)
 	if !ok { // 已被格式校验拦截，此处作防御
-		return 0, errors.New("基期现金流格式不正确（最多 2 位小数）")
+		return 0, errors.New("基期自由现金流格式不正确（最多 2 位小数）")
 	}
 	r.Mul(r, new(big.Rat).SetInt64(factor))
 	if r.Sign() <= 0 {
-		return 0, errors.New("基期现金流需大于 0")
+		return 0, errors.New("基期自由现金流需大于 0")
 	}
 	if r.Cmp(new(big.Rat).SetInt64(valFCFCustomMaxYuan)) > 0 {
-		return 0, errors.New("基期现金流换算后金额过大（上限 100 万亿元）")
+		return 0, errors.New("基期自由现金流换算后金额过大（上限 100 万亿元）")
 	}
 	v, _ := r.Float64()
 	return v, nil

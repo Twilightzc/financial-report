@@ -8,7 +8,7 @@ import (
 	"financial-report/internal/model"
 )
 
-// TestParseCustomFCFExactConversion 自定义基期现金流换算的精确性（FR-3「换算过程不产生额外四舍五入误差」）。
+// TestParseCustomFCFExactConversion 自定义基期自由现金流换算的精确性（FR-3「换算过程不产生额外四舍五入误差」）。
 // 用例特意选取「float64 直接相乘会出错」的组合（如 8.7×1e4、1.15×1e8、0.07×1e8），故断言用完全相等
 // （`==`）而非 approx —— 朴素 float 实现会在此失败，用于锁定 big.Rat 精确换算不被回退。
 func TestParseCustomFCFExactConversion(t *testing.T) {
@@ -55,7 +55,7 @@ func TestParseCustomFCFExactConversion(t *testing.T) {
 		t.Errorf("30 位原文应返回上限错误，实际 %v", err)
 	}
 	// 单位大小写敏感：不做宽松匹配，未知单位必须报错（防前后端字面量漂移被静默吞掉）。
-	if _, err := ParseCustomFCF("6.5", "YI"); err == nil || !strings.Contains(err.Error(), "未知的基期现金流单位") {
+	if _, err := ParseCustomFCF("6.5", "YI"); err == nil || !strings.Contains(err.Error(), "未知的基期自由现金流单位") {
 		t.Errorf("大写 YI 应返回未知单位错误，实际 %v", err)
 	}
 }

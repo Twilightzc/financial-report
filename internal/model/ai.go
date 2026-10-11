@@ -50,6 +50,15 @@ type AIValuation struct {
 	// AdjustRD 不设 omitempty：true/false 均须出现，缺字段会让客户端无法与「旧响应」区分。
 	AdjustRD bool    `json:"adjust_rd"`          // 是否建议开启研发调整
 	RDRatio  float64 `json:"rd_ratio,omitempty"` // 最新年报研发费用率 %（无法判定 / 恰为 0 时省略）
+
+	// R13 新增：基期自由现金流选取推荐（只读，服务端确定性回填，见《技术设计文档》17.3）。
+	// FCFMode / FCFModeName 不设 omitempty：算法恒产出，前端需稳定显示（镜像 model/model_name）。
+	FCFMode        string  `json:"fcf_mode"`                   // latest/average/median/trim_mean/custom（恒为五选一）
+	FCFModeName    string  `json:"fcf_mode_name"`              // 中文名
+	FCFYears       int     `json:"fcf_years,omitempty"`        // 多年度方式的推荐年数（>0）；latest/custom 为 0 不输出
+	FCFCustomValue float64 `json:"fcf_custom_value,omitempty"` // custom 展示值（单位见 fcf_custom_unit，取整到整亿）
+	FCFCustomUnit  string  `json:"fcf_custom_unit,omitempty"`  // custom 单位 key（本期固定 "yi"）
+	FCFRationale   string  `json:"fcf_rationale,omitempty"`    // 确定性口径说明
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -65,6 +74,14 @@ type ValuationRecommendation struct {
 	Warning        string             // 套用后估值可能不适用的提示（FR-8）
 	AdjustRD       bool               // R8：是否建议开启研发调整（最新年报研发费用率 > rdAdjustThreshold）
 	RDRatio        float64            // R8：最新年报研发费用率 %（与接口字段同值，无法判定时为 0）
+
+	// R13：基期自由现金流选取推荐（与 R7 同源，确定性推导，无 IO / 随机 / 时间依赖）。
+	FCFMode       string  // latest / average / median / trim_mean / custom（复用 service.valFCF* 常量）
+	FCFModeName   string  // 中文名（复用 service.valFCFModeNames）
+	FCFYears      int     // average/median/trim_mean 的推荐年数；latest/custom 为 0
+	FCFCustomYuan float64 // custom 推荐值（元，整亿倍数）；非 custom 为 0
+	FCFCustomUnit string  // custom 单位 key（本期固定 "yi"）；非 custom 为 ""
+	FCFRationale  string  // 确定性口径说明（供展示与喂给大模型写理由）
 }
 
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。

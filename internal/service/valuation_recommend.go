@@ -29,6 +29,25 @@ const (
 // 严格大于该阈值时建议开启研发调整。固定常量（不随股票/年份浮动），保证同一份财报推导结果唯一。
 const rdAdjustThreshold = 0.05 // 5%
 
+// R13《AI 基期自由现金流推荐》的固定阈值（FR-3 / Q3）。全部为常量，保证同一份财报推导结果唯一。
+const (
+	valFCFRecMaxYears = 5   // 中枢/波动判定窗口最多取近 5 年（FR-3 的 3–5 年）
+	valFCFRecMinYears = 3   // 中枢判定至少需 3 个可用年度，否则退回 latest（FR-10）
+	valFCFHighRatio   = 1.3 // latest > 1.3 × median → 最近一年明显偏高（Q3）
+	valFCFLowRatio    = 0.7 // latest < 0.7 × median → 最近一年明显偏低（Q3）
+	// 「FCF 增速极差 > 40pp 视为波动大」直接复用既有 valVolatileSpread = 40.0。
+)
+
+// fcfRecommendation 基期自由现金流选取推荐结果（unexported，service 包内可单测）。
+type fcfRecommendation struct {
+	Mode       string  // latest / average / median / trim_mean / custom
+	ModeName   string  // 中文名（复用 valFCFModeNames）
+	Years      int     // average/median/trim_mean 的推荐年数；latest/custom 为 0
+	CustomYuan float64 // custom 推荐值（元，整亿倍数）；非 custom 为 0
+	CustomUnit string  // custom 单位 key（本期固定 "yi"）；非 custom 为 ""
+	Rationale  string  // 确定性口径说明
+}
+
 // valDiscountTable 风险点 0–3 → 折现率%（FR-1 网格 8.0–12.0 中的四档，等距 1%）。
 var valDiscountTable = [4]float64{9.0, 10.0, 11.0, 12.0}
 
@@ -99,6 +118,13 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		warning = "以最新年报计的基期经营资产自由现金流为负或零，套用后 R4 估值可能提示「现金流贴现法不适用」"
 	}
 
+	// R13：逐年经营资产自由现金流（与 R4 ComputeValuation 完全同口径）与基期选取推荐。
+	fcfByYear := make(map[int]float64, len(cfYears))
+	for _, y := range cfYears {
+		fcfByYear[y] = operatingFreeCashFlow(incomeByYear[y], cfByYear[y])
+	}
+	fcfRec := RecommendBaseFCF(fcfByYear, cfYears, x, volatile)
+
 	// R8：研发调整建议（最新年报口径，与年份范围/分析模式无关，确定性不变）。
 	adjustRD, rdPct := rdAdjustSuggestion(incomeByYear, incomeYears)
 	rdRatio := 0.0
@@ -118,7 +144,172 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		Warning:        warning,
 		AdjustRD:       adjustRD,
 		RDRatio:        rdRatio,
+		FCFMode:        fcfRec.Mode,
+		FCFModeName:    fcfRec.ModeName,
+		FCFYears:       fcfRec.Years,
+		FCFCustomYuan:  fcfRec.CustomYuan,
+		FCFCustomUnit:  fcfRec.CustomUnit,
+		FCFRationale:   fcfRec.Rationale,
 	}
+}
+
+// RecommendBaseFCF 由 FCF 序列与 R7 信号确定性推导基期自由现金流的选取方式（纯函数，无 IO/随机/时间）。
+//
+// 规则见《技术设计文档》17.5.2（按序命中、唯一出口、无「或」分支），窗口取最近 ≤5 年：
+//
+//	R0 无数据 → latest；R1 不足 3 年 → latest；R2 全非正 → latest；R3 最近一年 ≤ 0 → latest；
+//	R4 全正 + 单调增 + 增速极差 ≤ 40 + !volatile + X ≥ 0 → latest；
+//	R5 latest 明显偏高（> 1.3×median）且业绩不可持续（X<0 或 volatile）→ custom；
+//	R6 单调不增 → latest；R7 latest 明显偏低（< 0.7×median）→ median；
+//	R8 FCF 增速波动大（极差 > 40）或 volatile → median；R9 兜底 → average。
+//
+// custom 取整到整亿后 ≤ 0 时不产出 custom，退回 median（保证推荐值 > 0，FR-4 边界）。
+// 退化路径（R0/R1/R2/R3）均落在 latest，推荐恒为 R4 五选一内，套用后不触发参数校验错误（FR-10）。
+func RecommendBaseFCF(fcfByYear map[int]float64, years []int, x float64, volatile bool) fcfRecommendation {
+	if len(years) == 0 { // R0
+		return fcfRecLatest("无可用经营自由现金流数据（现金流量表为空），退回最近一年。")
+	}
+	m := len(years)
+	if m > valFCFRecMaxYears {
+		m = valFCFRecMaxYears
+	}
+	win := years[len(years)-m:]
+	vals := make([]float64, m)
+	for i, y := range win {
+		vals[i] = fcfByYear[y]
+	}
+
+	if m < valFCFRecMinYears { // R1
+		return fcfRecLatest(fmt.Sprintf("可用经营自由现金流年度不足 %d 年，无法评估可持续性，退回最近一年。", valFCFRecMinYears))
+	}
+	if allNonPositive(vals) { // R2
+		return fcfRecLatest(fmt.Sprintf("近年（%s）经营自由现金流均为非正，无法构成可持续中枢，退回最近一年。", joinYears(win)))
+	}
+
+	latest := vals[m-1]
+	median := medianOf(vals)
+	if latest <= 0 { // R3
+		return fcfRecLatest(fmt.Sprintf("最近一年（%d）经营自由现金流为非正，退回最近一年。", win[m-1]))
+	}
+
+	growth := fcfGrowthPoints(fcfByYear, win)
+	gSpread := spread(growth)
+	gMedian := medianOf(growth)
+
+	if allPositive(vals) && monotoneUp(vals) && gSpread <= valVolatileSpread && !volatile && x >= 0 { // R4
+		return fcfRecLatest(fmt.Sprintf("近 %d 年经营自由现金流逐年增长（%s），且增速可持续，取最近一年代表当前可持续水平。", m, joinYears(win)))
+	}
+
+	high := latest > valFCFHighRatio*median
+	low := latest < valFCFLowRatio*median
+	if high && (x < 0 || volatile) { // R5
+		center := medianOf(positiveValues(vals))        // 可持续中枢（仅正值的 FCF 中位数）
+		gS := math.Min(math.Max(gMedian, 0), x)         // 可持续增速：clamp 到 [0, X]（X<0 时为 X）
+		disp := math.Round(center * (1 + gS/100) / 1e8) // 取整到整亿（Q6）
+		if disp > 0 {
+			return fcfRecommendation{
+				Mode:       valFCFCustom,
+				ModeName:   valFCFModeNames[valFCFCustom],
+				CustomYuan: disp * 1e8, // 恒为整亿倍数（展示值 / 内部元值 / 套用后 ParseCustomFCF 三者恒等）
+				CustomUnit: "yi",
+				Rationale: fmt.Sprintf("业绩增速不可持续（基准增速 %.2f%%）且最近一年自由现金流明显高于多年中枢，按可持续中枢 %.2f 亿元 ×（1 + 可持续增速 %.2f%%）下调为 %.0f 亿元。",
+					x, center/1e8, gS, disp),
+			}
+		}
+		return fcfRecMedian(win, "可持续增速下的自定义推荐值取整到整亿后不足 1 亿元，退回中位数。")
+	}
+
+	if monotoneDown(vals) { // R6
+		return fcfRecLatest("经营自由现金流逐年下滑，取最近一年以反映当前水平。")
+	}
+	if low { // R7（此时已排除单调不增）
+		return fcfRecMedian(win, fmt.Sprintf("最近一年自由现金流明显低于多年中枢（%.2f 亿元 vs 中枢 %.2f 亿元），取近 %d 年中位数以避免低估。",
+			latest/1e8, median/1e8, m))
+	}
+	if gSpread > valVolatileSpread || volatile { // R8
+		return fcfRecMedian(win, fmt.Sprintf("近 %d 年经营自由现金流增速波动较大（极差 %.2f 个百分点），单年不代表常态，取近 %d 年中位数。",
+			m, gSpread, m))
+	}
+	return fcfRecommendation{ // R9
+		Mode:      valFCFAverage,
+		ModeName:  valFCFModeNames[valFCFAverage],
+		Years:     m,
+		Rationale: fmt.Sprintf("近年经营自由现金流总体平稳（%s），取近 %d 年平均值。", joinYears(win), m),
+	}
+}
+
+// fcfRecLatest 构造 latest 推荐结果（Years/Custom* 均为零值）。
+func fcfRecLatest(rationale string) fcfRecommendation {
+	return fcfRecommendation{Mode: valFCFLatest, ModeName: valFCFModeNames[valFCFLatest], Rationale: rationale}
+}
+
+// fcfRecMedian 构造 median 推荐结果，Years 取窗口大小（≥ valFCFRecMinYears）。
+func fcfRecMedian(win []int, rationale string) fcfRecommendation {
+	return fcfRecommendation{Mode: valFCFMedian, ModeName: valFCFModeNames[valFCFMedian], Years: len(win), Rationale: rationale}
+}
+
+// fcfGrowthPoints 窗口内逐年 FCF 同比增速（%，升序；仅计上一年 FCF > 0 的年度，上一年 ≤ 0 增速无意义）。
+func fcfGrowthPoints(fcfByYear map[int]float64, years []int) []float64 {
+	out := make([]float64, 0, len(years))
+	for _, y := range years {
+		prev, ok := fcfByYear[y-1]
+		if !ok || prev <= 0 {
+			continue
+		}
+		out = append(out, (fcfByYear[y]-prev)/prev*100)
+	}
+	return out
+}
+
+// allPositive 窗口值是否全为正。
+func allPositive(vals []float64) bool {
+	for _, v := range vals {
+		if v <= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// allNonPositive 窗口值是否全为非正。
+func allNonPositive(vals []float64) bool {
+	for _, v := range vals {
+		if v > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// monotoneUp 窗口值是否单调不减（升序）。
+func monotoneUp(vals []float64) bool {
+	for i := 1; i < len(vals); i++ {
+		if vals[i] < vals[i-1] {
+			return false
+		}
+	}
+	return true
+}
+
+// monotoneDown 窗口值是否单调不增（升序）。
+func monotoneDown(vals []float64) bool {
+	for i := 1; i < len(vals); i++ {
+		if vals[i] > vals[i-1] {
+			return false
+		}
+	}
+	return true
+}
+
+// positiveValues 取窗口中的正值（供 custom「可持续中枢」= 正 FCF 中位数使用）。
+func positiveValues(vals []float64) []float64 {
+	out := make([]float64, 0, len(vals))
+	for _, v := range vals {
+		if v > 0 {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // rdAdjustSuggestion 按最新年报的研发费用率判定是否建议开启研发调整（FR-5/FR-6，纯函数）。

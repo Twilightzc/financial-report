@@ -45,6 +45,7 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - 估值参数已由系统按该公司实际财报数据**确定性推导**，并会在用户消息中给出（模型、折现率、各阶段增长率与年数、基准增速 X% 及其口径）。同一家公司每次分析结果完全相同。
 - 你的任务**仅为这些参数写 rationale（2-3 句）**：说明为什么该模型合适、该折现率与增长率反映了哪些财务与行业因素（可结合行业前景/竞争格局做定性解释）。
 - 硬性要求：rationale 中出现的任何数字必须与给定参数完全一致；**不得**建议或写出其它模型/折现率/增长率取值。
+- 系统还会给出「基期自由现金流」的确定性选取（选取方式、年数或自定义值及其口径）。请**结合公司发展**（业绩增速与自由现金流增速是否可持续）在 rationale 中解释为何选该基期自由现金流；**不得**建议其它选取方式或自定义值，出现的一切数字必须与给定值一致。
 - 输出 JSON 中 valuation 只返回 {"rationale": "..."}；其余字段由系统回填，即使填写也会被忽略。
 
 ## 行业分析规则
@@ -111,7 +112,25 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	if rec.Warning != "" {
 		b.WriteString("- 提示：" + rec.Warning + "\n")
 	}
+	// R13：基期自由现金流选取推荐（数值与方式名严格取自 rec，大模型只据此解释）。
+	if rec.FCFRationale != "" {
+		b.WriteString("- 基期自由现金流：" + baseFCFPromptText(rec) + "\n")
+	}
 	return b.String()
+}
+
+// baseFCFPromptText 把基期自由现金流推荐序列化为一行文本：方式名 +（多年度方式）年数 /（custom）推荐值 + 口径。
+func baseFCFPromptText(rec model.ValuationRecommendation) string {
+	label := rec.FCFModeName
+	switch {
+	case rec.FCFMode == valFCFCustom && rec.FCFCustomUnit != "":
+		if factor, ok := valFCFCustomUnits[rec.FCFCustomUnit]; ok {
+			label = fmt.Sprintf("%s，推荐值 %.0f 亿元", rec.FCFModeName, rec.FCFCustomYuan/float64(factor))
+		}
+	case rec.FCFYears > 0:
+		label = fmt.Sprintf("%s（%d 年）", rec.FCFModeName, rec.FCFYears)
+	}
+	return fmt.Sprintf("%s（口径：%s）", label, rec.FCFRationale)
 }
 
 // formatParamValue 格式化估值参数字面值：整数不带小数，其余保留原始精度（如 13.2）。
@@ -294,6 +313,19 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	r.Valuation.Warning = rec.Warning
 	r.Valuation.AdjustRD = rec.AdjustRD // R8：研发调整建议（确定性回填，大模型即便返回也会被覆盖）
 	r.Valuation.RDRatio = rec.RDRatio
+	// R13：基期自由现金流推荐（确定性回填，大模型即便返回也会被覆盖）。
+	r.Valuation.FCFMode = rec.FCFMode
+	r.Valuation.FCFModeName = rec.FCFModeName
+	r.Valuation.FCFYears = rec.FCFYears
+	r.Valuation.FCFRationale = rec.FCFRationale
+	// 非 custom 一律清空自定义值/单位，杜绝大模型脏值泄漏（FR-2 互斥）。
+	r.Valuation.FCFCustomValue = 0
+	r.Valuation.FCFCustomUnit = ""
+	if rec.FCFMode == valFCFCustom && rec.FCFCustomUnit != "" {
+		r.Valuation.FCFCustomUnit = rec.FCFCustomUnit
+		// 展示值 = 元值 ÷ 单位系数（与前端口径一致，便于 applyAIValuation 直填表单）。
+		r.Valuation.FCFCustomValue = rec.FCFCustomYuan / float64(valFCFCustomUnits[rec.FCFCustomUnit])
+	}
 	// Rationale 保持大模型返回值，不覆盖
 }
 

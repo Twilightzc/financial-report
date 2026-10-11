@@ -268,11 +268,11 @@ const app = createApp({
       { key: 'average', label: '近几年平均值' },
       { key: 'median', label: '近几年中位数' },
       { key: 'trim_mean', label: '去极值平均值' },
-      { key: 'custom', label: '自定义' }, // R12 第 5 项：基期现金流由用户手动录入
+      { key: 'custom', label: '自定义' }, // R12 第 5 项：基期自由现金流由用户手动录入
     ];
     const valFCFMode = ref('latest'); // 基期自由现金流选取方式
     const valFCFYears = ref(3);       // 选取年数（平均值/中位数/去极值）
-    const valFCFCustomValue = ref(null); // R12 自定义基期现金流数值（单位见 valFCFCustomUnit）
+    const valFCFCustomValue = ref(null); // R12 自定义基期自由现金流数值（单位见 valFCFCustomUnit）
     const valFCFCustomUnit = ref('yi');  // R12 单位 key：yi/wan/qian/yuan，默认「亿」
     const valFCFUnits = [
       { key: 'yi', label: '亿' },
@@ -678,17 +678,23 @@ const app = createApp({
       return recommended === true ? true : current;
     }
 
-    // R12 自定义基期现金流前端校验：合法返回空串，非法返回中文提示（与后端 ParseCustomFCF 同口径）。
+    // R12 自定义基期自由现金流前端校验：合法返回空串，非法返回中文提示（与后端 ParseCustomFCF 同口径）。
     // 「非数字」「≤2 位小数」由 el-input-number(:precision=2) 控件约束；粘贴/绕过的极端输入由后端兜底。
     function validateCustomFCF(v, unit) {
-      if (v == null || v === '') return '请输入基期现金流';
+      if (v == null || v === '') return '请输入基期自由现金流';
       const num = Number(v);
-      if (!isFinite(num)) return '基期现金流格式不正确（最多 2 位小数）';
-      if (num <= 0) return '基期现金流需大于 0';
+      if (!isFinite(num)) return '基期自由现金流格式不正确（最多 2 位小数）';
+      if (num <= 0) return '基期自由现金流需大于 0';
       const factor = VAL_FCF_UNIT_FACTOR[unit] || 0;
-      if (factor <= 0) return '未知的基期现金流单位';
-      if (num * factor > VAL_FCF_MAX_YUAN) return '基期现金流换算后金额过大（上限 100 万亿元）';
+      if (factor <= 0) return '未知的基期自由现金流单位';
+      if (num * factor > VAL_FCF_MAX_YUAN) return '基期自由现金流换算后金额过大（上限 100 万亿元）';
       return '';
+    }
+
+    // R13：基期自由现金流自定义单位 key → 中文标签（复用 valFCFUnits，未知 key 返回空串）。
+    function fcfUnitLabel(key) {
+      const u = valFCFUnits.find(x => x.key === key);
+      return u ? u.label : '';
     }
 
     // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
@@ -709,6 +715,18 @@ const app = createApp({
       if (get('g3') != null) valG3.value = get('g3');
       // ref 写入同步生效，紧随其后的 fetchValuation() 读到的已是新值，故开关与请求参数一致。
       valAdjustRD.value = resolveAdjustRD(valAdjustRD.value, v.adjust_rd);
+      // R13：一并套用基期自由现金流选择（FR-6，改动 R12 边界）。
+      // if (v.fcf_mode) 守卫保证旧响应/前端缓存（无该字段）不误改当前选择，向后兼容。
+      if (v.fcf_mode) {
+        valFCFMode.value = v.fcf_mode;
+        if (['average', 'median', 'trim_mean'].includes(v.fcf_mode)) {
+          if (v.fcf_years) valFCFYears.value = Math.round(v.fcf_years);
+        }
+        if (v.fcf_mode === 'custom') {
+          if (v.fcf_custom_value != null) valFCFCustomValue.value = v.fcf_custom_value;
+          if (v.fcf_custom_unit) valFCFCustomUnit.value = v.fcf_custom_unit;
+        }
+      }
       fetchValuation();
       ElementPlus.ElMessage.success('已套用 AI 推荐的估值参数并计算');
     }
@@ -929,7 +947,7 @@ const app = createApp({
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
-      radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF,
+      radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
       history, querySearch, handleSelect, clearHistory,
       searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
@@ -1222,7 +1240,7 @@ const app = createApp({
                   <div class="val-block-title">自由现金流假设</div>
                   <div class="val-fields">
                     <div class="val-field">
-                      <span class="val-label">基期现金流</span>
+                      <span class="val-label">基期自由现金流</span>
                       <el-select v-model="valFCFMode" style="width:150px">
                         <el-option v-for="m in valFCFModes" :key="m.key" :label="m.label" :value="m.key" />
                       </el-select>
@@ -1258,7 +1276,7 @@ const app = createApp({
               </div>
               <el-alert v-if="valError" :title="valError" type="warning" :closable="false" style="margin-top:12px" />
               <template v-if="valuation">
-                <div class="val-meta">{{ valuation.year }} 年报 · {{ valuation.model_name }} · 折现率 {{ valuation.discount_rate }}% · 基期FCF取{{ valuation.fcf_mode_name }}<template v-if="valuation.fcf_years">（{{ valuation.fcf_years }}年）</template></div>
+                <div class="val-meta">{{ valuation.year }} 年报 · {{ valuation.model_name }} · 折现率 {{ valuation.discount_rate }}% · 基期自由现金流取{{ valuation.fcf_mode_name }}<template v-if="valuation.fcf_years">（{{ valuation.fcf_years }}年）</template></div>
                 <table class="stmt-table val-table">
                   <tbody>
                     <tr>
@@ -1364,9 +1382,12 @@ const app = createApp({
                     <span class="ai-v">折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%</span>
                     <span v-for="p in aiResult.valuation.params" :key="p.key" class="ai-v">{{ p.label }} {{ fmtNum(p.value) }}</span>
                     <span v-if="aiResult.valuation.base_growth != null" class="ai-v">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%</span>
+                    <span class="ai-v">基期自由现金流 {{ aiResult.valuation.fcf_mode_name }}<template v-if="aiResult.valuation.fcf_years">（{{ aiResult.valuation.fcf_years }}年）</template></span>
+                    <span class="ai-v" v-if="aiResult.valuation.fcf_mode === 'custom'">自定义值 {{ fmtNum(aiResult.valuation.fcf_custom_value) }}{{ fcfUnitLabel(aiResult.valuation.fcf_custom_unit) }}</span>
                     <el-button size="small" type="primary" plain @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
                   </div>
                   <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
+                  <p class="ai-text" v-if="aiResult.valuation.fcf_rationale">基期自由现金流：{{ aiResult.valuation.fcf_rationale }}</p>
                   <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，研发投入占比较高，建议开启研发调整（点「套用到估值」会自动打开该开关）。</p>
                   <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动剧烈：高增长期增长率已按基准增速的 50% 取值。</p>
                   <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" />

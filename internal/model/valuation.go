@@ -21,7 +21,7 @@ type ValuationParams struct {
 	AdjustRD bool   // 是否调整研发费用（成长科技股）
 
 	FCFCustomValue float64 // 自定义基期自由现金流（元，已按 FCFCustomUnit 换算；仅 FCFMode=custom 用）
-	FCFCustomUnit  string  // 自定义基期现金流单位 key：yuan/qian/wan/yi（仅 FCFMode=custom 用，用于结果回显）
+	FCFCustomUnit  string  // 自定义基期自由现金流单位 key：yuan/qian/wan/yi（仅 FCFMode=custom 用，用于结果回显）
 }
 
 // ValuationResult 公司股票估值结果（现金流贴现法，基于最新年报）。
@@ -46,7 +46,7 @@ type ValuationResult struct {
 	AdjustRD     bool    `json:"adjust_rd"`               // 是否调整研发费用
 	RDAdjustment float64 `json:"rd_adjustment,omitempty"` // 研发投入扩张部分加回金额（元）
 
-	// 自定义基期现金流回显（仅 FCFMode=custom；其余模式为零值，omitempty 不输出）
+	// 自定义基期自由现金流回显（仅 FCFMode=custom；其余模式为零值，omitempty 不输出）
 	FCFCustomValue float64 `json:"fcf_custom_value,omitempty"` // 自定义换算后的元值
 	FCFCustomUnit  string  `json:"fcf_custom_unit,omitempty"`  // 单位 key（yuan/qian/wan/yi）
 

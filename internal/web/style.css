@@ -456,7 +456,7 @@ td.num, .val, .yoy {
   /* 对齐锚点与统一宽度：label 定宽 + 数值输入框统一宽，保证取值完整可见且跨行列对齐（FR-1/FR-2/FR-3） */
   --val-label-w: 92px;   /* label 定宽：最长 7 个汉字 ×13px = 91px ≤ 92px */
   --val-input-w: 130px;  /* 数值输入框统一宽度：完整容纳「-50.0」与两位年数 */
-  --val-unit-w: 72px;    /* R12 自定义基期现金流的单位下拉列宽（千/万/亿/元） */
+  --val-unit-w: 72px;    /* R12 自定义基期自由现金流的单位下拉列宽（千/万/亿/元） */
   display: flex; flex-direction: column; gap: 20px;
 }
 .val-block-title {
@@ -493,7 +493,7 @@ td.num, .val, .yoy {
   width: var(--val-input-w);
   max-width: calc(100% - var(--val-label-w) - 28px);
 }
-/* 下拉框宽度由模板内联给定（模型 160px / 基期现金流 150px），仅加同款兜底（label 92 + gap 8，无单位） */
+/* 下拉框宽度由模板内联给定（模型 160px / 基期自由现金流 150px），仅加同款兜底（label 92 + gap 8，无单位） */
 .val-field .el-select { max-width: calc(100% - var(--val-label-w) - 8px); }
 /* R12 自定义行：数值框复用 --val-input-w 保持对齐，单位下拉用固定列宽紧随其后（覆盖上面的 max-width 兜底） */
 .val-field-custom .el-select { width: var(--val-unit-w); max-width: none; flex: 0 0 auto; }

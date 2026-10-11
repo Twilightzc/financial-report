@@ -330,7 +330,7 @@ func TestSelectBaseFCF(t *testing.T) {
 	}
 }
 
-// TestParseCustomFCF 自定义基期现金流单位换算（精确、不四舍五入），含上限边界。
+// TestParseCustomFCF 自定义基期自由现金流单位换算（精确、不四舍五入），含上限边界。
 func TestParseCustomFCF(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -361,20 +361,20 @@ func TestParseCustomFCF(t *testing.T) {
 	}
 }
 
-// TestParseCustomFCFErrors 自定义基期现金流非法输入的错误与文案。
+// TestParseCustomFCFErrors 自定义基期自由现金流非法输入的错误与文案。
 func TestParseCustomFCFErrors(t *testing.T) {
 	cases := []struct{ name, value, unit, wantMsg string }{
-		{"空值", "", "yi", "请输入基期现金流"},
-		{"仅空格", "   ", "yi", "请输入基期现金流"},
-		{"零", "0", "yi", "基期现金流需大于 0"},
-		{"零两位小数", "0.00", "yi", "基期现金流需大于 0"},
+		{"空值", "", "yi", "请输入基期自由现金流"},
+		{"仅空格", "   ", "yi", "请输入基期自由现金流"},
+		{"零", "0", "yi", "基期自由现金流需大于 0"},
+		{"零两位小数", "0.00", "yi", "基期自由现金流需大于 0"},
 		{"三位小数", "1.234", "yi", "格式不正确"},
 		{"负号", "-1", "yi", "格式不正确"},
 		{"科学计数法", "1e5", "yi", "格式不正确"},
 		{"字母", "abc", "yi", "格式不正确"},
 		{"省略整数位", ".5", "yi", "格式不正确"},
 		{"省略小数位", "5.", "yi", "格式不正确"},
-		{"未知单位", "1", "foo", "未知的基期现金流单位"},
+		{"未知单位", "1", "foo", "未知的基期自由现金流单位"},
 		{"超限（10亿亿）", "1000000000", "yi", "过大"},
 		{"略超上限（1e14+1e8）", "1000001", "yi", "过大"},
 		{"略超上限（1e14+0.01级）", "1000000.01", "yi", "过大"},

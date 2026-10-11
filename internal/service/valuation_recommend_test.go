@@ -25,6 +25,10 @@ func sampleRecommendation() model.ValuationRecommendation {
 		BaseGrowth:     12.5,
 		BaseGrowthNote: "近 3 个完整年度（2022、2023、2024）营业收入 / 净利润 / 经营活动现金流量净额同比增速中位数",
 		RiskPoints:     1,
+		FCFMode:        valFCFMedian,
+		FCFModeName:    "近几年中位数",
+		FCFYears:       3,
+		FCFRationale:   "近 3 年经营自由现金流增速波动较大（极差 233.33 个百分点），单年不代表常态，取近 3 年中位数。",
 	}
 }
 
@@ -429,6 +433,14 @@ func TestApplyValuationRecommendation(t *testing.T) {
 		res.Valuation.Volatile != rec.Volatile || res.Valuation.Warning != rec.Warning {
 		t.Errorf("确定性只读字段未回填：%+v", res.Valuation)
 	}
+	// R13：基期自由现金流推荐字段被确定性结果覆盖。
+	if res.Valuation.FCFMode != rec.FCFMode || res.Valuation.FCFModeName != rec.FCFModeName ||
+		res.Valuation.FCFYears != rec.FCFYears || res.Valuation.FCFRationale != rec.FCFRationale {
+		t.Errorf("基期自由现金流推荐未回填：%+v", res.Valuation)
+	}
+	if res.Valuation.FCFCustomValue != 0 || res.Valuation.FCFCustomUnit != "" {
+		t.Errorf("非 custom 推荐不应有自定义值/单位：%+v", res.Valuation)
+	}
 	if res.Valuation.Rationale != "大模型写的理由" {
 		t.Errorf("rationale 应保留大模型原文，实际 %q", res.Valuation.Rationale)
 	}
@@ -438,13 +450,46 @@ func TestApplyValuationRecommendation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("序列化失败: %v", err)
 	}
-	for _, want := range []string{`"model":"two_stage"`, `"discount_rate":9`, `"base_growth":12.5`, `"base_growth_note":`} {
+	for _, want := range []string{`"model":"two_stage"`, `"discount_rate":9`, `"base_growth":12.5`, `"base_growth_note":`,
+		`"fcf_mode":"median"`, `"fcf_mode_name":"近几年中位数"`, `"fcf_years":3`, `"fcf_rationale":`} {
 		if !strings.Contains(string(blob), want) {
 			t.Errorf("估值推荐 JSON 缺少 %s：%s", want, blob)
 		}
 	}
 	if strings.Contains(string(blob), `"volatile"`) || strings.Contains(string(blob), `"warning"`) {
 		t.Errorf("volatile=false / warning 为空时应由 omitempty 省略：%s", blob)
+	}
+	// 非 custom：fcf_custom_value / fcf_custom_unit 由 omitempty 省略（互斥语义）。
+	if strings.Contains(string(blob), `"fcf_custom_value"`) || strings.Contains(string(blob), `"fcf_custom_unit"`) {
+		t.Errorf("非 custom 推荐不应输出 fcf_custom_*：%s", blob)
+	}
+}
+
+// TestApplyValuationRecommendationFCFCustom R13：custom 推荐把元值换算为单位值写入响应，且大模型返回的脏值被丢弃。
+func TestApplyValuationRecommendationFCFCustom(t *testing.T) {
+	// 大模型即便返回 fcf_mode / 自定义值（提示词已禁止），也会被后端确定性结果覆盖（FR-5）。
+	raw := `{"scores":[{"dimension":"盈利能力","score":88,"comment":""},{"dimension":"偿债能力","score":90,"comment":""},{"dimension":"现金获取能力","score":85,"comment":""},{"dimension":"经营效率","score":76,"comment":""},{"dimension":"成长能力","score":82,"comment":""}],"conclusion":"c","industry":{"name":"n"},"valuation":{"fcf_mode":"average","fcf_custom_value":999,"fcf_custom_unit":"wan","rationale":"大模型写的理由"}}`
+	res, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	rec := model.ValuationRecommendation{
+		FCFMode:       valFCFCustom,
+		FCFModeName:   "自定义",
+		FCFCustomYuan: 63e8,
+		FCFCustomUnit: "yi",
+		FCFRationale:  "业绩增速不可持续…",
+	}
+	ApplyValuationRecommendation(&res, rec)
+
+	if res.Valuation.FCFMode != valFCFCustom || res.Valuation.FCFCustomUnit != "yi" {
+		t.Errorf("custom 推荐字段未回填：%+v", res.Valuation)
+	}
+	if res.Valuation.FCFCustomValue != 63 {
+		t.Errorf("自定义展示值应 = 元值 ÷ 1e8 = 63，实际 %v", res.Valuation.FCFCustomValue)
+	}
+	if res.Valuation.Rationale != "大模型写的理由" {
+		t.Errorf("rationale 应保留大模型原文，实际 %q", res.Valuation.Rationale)
 	}
 }
 
@@ -506,6 +551,8 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 		t.Errorf("系统提示词不应再含二选一的歧义分支：%s", system)
 	}
 	wants := []string{"基准增速 X：12.50%", rec.BaseGrowthNote, "两阶段模型", "two_stage", "9.0%", "g1=13", "n1=6", "g2=3"}
+	// R13：用户消息须包含基期自由现金流的确定性推荐（方式名 + 口径说明）。
+	wants = append(wants, "基期自由现金流", rec.FCFModeName, rec.FCFRationale)
 	for _, w := range wants {
 		if !strings.Contains(user, w) {
 			t.Errorf("用户消息缺少确定性估值参数「%s」：%s", w, user)
