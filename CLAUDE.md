@@ -52,10 +52,10 @@ api（Gin handler/router）→ service（指标计算，纯函数）/ client（�
 
 ## 迭代开发流水线
 
-当用户说 **「开始迭代开发」**（附一句需求描述），按固定顺序串起五个 subagent（定义在 `.claude/agents/`），每步产出落盘到 `docs/`、衔接给下一步：
+当用户说 **「开始迭代开发」**（附一句需求描述），按固定顺序串起五个 subagent（定义在 `.claude/agents/`），每步产出落盘到 `docs/`、衔接给下一步（需求目录命名：`R<编号>-<中文名>`，R 编号在需求确定时分配）：
 
-1. **prodexpert** — 需求分析：提炼需求重点、细化/完善、澄清不确定点，输出需求文档到 `docs/需求文档/<功能名>.md`（并更新其 `README.md` 索引）。
-2. **techexpert** — 技术设计：按需求做架构与实现设计，落到 `docs/技术设计文档.md`。
+1. **prodexpert** — 需求分析：提炼需求重点、细化/完善、澄清不确定点，输出需求文档到 `docs/<需求目录>/需求文档.md`（并更新 `docs/README.md` 索引）。
+2. **techexpert** — 技术设计：按需求做架构与实现设计，落到 `docs/<需求目录>/技术设计文档.md`。
 3. **coder** — 实现：按技术设计落地代码，跑通 `go build/vet/test` + `gofmt -l` + `node --check`。
 4. **tester** — 测试：按复杂度定方案，跑常见测试，发现问题用 `SendMessage` 回传 `coder` 修复并迭代到全部通过；大幅改动才输出测试报告到 `docs/测试报告/`。
 5. **githelper** — 提交：把通过验证的改动按规范提交（署名 `Co-Authored-By: Claude Code <noreply@anthropic.com>`）。
