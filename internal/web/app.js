@@ -1195,7 +1195,7 @@ const app = createApp({
                         </div>
                       </div>
                     </template>
-                    <div v-else-if="dim.status === 'pending'" class="pending-hint">该维度分析指标待补充（见 docs/公司财务指标分析.md）</div>
+                    <div v-else-if="dim.status === 'pending'" class="pending-hint">该维度分析指标待补充（见 docs/R3-六维财务指标分析/公司财务指标分析.md）</div>
                     <div v-else class="pending-hint">该维度暂无年报数据</div>
                   </el-tab-pane>
                 </el-tabs>
@@ -1481,13 +1481,17 @@ const app = createApp({
                   <div class="ai-section-title">估值模型推荐</div>
                   <div class="ai-valuation">
                     <span class="ai-model">{{ aiResult.valuation.model_name }}</span>
-                    <span class="ai-v">折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%</span>
+                    <span class="ai-v">折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%<template v-if="aiResult.valuation.wacc_baseline != null">（WACC 基线 {{ fmtNum(aiResult.valuation.wacc_baseline) }}%<template v-if="aiResult.valuation.risk_premium"> + 风险溢价 {{ fmtNum(aiResult.valuation.risk_premium) }}%</template>）</template></span>
+                    <span class="ai-v" v-if="aiResult.valuation.industry_type_name">行业类型 {{ aiResult.valuation.industry_type_name }}</span>
+                    <span class="ai-v" v-if="aiResult.valuation.beta">β {{ fmtNum(aiResult.valuation.beta) }}（{{ aiResult.valuation.beta_tier }}）</span>
                     <span v-for="p in aiResult.valuation.params" :key="p.key" class="ai-v">{{ p.label }} {{ fmtNum(p.value) }}</span>
                     <span v-if="aiResult.valuation.base_growth != null" class="ai-v">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%</span>
                     <span class="ai-v">基期自由现金流 {{ aiResult.valuation.fcf_mode_name }}<template v-if="aiResult.valuation.fcf_years">（{{ aiResult.valuation.fcf_years }}年）</template></span>
                     <span class="ai-v" v-if="aiResult.valuation.fcf_mode === 'custom'">自定义值 {{ fmtNum(aiResult.valuation.fcf_custom_value) }}{{ fcfUnitLabel(aiResult.valuation.fcf_custom_unit) }}</span>
-                    <el-button size="small" type="primary" plain @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
+                    <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
                   </div>
+                  <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false"
+                            :title="aiResult.valuation.inapplicable_reason || '现金流贴现法不适用'" />
                   <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
                   <p class="ai-text" v-if="aiResult.valuation.fcf_rationale">基期自由现金流：{{ aiResult.valuation.fcf_rationale }}</p>
                   <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，研发投入占比较高，建议开启研发调整（点「套用到估值」会自动打开该开关）。</p>

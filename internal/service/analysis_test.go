@@ -484,6 +484,41 @@ func TestWaccDegenerateToEquityCost(t *testing.T) {
 	}
 }
 
+// TestWaccWithEquityCostMatchesWacc R15/P1 重构回归：wacc 委托 waccWithEquityCost(…, 8.0) 后逐位相等。
+func TestWaccWithEquityCostMatchesWacc(t *testing.T) {
+	fixtures := []struct {
+		name          string
+		balanceByYear map[int]model.ReportRow
+		incomeByYear  map[int]model.ReportRow
+		year          int
+	}{
+		{"无债务", map[int]model.ReportRow{2024: {Fields: map[string]*float64{"TOTAL_EQUITY": fp(1000)}}}, nil, 2024},
+		{"债务成本缺失", map[int]model.ReportRow{
+			2023: {Fields: map[string]*float64{"SHORT_LOAN": fp(200), "TOTAL_EQUITY": fp(800)}},
+			2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(200), "TOTAL_EQUITY": fp(800)}},
+		}, map[int]model.ReportRow{}, 2024},
+		{"含债务成本", map[int]model.ReportRow{
+			2023: {Fields: map[string]*float64{"SHORT_LOAN": fp(100), "TOTAL_EQUITY": fp(900), "INTEREST_PAYABLE": fp(0)}},
+			2024: {Fields: map[string]*float64{"SHORT_LOAN": fp(120), "TOTAL_EQUITY": fp(980), "INTEREST_PAYABLE": fp(0)}},
+		}, map[int]model.ReportRow{2023: {Fields: map[string]*float64{"TOTAL_PROFIT": fp(100), "INCOME_TAX": fp(20)}},
+			2024: {Fields: map[string]*float64{"TOTAL_PROFIT": fp(100), "INCOME_TAX": fp(20), "FE_INTEREST_EXPENSE": fp(11)}}}, 2024},
+		{"投入资本为0", map[int]model.ReportRow{2024: {Fields: map[string]*float64{}}}, nil, 2024},
+	}
+	for _, f := range fixtures {
+		t.Run(f.name, func(t *testing.T) {
+			got := wacc(f.balanceByYear, f.incomeByYear, f.year)
+			want := waccWithEquityCost(f.balanceByYear, f.incomeByYear, f.year, 8.0)
+			switch {
+			case got == nil && want == nil:
+			case got == nil || want == nil:
+				t.Fatalf("wacc / waccWithEquityCost(…,8.0) 的 nil 语义不一致：%v vs %v", got, want)
+			case *got != *want:
+				t.Fatalf("数值逐位不等：wacc=%v waccWithEquityCost(…,8.0)=%v", *got, *want)
+			}
+		})
+	}
+}
+
 // TestEffectiveTaxRate 校验实际所得税税率 = 所得税费用 ÷ (利润总额 − 长期股权投资收益)。
 func TestEffectiveTaxRate(t *testing.T) {
 	r := effectiveTaxRate(model.ReportRow{Fields: map[string]*float64{

@@ -27,7 +27,7 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
   "conclusion": "总体结论（{conclusion}，分段分点、用换行分隔，覆盖：①公司质地与商业模式，②核心竞争优势/护城河，③财务健康与盈利质量（结合盈利能力/偿债能力/现金获取能力三个维度），④主要风险与隐忧，⑤综合评级与是否值得关注）",
   "industry": {"name": "行业名称", "prospect": "前景(1-2句)", "competition": "竞争格局(1-2句)", "application": "应用方向/需求(1-2句)"},
   "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)"}],
-  "valuation": {"rationale": "选择理由(2-3句，只能解释、不能改数)"}
+  "valuation": {"industry_type": "cyclical|general|utility", "rationale": "选择理由(2-3句，只能解释、不能改数)"}
 }
 
 说明：scores 必须恰好 5 项，维度名只能用「盈利能力、偿债能力、现金获取能力、经营效率、成长能力」这 5 个精确写法；score 为 0-100 的整数。
@@ -46,7 +46,12 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - 你的任务**仅为这些参数写 rationale（2-3 句）**：说明为什么该模型合适、该折现率与增长率反映了哪些财务与行业因素（可结合行业前景/竞争格局做定性解释）。
 - 硬性要求：rationale 中出现的任何数字必须与给定参数完全一致；**不得**建议或写出其它模型/折现率/增长率取值。
 - 系统还会给出「基期自由现金流」的确定性选取（选取方式、年数或自定义值及其口径）。请**结合公司发展**（业绩增速与自由现金流增速是否可持续）在 rationale 中解释为何选该基期自由现金流；**不得**建议其它选取方式或自定义值，出现的一切数字必须与给定值一致。
-- 输出 JSON 中 valuation 只返回 {"rationale": "..."}；其余字段由系统回填，即使填写也会被忽略。
+- 折现率由「WACC 基线 + 公司特定风险溢价」确定性推导；其中 β 由你输出的 industry_type 按常量表确定（cyclical 1.2 / general 1.0 / utility 0.8）。系统会在收到你的 industry_type 后据此**重算**折现率与永续增长率，故 rationale 请解释口径与依据（WACC 基线 + 公司风险溢价 + 行业 β 档位），**不要写出折现率 / 永续增长率的具体数值**。
+- 输出 JSON 中 valuation 需返回 {"industry_type": "...", "rationale": "..."}；除 industry_type 外的其余字段由系统回填，即使填写也会被忽略。
+
+## 行业类型判定规则
+- 依据主营构成（板块营收/利润占比与毛利率）与行业知识，从以下三选一中判定公司所属行业类型，并在 valuation.industry_type 字段**原样输出 ASCII key**：cyclical（周期性行业：钢铁/煤炭/化工/航运/养殖/券商/有色等，业绩随宏观或商品周期大幅波动）、general（一般行业：消费/制造/医药/科技/公用事业以外的多数行业）、utility（公用事业：电力/燃气/水务/高速公路/港口等，需求与现金流稳定、受价格管制）。
+- **不确定时输出 general**；不得输出其它取值。
 
 ## 行业分析规则
 - 行业 name 由公司名称推断；prospect（前景）、competition（竞争格局）、application（应用方向/需求）各写 1-2 句，结论简洁，不堆砌。
@@ -102,6 +107,15 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	b.WriteString("估值参数（系统按实际财报数据确定性推导，请据实解释、不得改动）：\n")
 	b.WriteString(fmt.Sprintf("- 基准增速 X：%.2f%%（%s）\n", rec.BaseGrowth, rec.BaseGrowthNote))
 	b.WriteString(fmt.Sprintf("- 模型：%s（%s）；折现率：%.1f%%\n", rec.ModelName, rec.Model, rec.DiscountRate))
+	// R15/P1：行业类型判定要求（恒输出，与 hasBalance 无关——行业判定不吃财务数据）。
+	b.WriteString("- 行业类型：请判定并在 industry_type 输出（cyclical 周期性行业 / general 一般行业 / utility 公用事业，三选一，不确定取 general）。\n")
+	// R15/P1：折现率构成（预推导口径；终态折现率与永续增长率将按 AI 判定的行业类型重算）。
+	if rec.WaccBaseline > 0 {
+		b.WriteString(fmt.Sprintf("- 折现率构成：WACC 基线 %.2f%% + 公司风险溢价 %.1f%%（无风险利率 %.1f%% + β %.2f（%s）× 风险溢价 %.1f%%）；β 将按你判定的 industry_type 重算（cyclical 1.2 / general 1.0 / utility 0.8），折现率与永续增长率随之重算。\n",
+			rec.WaccBaseline, rec.RiskPremium, rec.RiskFreeRate, rec.Beta, rec.BetaTier, rec.EquityRiskPremium))
+	} else {
+		b.WriteString("- 折现率构成：缺少资产负债表，折现率回落保守默认值；β 将按你判定的 industry_type 重算（cyclical 1.2 / general 1.0 / utility 0.8），折现率与永续增长率随之重算。\n")
+	}
 	if len(rec.Params) > 0 {
 		parts := make([]string, 0, len(rec.Params))
 		for _, p := range rec.Params {
@@ -326,6 +340,18 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 		// 展示值 = 元值 ÷ 单位系数（与前端口径一致，便于 applyAIValuation 直填表单）。
 		r.Valuation.FCFCustomValue = rec.FCFCustomYuan / float64(valFCFCustomUnits[rec.FCFCustomUnit])
 	}
+	// R15/P1：折现率分量 + 行业类型 + 适用性（确定性回填，大模型即便返回也被丢弃）。
+	r.Valuation.RiskFreeRate = rec.RiskFreeRate
+	r.Valuation.EquityRiskPremium = rec.EquityRiskPremium
+	r.Valuation.Beta = rec.Beta
+	r.Valuation.BetaTier = rec.BetaTier
+	r.Valuation.WaccBaseline = rec.WaccBaseline
+	r.Valuation.RiskPremium = rec.RiskPremium
+	r.Valuation.Applicable = rec.Applicable // 恒覆盖（大模型若返回也被丢弃）
+	r.Valuation.InapplicableReason = rec.InapplicableReason
+	// 行业类型：归一化后的 key 覆盖大模型原始值，脏值不外泄（须在 api 侧读取过原始值之后调用）。
+	r.Valuation.IndustryType = rec.IndustryType
+	r.Valuation.IndustryTypeName = rec.IndustryTypeName
 	// Rationale 保持大模型返回值，不覆盖
 }
 

@@ -29,6 +29,17 @@ func sampleRecommendation() model.ValuationRecommendation {
 		FCFModeName:    "近几年中位数",
 		FCFYears:       3,
 		FCFRationale:   "近 3 年经营自由现金流增速波动较大（极差 233.33 个百分点），单年不代表常态，取近 3 年中位数。",
+		// R15/P1：折现率分量 + 行业类型 + 适用性（确定性回填字段）。
+		RiskFreeRate:      valRiskFreeRate,
+		EquityRiskPremium: valEquityRiskPrem,
+		Beta:              valBetaNormal,
+		BetaTier:          valIndustryTypeNames[valIndustryGeneral],
+		WaccBaseline:      8.0,
+		RiskPremium:       1.0,
+		IndustryType:      valIndustryGeneral,
+		IndustryTypeName:  valIndustryTypeNames[valIndustryGeneral],
+		BetaBasis:         "缺省回落",
+		Applicable:        true,
 	}
 }
 
@@ -261,9 +272,9 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 		valModelTwoStage:   {"g1", "n1", "g2"},
 		valModelThreeStage: {"g1", "n1", "g2", "n2", "g3"},
 	}
-	discounts := []float64{8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0}
+	discounts := []float64{8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0}
 	for _, d := range discounts {
-		gk := perpetualGrowth(d)
+		gk := perpetualGrowthRaw(d)
 		if gk != 2 && gk != 3 && gk != 4 {
 			t.Fatalf("永续增长率 %v 不在网格 {2,3,4}", gk)
 		}
@@ -298,31 +309,17 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 			}
 		}
 	}
-	for risk := 0; risk <= 3; risk++ {
-		d := discountRateFor(risk, true)
-		if d < 8 || d > 12 || math.Abs(d*2-math.Round(d*2)) > 1e-9 {
-			t.Errorf("风险点 %d 的折现率 %v 不在 8.0–12.0 且非 0.5 的整数倍", risk, d)
+	// R15：折现率收口网格（任意输入都落在 [8,15] 且为 0.5 的整数倍）。
+	for _, raw := range []float64{-100, 0, 7.6, 8, 9.1, 10.26, 15.3, 100} {
+		d := clampDiscountRate(raw)
+		if d < valDiscountRateMin || d > valDiscountRateMax || math.Abs(d*2-math.Round(d*2)) > 1e-9 {
+			t.Errorf("clampDiscountRate(%v) = %v 不在 [8,15] 且非 0.5 的整数倍", raw, d)
 		}
 	}
 }
 
-func TestDiscountRateRiskPoints(t *testing.T) {
-	if got := discountRateFor(0, true); got != 9.0 {
-		t.Errorf("风险点 0 → %v，期望 9.0", got)
-	}
-	if got := discountRateFor(1, true); got != 10.0 {
-		t.Errorf("风险点 1 → %v，期望 10.0", got)
-	}
-	if got := discountRateFor(2, true); got != 11.0 {
-		t.Errorf("风险点 2 → %v，期望 11.0", got)
-	}
-	if got := discountRateFor(3, true); got != 12.0 {
-		t.Errorf("风险点 3 → %v，期望 12.0", got)
-	}
-	if got := discountRateFor(0, false); got != valDiscountFallback {
-		t.Errorf("资产负债表缺失 → %v，期望 %v", got, valDiscountFallback)
-	}
-
+// TestValuationRiskPoints（原 TestDiscountRateRiskPoints 的财务风险点部分独立成例，R15 保持不回归）。
+func TestValuationRiskPoints(t *testing.T) {
 	// 资产负债表缺失：无法评估，风险点 0 且标记为不可用。
 	if risk, ok := valuationRiskPoints(model.ReportRow{}, model.ReportRow{}); risk != 0 || ok {
 		t.Errorf("资产负债表缺失时应返回 (0, false)，实际 (%d, %v)", risk, ok)
@@ -332,9 +329,6 @@ func TestDiscountRateRiskPoints(t *testing.T) {
 	lowDebt := row(map[string]float64{"SHORT_LOAN": 0, "TOTAL_EQUITY": 1500})
 	if risk, ok := valuationRiskPoints(lowDebt, model.ReportRow{}); risk != 0 || !ok {
 		t.Errorf("利息保障倍数缺失不应计风险点，实际 (%d, %v)", risk, ok)
-	}
-	if got := discountRateFor(0, true); got != 9.0 {
-		t.Errorf("低负债无息公司折现率应为 9.0，实际 %v", got)
 	}
 
 	// 股东权益为 0 → 财务杠杆 nil → 计一个风险点。
@@ -353,6 +347,318 @@ func TestDiscountRateRiskPoints(t *testing.T) {
 	strongCover := row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "FINANCE_EXPENSE": 100})
 	if risk, _ := valuationRiskPoints(lowDebt, strongCover); risk != 0 {
 		t.Errorf("利息保障倍数 ≥ 3 不应计风险点，实际 %d", risk)
+	}
+}
+
+// —— R15/P1：折现率 WACC 基线链（equityCostCAPM / betaFor / clampDiscountRate / recommendDiscountRate）——
+
+// debtFreeBalance 构造仅含股东权益的资产负债表 map（无有息债务 → WACC 退化为纯股权成本）。
+func debtFreeBalance(equity float64) map[int]model.ReportRow {
+	return map[int]model.ReportRow{2024: row(map[string]float64{"TOTAL_EQUITY": equity})}
+}
+
+func TestEquityCostCAPM(t *testing.T) {
+	cases := []struct{ beta, want float64 }{
+		{1.0, 8.0}, // Rf 2.5 + 1.0×5.5 = 8.0（与既有硬编码股权成本吻合）
+		{1.2, 9.1},
+		{0.8, 6.9},
+	}
+	for _, c := range cases {
+		if got := equityCostCAPM(c.beta); math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("equityCostCAPM(%v) = %v，期望 %v", c.beta, got, c.want)
+		}
+	}
+}
+
+// TestNormalizeIndustryType 表驱动覆盖 §19.12.2 的归一化规则（含大小写/空白/中英文变体/无法识别）。
+func TestNormalizeIndustryType(t *testing.T) {
+	cases := map[string]string{
+		"cyclical":      valIndustryCyclical,
+		"Cyclical":      valIndustryCyclical,
+		"  CYCLICAL  ":  valIndustryCyclical,
+		"周期性行业":         valIndustryCyclical,
+		"周期型":           valIndustryCyclical,
+		"weak cyclical": valIndustryCyclical,
+		"utility":       valIndustryUtility,
+		"Utility":       valIndustryUtility,
+		"utilities":     valIndustryUtility,
+		"公用事业":          valIndustryUtility,
+		"general":       valIndustryGeneral,
+		"normal":        valIndustryGeneral, // 初稿曾用 normal 作 key，作兼容别名
+		"一般行业":          valIndustryGeneral,
+		"":              "", // 缺失 → 交给 betaFor 兜底
+		"   ":           "",
+		"mixed":         "", // 无法识别：不猜、不报错
+		"未知":            "",
+	}
+	for in, want := range cases {
+		if got := normalizeIndustryType(in); got != want {
+			t.Errorf("normalizeIndustryType(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// TestBetaFor 覆盖 §19.12.2 的 8 种情形（AI 分类为主、volatile 仅兜底，2026-10-16 拍板口径）。
+func TestBetaFor(t *testing.T) {
+	cases := []struct {
+		in       string
+		volatile bool
+		beta     float64
+		tierKey  string
+		tierName string
+		basis    string
+	}{
+		{"cyclical", false, 1.2, valIndustryCyclical, "周期性行业", "AI 行业分类"},
+		{"cyclical", true, 1.2, valIndustryCyclical, "周期性行业", "AI 行业分类"},
+		{"general", false, 1.0, valIndustryGeneral, "一般行业", "AI 行业分类"},
+		{"general", true, 1.0, valIndustryGeneral, "一般行业", "AI 行业分类"}, // AI 为主：volatile 不再抬升
+		{"utility", false, 0.8, valIndustryUtility, "公用事业", "AI 行业分类"},
+		{"utility", true, 0.8, valIndustryUtility, "公用事业", "AI 行业分类"}, // AI 为主：volatile 不再抬升
+		{"", false, 1.0, valIndustryGeneral, "一般行业", "缺省回落"},
+		{"", true, 1.2, valIndustryCyclical, "周期性行业", "波动兜底"},
+		{"mixed", false, 1.0, valIndustryGeneral, "一般行业", "缺省回落"}, // 非法串 → 同缺失
+	}
+	for _, c := range cases {
+		beta, key, name, basis := betaFor(c.in, c.volatile)
+		if beta != c.beta || key != c.tierKey || name != c.tierName || basis != c.basis {
+			t.Errorf("betaFor(%q, %v) = (%v, %q, %q, %q)，期望 (%v, %q, %q, %q)",
+				c.in, c.volatile, beta, key, name, basis, c.beta, c.tierKey, c.tierName, c.basis)
+		}
+		if beta != valBetaCyclical && beta != valBetaNormal && beta != valBetaUtility {
+			t.Errorf("betaFor(%q, %v) β = %v 不在 {0.8,1.0,1.2}", c.in, c.volatile, beta)
+		}
+	}
+}
+
+// TestIndustryTablesConsistent 三张行业表 key 集合一致、值域固定、回落档 β 与初稿一致。
+func TestIndustryTablesConsistent(t *testing.T) {
+	if len(valIndustryKeys) != len(valIndustryTypeNames) || len(valIndustryKeys) != len(valIndustryBetas) {
+		t.Fatalf("三张表长度不一致：keys=%d names=%d betas=%d",
+			len(valIndustryKeys), len(valIndustryTypeNames), len(valIndustryBetas))
+	}
+	for _, k := range valIndustryKeys {
+		if _, ok := valIndustryTypeNames[k]; !ok {
+			t.Errorf("valIndustryTypeNames 缺少 key %q", k)
+		}
+		if _, ok := valIndustryBetas[k]; !ok {
+			t.Errorf("valIndustryBetas 缺少 key %q", k)
+		}
+	}
+	for k, b := range valIndustryBetas {
+		if b != valBetaCyclical && b != valBetaNormal && b != valBetaUtility {
+			t.Errorf("valIndustryBetas[%q] = %v 不在 {0.8,1.0,1.2}", k, b)
+		}
+	}
+	if valIndustryBetas[valIndustryGeneral] != valBetaNormal {
+		t.Errorf("回落档 general 的 β = %v，期望 valBetaNormal = %v", valIndustryBetas[valIndustryGeneral], valBetaNormal)
+	}
+}
+
+// TestRecommendDiscountRate 表驱动覆盖 §19.9 的折现率出口（WACC 基线 + 风险溢价 → clamp[8,15] → 0.5 网格）。
+func TestRecommendDiscountRate(t *testing.T) {
+	empty := map[int]model.ReportRow{}
+
+	t.Run("缺资产负债表回落默认档", func(t *testing.T) {
+		dr := recommendDiscountRate(empty, empty, 2024, false, "", 0, false)
+		if dr.Rate != valDiscountFallback {
+			t.Errorf("缺资产负债表 Rate = %v，期望 %v", dr.Rate, valDiscountFallback)
+		}
+		if dr.Warning == "" {
+			t.Error("缺资产负债表应给出降级 Warning")
+		}
+	})
+
+	t.Run("无债务β1.0风险点0", func(t *testing.T) {
+		dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, "", 0, true)
+		if math.Abs(dr.EquityCost-8.0) > 1e-9 || math.Abs(dr.WaccBaseline-8.0) > 1e-9 {
+			t.Errorf("Re=%v baseline=%v，期望均为 8.0", dr.EquityCost, dr.WaccBaseline)
+		}
+		if dr.Rate != 8.0 || dr.RiskPremium != 0 {
+			t.Errorf("Rate=%v premium=%v，期望 8.0 / 0", dr.Rate, dr.RiskPremium)
+		}
+	})
+
+	t.Run("无债务β1.2网格收口", func(t *testing.T) {
+		dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, "cyclical", 0, true)
+		if math.Abs(dr.EquityCost-9.1) > 1e-9 {
+			t.Errorf("Re = %v，期望 9.1", dr.EquityCost)
+		}
+		if dr.Rate != 9.0 {
+			t.Errorf("raw 9.1 应网格化为 9.0，实际 %v", dr.Rate)
+		}
+	})
+
+	t.Run("无债务β0.8被下限吞掉", func(t *testing.T) {
+		dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, "utility", 0, true)
+		if math.Abs(dr.EquityCost-6.9) > 1e-9 {
+			t.Errorf("Re = %v，期望 6.9", dr.EquityCost)
+		}
+		if dr.Rate != 8.0 {
+			t.Errorf("raw 6.9 应 clamp 到 8.0，实际 %v", dr.Rate)
+		}
+	})
+
+	t.Run("风险溢价上限3", func(t *testing.T) {
+		dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, "", 3, true)
+		if dr.RiskPremium != valRiskPremiumCap {
+			t.Errorf("premium = %v，期望 %v", dr.RiskPremium, valRiskPremiumCap)
+		}
+		if dr.Rate != 11.0 { // baseline 8.0 + 3.0 = 11.0
+			t.Errorf("Rate = %v，期望 11.0", dr.Rate)
+		}
+		// 风险点超上限也截断到 3.0。
+		if got := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, "", 9, true).RiskPremium; got != valRiskPremiumCap {
+			t.Errorf("风险点 9 的 premium = %v，期望截断到 %v", got, valRiskPremiumCap)
+		}
+	})
+
+	t.Run("AI为主波动不抬升", func(t *testing.T) {
+		// 2026-10-16 拍板口径：AI 分类有效时 volatile 不抬升 β，industry_type_name 与 beta_tier 同档。
+		dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, true, "general", 0, true)
+		if dr.Beta != valBetaNormal || dr.BetaTier != "一般行业" {
+			t.Errorf("AI 判 general 时 volatile 不应抬升 β，实际 %v/%s", dr.Beta, dr.BetaTier)
+		}
+		if dr.IndustryType != valIndustryGeneral || dr.IndustryTypeName != "一般行业" {
+			t.Errorf("行业类型应为 AI 定性归属 一般行业，实际 %s/%s", dr.IndustryType, dr.IndustryTypeName)
+		}
+		// AI 未分类 + volatile → 波动兜底两档（此时两标签同为周期性行业）。
+		drV := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, true, "", 0, true)
+		if drV.Beta != valBetaCyclical || drV.BetaTier != "周期性行业" || drV.BetaBasis != "波动兜底" {
+			t.Errorf("AI 未分类 + volatile 应波动兜底 1.2/周期性行业，实际 %v/%s/%s", drV.Beta, drV.BetaTier, drV.BetaBasis)
+		}
+	})
+
+	t.Run("恒有Rate>gk", func(t *testing.T) {
+		for _, in := range []string{"", "cyclical", "general", "utility"} {
+			for _, rp := range []int{0, 1, 2, 3} {
+				dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, in, rp, true)
+				gk := math.Min(valLongTermGDP, perpetualGrowthRaw(dr.Rate))
+				if dr.Rate <= gk {
+					t.Errorf("行业 %q 风险点 %d：Rate %v 应 > gk %v", in, rp, dr.Rate, gk)
+				}
+			}
+		}
+	})
+}
+
+func TestIsFinancialLike(t *testing.T) {
+	if !isFinancialLike(row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000})) {
+		t.Error("营业收入>0 且无营业成本科目应为金融股近似")
+	}
+	if isFinancialLike(row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 900})) {
+		t.Error("有营业成本不应判为金融股")
+	}
+	if isFinancialLike(row(map[string]float64{})) {
+		t.Error("营业收入为 0 不应判为金融股")
+	}
+}
+
+// TestRecommendValuationInapplicable 不适用判定（Q6）：FCF≤0 / 金融股 / 亏损三情形，仍输出 model/params。
+func TestRecommendValuationInapplicable(t *testing.T) {
+	cases := []struct {
+		name       string
+		income     map[string]float64
+		cashflow   map[string]float64
+		reasonWord string
+	}{
+		{"负FCF", map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 900, "TOTAL_PROFIT": 100, "INCOME_TAX": 20},
+			map[string]float64{"NETCASH_OPERATE": 50, "FA_IR_DEPR": 100}, "自由现金流"},
+		{"金融股", map[string]float64{"TOTAL_OPERATE_INCOME": 1000},
+			map[string]float64{"NETCASH_OPERATE": 500}, "金融股"},
+		{"亏损", map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 1100},
+			map[string]float64{"NETCASH_OPERATE": 500}, "净利润为负"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			income := []model.ReportRow{rowAt("2024-12-31", c.income)}
+			cashflow := []model.ReportRow{rowAt("2024-12-31", c.cashflow)}
+			rec := RecommendValuation(nil, cashflow, income)
+			if rec.Applicable {
+				t.Fatalf("%s 应判不适用", c.name)
+			}
+			if !strings.Contains(rec.InapplicableReason, c.reasonWord) {
+				t.Errorf("不适用原因 %q 应含 %q", rec.InapplicableReason, c.reasonWord)
+			}
+			if !strings.Contains(rec.Warning, c.reasonWord) {
+				t.Errorf("Warning 应含不适用原因，实际 %q", rec.Warning)
+			}
+			// 不适用时仍输出模型与参数（R7 恒产出）。
+			if rec.Model == "" || rec.ModelName == "" {
+				t.Errorf("不适用时仍应输出模型：%+v", rec)
+			}
+		})
+	}
+
+	// 正常公司：applicable=true 且无 inapplicable_reason。
+	balance, cashflow, income := recommendFixture()
+	if rec := RecommendValuation(balance, cashflow, income); !rec.Applicable || rec.InapplicableReason != "" {
+		t.Errorf("正常公司应 applicable=true，实际 %+v", rec)
+	}
+}
+
+// TestRecommendValuationWithIndustry 终态推导：空行业串与 RecommendValuation 逐字段相同；
+// 有效行业串仅改变 β 相关字段，其余字段逐位不变（§19.12.4 字段依赖表）。
+func TestRecommendValuationWithIndustry(t *testing.T) {
+	balance, cashflow, income := recommendFixture()
+
+	base := RecommendValuation(balance, cashflow, income)
+	if got := RecommendValuationWithIndustry(balance, cashflow, income, ""); !reflect.DeepEqual(got, base) {
+		t.Errorf("空行业串应与 RecommendValuation 逐字段相同：\n基准 %+v\n终态 %+v", base, got)
+	}
+
+	util := RecommendValuationWithIndustry(balance, cashflow, income, "utility")
+	// 与 β 无关的字段两次调用逐位相同（幂等回归断言点）。
+	if base.Model != util.Model || base.ModelName != util.ModelName || base.BaseGrowth != util.BaseGrowth ||
+		base.BaseGrowthNote != util.BaseGrowthNote || base.Volatile != util.Volatile ||
+		base.RiskPoints != util.RiskPoints || base.Warning != util.Warning ||
+		base.AdjustRD != util.AdjustRD || base.RDRatio != util.RDRatio ||
+		base.FCFMode != util.FCFMode || base.FCFModeName != util.FCFModeName || base.FCFYears != util.FCFYears ||
+		base.FCFCustomYuan != util.FCFCustomYuan || base.FCFRationale != util.FCFRationale {
+		t.Errorf("与 β 无关的字段不应随行业类型变化：\n基准 %+v\nutility %+v", base, util)
+	}
+	// β 相关字段应变化。
+	if util.Beta != valBetaUtility || util.IndustryType != valIndustryUtility || util.IndustryTypeName != "公用事业" {
+		t.Errorf("utility 应映射 β=0.8/公用事业，实际 β=%v type=%s name=%s", util.Beta, util.IndustryType, util.IndustryTypeName)
+	}
+	if base.Beta != valBetaNormal || base.BetaBasis != "缺省回落" {
+		t.Errorf("预推导应 β=1.0（缺省回落），实际 β=%v basis=%s", base.Beta, base.BetaBasis)
+	}
+	// 折现率恒落在网格内。
+	for _, r := range []float64{base.DiscountRate, util.DiscountRate} {
+		if r < valDiscountRateMin || r > valDiscountRateMax || math.Abs(r*2-math.Round(r*2)) > 1e-9 {
+			t.Errorf("折现率 %v 不在 [8,15] 且非 0.5 的整数倍", r)
+		}
+	}
+}
+
+// TestRecommendValuationIndependence 行业类型只影响 β 链，且在相同 industryType 下逐位幂等。
+func TestRecommendValuationIndependence(t *testing.T) {
+	balance, cashflow, income := recommendFixture()
+	types := []string{"cyclical", "general", "utility"}
+	var ref model.ValuationRecommendation
+	for i, it := range types {
+		rec := RecommendValuationWithIndustry(balance, cashflow, income, it)
+		if rec.DiscountRate < valDiscountRateMin || rec.DiscountRate > valDiscountRateMax ||
+			math.Abs(rec.DiscountRate*2-math.Round(rec.DiscountRate*2)) > 1e-9 {
+			t.Errorf("行业 %q 折现率 %v 不在 [8,15] 或非 0.5 整数倍", it, rec.DiscountRate)
+		}
+		if i == 0 {
+			ref = rec
+			continue
+		}
+		// Model / BaseGrowth / FCFMode / AdjustRD 与 β 无关 → 恒等。
+		if rec.Model != ref.Model || rec.BaseGrowth != ref.BaseGrowth ||
+			rec.FCFMode != ref.FCFMode || rec.AdjustRD != ref.AdjustRD {
+			t.Errorf("行业 %q 的 β 无关字段与 %q 不一致：\n%+v\n%+v", it, types[0], rec, ref)
+		}
+	}
+	// 同行业类型连调 3 次逐字段相同（§19.12.5 放宽后的幂等口径）。
+	first := RecommendValuationWithIndustry(balance, cashflow, income, "cyclical")
+	for i := 0; i < 2; i++ {
+		if got := RecommendValuationWithIndustry(balance, cashflow, income, "cyclical"); !reflect.DeepEqual(got, first) {
+			t.Fatalf("第 %d 次终态推导与首次不一致：\n%+v\n%+v", i+2, first, got)
+		}
 	}
 }
 
@@ -441,6 +747,14 @@ func TestApplyValuationRecommendation(t *testing.T) {
 	if res.Valuation.FCFCustomValue != 0 || res.Valuation.FCFCustomUnit != "" {
 		t.Errorf("非 custom 推荐不应有自定义值/单位：%+v", res.Valuation)
 	}
+	// R15/P1：折现率分量 + 行业类型 + 适用性均被确定性结果覆盖。
+	if res.Valuation.RiskFreeRate != rec.RiskFreeRate || res.Valuation.EquityRiskPremium != rec.EquityRiskPremium ||
+		res.Valuation.Beta != rec.Beta || res.Valuation.BetaTier != rec.BetaTier ||
+		res.Valuation.WaccBaseline != rec.WaccBaseline || res.Valuation.RiskPremium != rec.RiskPremium ||
+		res.Valuation.Applicable != rec.Applicable || res.Valuation.InapplicableReason != rec.InapplicableReason ||
+		res.Valuation.IndustryType != rec.IndustryType || res.Valuation.IndustryTypeName != rec.IndustryTypeName {
+		t.Errorf("R15/P1 折现率分量/行业类型/适用性未回填：%+v", res.Valuation)
+	}
 	if res.Valuation.Rationale != "大模型写的理由" {
 		t.Errorf("rationale 应保留大模型原文，实际 %q", res.Valuation.Rationale)
 	}
@@ -451,7 +765,10 @@ func TestApplyValuationRecommendation(t *testing.T) {
 		t.Fatalf("序列化失败: %v", err)
 	}
 	for _, want := range []string{`"model":"two_stage"`, `"discount_rate":9`, `"base_growth":12.5`, `"base_growth_note":`,
-		`"fcf_mode":"median"`, `"fcf_mode_name":"近几年中位数"`, `"fcf_years":3`, `"fcf_rationale":`} {
+		`"fcf_mode":"median"`, `"fcf_mode_name":"近几年中位数"`, `"fcf_years":3`, `"fcf_rationale":`,
+		`"applicable":true`, `"risk_free_rate":2.5`, `"equity_risk_premium":5.5`, `"beta":1`,
+		`"beta_tier":"一般行业"`, `"wacc_baseline":8`, `"risk_premium":1`, `"industry_type":"general"`,
+		`"industry_type_name":"一般行业"`} {
 		if !strings.Contains(string(blob), want) {
 			t.Errorf("估值推荐 JSON 缺少 %s：%s", want, blob)
 		}
@@ -550,9 +867,17 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 	if strings.Contains(system, "zero 或 two_stage") {
 		t.Errorf("系统提示词不应再含二选一的歧义分支：%s", system)
 	}
+	// R15：系统提示词新增行业类型判定规则与 industry_type 输出字段。
+	for _, w := range []string{"行业类型判定规则", `"industry_type"`, "不确定时输出 general"} {
+		if !strings.Contains(system, w) {
+			t.Errorf("系统提示词缺少行业类型要求「%s」：%s", w, system)
+		}
+	}
 	wants := []string{"基准增速 X：12.50%", rec.BaseGrowthNote, "两阶段模型", "two_stage", "9.0%", "g1=13", "n1=6", "g2=3"}
 	// R13：用户消息须包含基期自由现金流的确定性推荐（方式名 + 口径说明）。
 	wants = append(wants, "基期自由现金流", rec.FCFModeName, rec.FCFRationale)
+	// R15：用户消息须包含行业类型判定要求与折现率构成（预推导口径）。
+	wants = append(wants, "行业类型：请判定并在 industry_type 输出", "折现率构成", "WACC 基线 8.00%", "β 1.00（一般行业）")
 	for _, w := range wants {
 		if !strings.Contains(user, w) {
 			t.Errorf("用户消息缺少确定性估值参数「%s」：%s", w, user)

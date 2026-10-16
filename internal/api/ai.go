@@ -74,9 +74,8 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 	analysis := service.ComputeAnalysis(balance, cashflow, income, startYear, endYear)
 
 	// 估值参数由后端按财报数据确定性推导（R7）：与年份范围、分析模式无关，保证多次分析结果一致。
+	// ① 预推导（industryType=""）：β 走波动兜底，用于组装 prompt。
 	rec := service.RecommendValuation(balance, cashflow, income)
-	log.Printf("AI 估值参数确定性推荐: code=%s 基准增速=%.2f%% 波动=%v 模型=%s 折现率=%.1f%% 风险点=%d 研发调整=%v 研发费用率=%.2f%%",
-		code, rec.BaseGrowth, rec.Volatile, rec.Model, rec.DiscountRate, rec.RiskPoints, rec.AdjustRD, rec.RDRatio)
 
 	// 主营构成（业务板块及营收占比）用于喂给大模型做业务板块分析；拉取失败不影响主流程。
 	segments, _ := h.c.FetchSegmentIncome(code)
@@ -95,8 +94,14 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 1, "message": err.Error(), "data": nil})
 		return
 	}
-	// 用确定性参数覆盖大模型返回的估值字段，仅保留其 rationale。
+	// ② 终态重算：先取出 AI 的行业分类原始串（Apply 会覆盖该字段），据此重解析 β 并重算 r / gk / Params。
+	industryRaw := result.Valuation.IndustryType
+	rec = service.RecommendValuationWithIndustry(balance, cashflow, income, industryRaw)
+
+	// ③ 用确定性参数覆盖大模型返回的估值字段（含把 IndustryType 归一化回填），仅保留其 rationale。
 	service.ApplyValuationRecommendation(&result, rec)
+	log.Printf("AI 估值参数确定性推荐: code=%s 行业类型=%s β=%.1f(%s) 基准增速=%.2f%% 波动=%v 模型=%s 折现率=%.1f%% 风险点=%d 研发调整=%v 研发费用率=%.2f%%",
+		code, rec.IndustryType, rec.Beta, rec.BetaBasis, rec.BaseGrowth, rec.Volatile, rec.Model, rec.DiscountRate, rec.RiskPoints, rec.AdjustRD, rec.RDRatio)
 	result.Usage = &usage
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": result})
 }

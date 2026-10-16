@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"financial-report/internal/model"
 )
@@ -38,6 +39,43 @@ const (
 	// 「FCF 增速极差 > 40pp 视为波动大」直接复用既有 valVolatileSpread = 40.0。
 )
 
+// R15/P1《自由现金流估值参数设定方法论》常量表（生效日期 2026-10-16）。
+// Rf / ERP / β 均为固定常量（Q8/Q9：不新增数据源，随版本手动更新并注明生效日期）。
+const (
+	valRiskFreeRate     = 2.5  // Rf 无风险利率 %（10 年期国债收益率常量）
+	valEquityRiskPrem   = 5.5  // ERP 股权风险溢价 %（A 股常用常量）
+	valBetaCyclical     = 1.2  // β 周期性行业
+	valBetaNormal       = 1.0  // β 一般行业
+	valBetaUtility      = 0.8  // β 公用事业（由 AI 行业分类 utility 触发）
+	valRiskPremiumCap   = 3.0  // 公司特定风险溢价上限 %（= 风险点满格 3 × 1.0）
+	valDiscountRateMin  = 8.0  // r 收口下限 %
+	valDiscountRateMax  = 15.0 // r 收口上限 %（放宽自原 [9,12]）
+	valDiscountRateStep = 0.5  // r 收口网格步长 %
+	valLongTermGDP      = 4.0  // 长期名义 GDP 增速上限 %（永续增长率 gk 上界，G6 常量显式化）
+)
+
+// R15/P1（2026-10-16 修订）：行业类型受约束枚举的 key（与 AI 输出、前端、prompt 三处共用同一批字面量）。
+const (
+	valIndustryCyclical = "cyclical" // 周期性行业
+	valIndustryGeneral  = "general"  // 一般行业（★回落档，AI 未给出合法分类时一律取它）
+	valIndustryUtility  = "utility"  // 公用事业
+)
+
+// valIndustryKeys 枚举全集，固定顺序（prompt 展示用；也是 normalizeIndustryType 的合法值白名单）。
+var valIndustryKeys = []string{valIndustryCyclical, valIndustryGeneral, valIndustryUtility}
+
+// valIndustryTypeNames 行业类型中文名（供展示与 prompt）。
+var valIndustryTypeNames = map[string]string{
+	valIndustryCyclical: "周期性行业", valIndustryGeneral: "一般行业", valIndustryUtility: "公用事业",
+}
+
+// valIndustryBetas 行业类型 → β 的确定性常量表（AI 不产出数值，只产出上述枚举）。
+var valIndustryBetas = map[string]float64{
+	valIndustryCyclical: valBetaCyclical, // 1.2
+	valIndustryGeneral:  valBetaNormal,   // 1.0
+	valIndustryUtility:  valBetaUtility,  // 0.8
+}
+
 // fcfRecommendation 基期自由现金流选取推荐结果（unexported，service 包内可单测）。
 type fcfRecommendation struct {
 	Mode       string  // latest / average / median / trim_mean / custom
@@ -48,27 +86,39 @@ type fcfRecommendation struct {
 	Rationale  string  // 确定性口径说明
 }
 
-// valDiscountTable 风险点 0–3 → 折现率%（FR-1 网格 8.0–12.0 中的四档，等距 1%）。
-var valDiscountTable = [4]float64{9.0, 10.0, 11.0, 12.0}
-
 // annualGrowth 某年报年度的同比增速样本（%）。
 type annualGrowth struct {
 	Year  int
 	Value float64
 }
 
-// RecommendValuation 由财报数据确定性推导估值模型与参数。
+// RecommendValuation 由财报数据确定性推导估值模型与参数（预推导：行业类型未知，β 走波动兜底）。
 //
 // 纯函数：无 IO、无随机、无时间依赖，同一组报表任意次调用结果完全相同（FR-6 幂等）。
 // 参数只由报表数据本身决定（取数据中最近的若干完整年度），与请求的年份范围、分析模式无关。
 //
-// 口径见《技术设计文档》11.5：
+// 口径见《技术设计文档》R7 11.5 与 R15 19.5：
 //  1. 三个指标（营业收入 / 重构净利润 / 经营活动现金流量净额）各取最近 3 个「本年与上年
 //     均有年报且上年为正」年度的同比增速，合并后取一次中位数得基准增速 X%；
 //  2. X% 分档唯一确定模型（≥20 三阶段 / ≥8 两阶段 / ≥0 永续 / <0 零增长）；
-//  3. 折现率由财务风险点（0–3）映射到 9.0/10.0/11.0/12.0；
-//  4. 增长率与年数取自固定网格，永续增长率与折现率反相关。
+//  3. 折现率由 WACC 基线（股权成本 Rf+β×ERP，β 由行业类型决定）+ 公司风险溢价收口到 [8,15] 的 0.5 网格；
+//  4. 增长率与年数取自固定网格，永续增长率 gk = min(长期 GDP 上限, f(r))。
+//
+// 签名与语义保持 R7 现状不变（industryType 取空），供 prompt 组装与既有调用方/测试使用。
 func RecommendValuation(balance, cashflow, income []model.ReportRow) model.ValuationRecommendation {
+	return recommendValuation(balance, cashflow, income, "")
+}
+
+// RecommendValuationWithIndustry 终态推导：以 AI 输出的行业分类（原始串）重解析 β 并重算全部受 β
+// 影响的字段（β 系列 / Re / WACC 基线 / 折现率 / gk / Params），其余字段与预推导逐位相同（§19.12.4）。
+// api 层须在 ParseAIResult 之后、ApplyValuationRecommendation 之前调用（后者会覆盖 IndustryType）。
+func RecommendValuationWithIndustry(balance, cashflow, income []model.ReportRow, industryType string) model.ValuationRecommendation {
+	return recommendValuation(balance, cashflow, income, industryType)
+}
+
+// recommendValuation 内部唯一实现：全部 P1 推导链（含 industryType → β 的解析，见 §19.12.4）。
+// industryType 为大模型返回的行业分类原始串（预推导阶段传 ""）；脏值/缺失一律走确定性兜底，不报错。
+func recommendValuation(balance, cashflow, income []model.ReportRow, industryType string) model.ValuationRecommendation {
 	incomeByYear, incomeYears := annualRows(income)
 	cfByYear, cfYears := annualRows(cashflow)
 	balanceByYear, balanceYears := annualRows(balance)
@@ -98,24 +148,19 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 	}
 	volatile := len(samples) >= 2 && spread(samples) > valVolatileSpread
 
-	// 折现率：取三张表中最新的年报年份评估财务风险；资产负债表缺失时回落默认档。
+	// 折现率：取三张表中最新的年报年份评估财务风险；由 WACC 基线 + 公司风险溢价收口（R15/P1）。
 	latest := latestYear(incomeYears, cfYears, balanceYears)
 	inc := incomeByYear[latest]
 	cf := cfByYear[latest]
 	riskPoints, hasBalance := valuationRiskPoints(balanceByYear[latest], inc)
-	discount := discountRateFor(riskPoints, hasBalance)
-	gk := perpetualGrowth(discount)
+	dr := recommendDiscountRate(balanceByYear, incomeByYear, latest, volatile, industryType, riskPoints, hasBalance)
+	discount := dr.Rate
+	gk := math.Min(valLongTermGDP, perpetualGrowthRaw(discount))
 
 	// 无可用增速样本（数据不足 2 年）时 X=0 且模型固定为零增长（FR-3 的唯一降级路径）。
 	mdl := classifyModel(x)
 	if insufficient {
 		mdl = valModelZero
-	}
-
-	// 套用提示：对应 R4 默认的基期选取方式（最近一年）。
-	warning := ""
-	if fcf := operatingFreeCashFlow(inc, cf); fcf <= 0 {
-		warning = "以最新年报计的基期经营资产自由现金流为负或零，套用后 R4 估值可能提示「现金流贴现法不适用」"
 	}
 
 	// R13：逐年经营资产自由现金流（与 R4 ComputeValuation 完全同口径）与基期选取推荐。
@@ -132,6 +177,33 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		rdRatio = math.Round(*rdPct*100) / 100 // 仅展示值取整到 2 位小数（判定用未取整的原始比率）
 	}
 
+	// —— 出口收口：Warning 累加器 + 不适用判定（Q6）——
+	// P4 一致性校验层（C4~C7）向同一累加器追加，此处为挂点（见《技术设计文档》19.5.4 / 19.8）。
+	warns := make([]string, 0, 2)
+	if dr.Warning != "" {
+		warns = append(warns, dr.Warning)
+	}
+	// C1 r > g_term：r ≥ 8 > gk ≤ 4，构造上恒成立，此处作防御（若违反则告警而非静默输出）。
+	// C2 g_term ≤ g(预测期末段) ≤ g1：由 recommendParams 的三阶段递减构造保证（P2 修复边界）。
+	// C3 g_term ≤ 长期 GDP：由 gk = min(valLongTermGDP, …) 构造保证。
+	if discount <= gk {
+		warns = append(warns, "折现率不高于永续增长率，现金流贴现法参数不自洽。")
+	}
+
+	// —— 不适用判定（按序命中，唯一出口；不适用时仍输出 model/params，由前端禁用「套用到估值」）——
+	applicable, reason := true, ""
+	switch {
+	case operatingFreeCashFlow(inc, cf) <= 0:
+		applicable, reason = false, "以最新年报计的基期经营资产自由现金流为负或零，现金流贴现法不适用。"
+	case isFinancialLike(inc):
+		applicable, reason = false, "金融股（无「营业成本」科目，报表口径与现金流贴现法不匹配），暂不支持估值。"
+	case netProfitReconstructed(inc) <= 0:
+		applicable, reason = false, "最新年报净利润为负（亏损），无法构成可持续现金流，现金流贴现法不适用。"
+	}
+	if !applicable {
+		warns = append(warns, reason)
+	}
+
 	return model.ValuationRecommendation{
 		Model:          mdl,
 		ModelName:      valuationModelNames[mdl],
@@ -141,7 +213,7 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		BaseGrowthNote: note,
 		Volatile:       volatile,
 		RiskPoints:     riskPoints,
-		Warning:        warning,
+		Warning:        strings.Join(warns, "；"),
 		AdjustRD:       adjustRD,
 		RDRatio:        rdRatio,
 		FCFMode:        fcfRec.Mode,
@@ -150,6 +222,18 @@ func RecommendValuation(balance, cashflow, income []model.ReportRow) model.Valua
 		FCFCustomYuan:  fcfRec.CustomYuan,
 		FCFCustomUnit:  fcfRec.CustomUnit,
 		FCFRationale:   fcfRec.Rationale,
+		// R15/P1：折现率分量的可观测字段 + 行业类型 + 适用性（全部只读、确定性回填）。
+		RiskFreeRate:       valRiskFreeRate,
+		EquityRiskPremium:  valEquityRiskPrem,
+		Beta:               dr.Beta,
+		BetaTier:           dr.BetaTier,
+		WaccBaseline:       dr.WaccBaseline,
+		RiskPremium:        dr.RiskPremium,
+		IndustryType:       dr.IndustryType,
+		IndustryTypeName:   dr.IndustryTypeName,
+		BetaBasis:          dr.BetaBasis,
+		Applicable:         applicable,
+		InapplicableReason: reason,
 	}
 }
 
@@ -435,8 +519,9 @@ func classifyModel(x float64) string {
 	}
 }
 
-// perpetualGrowth 永续增长率 gk（贴近长期 GDP 增速）：折现率越低（公司越稳）假设越高。
-func perpetualGrowth(discount float64) float64 {
+// perpetualGrowthRaw 永续增长率 gk 的原始映射（贴近长期 GDP 增速）：折现率越低（公司越稳）假设越高。
+// 上限不在此处施加：调用方取 gk = min(valLongTermGDP, perpetualGrowthRaw(r))（G6 常量显式化）。
+func perpetualGrowthRaw(discount float64) float64 {
 	switch {
 	case discount <= 9.0:
 		return 4
@@ -461,19 +546,120 @@ func stageYears(x float64) (n1, n2 int) {
 	}
 }
 
-// discountRateFor 风险点（0–3）→ 折现率%（网格 9.0/10.0/11.0/12.0）。
-// 资产负债表缺失（无法评估财务风险）时走默认档 10.0%（FR-4 确定性降级）。
-func discountRateFor(riskPoints int, hasBalance bool) float64 {
+// discountResult 折现率推导结果（unexported，service 包内可单测）。
+type discountResult struct {
+	Rate             float64 // 收口后 r %
+	EquityCost       float64 // Re %（CAPM）
+	Beta             float64 // 生效 β
+	BetaTier         string  // 生效 β 档位中文名（AI 分类有效时与 IndustryTypeName 同档）
+	BetaBasis        string  // β 取值依据（见 betaFor）
+	IndustryType     string  // 归一化行业 key（cyclical / general / utility）
+	IndustryTypeName string  // 行业类型中文名（AI 定性归属，非生效 β 档位）
+	WaccBaseline     float64 // WACC 基线 %（收口前、含债务加权、未加公司风险溢价；缺资产负债表时为 0）
+	RiskPremium      float64 // 公司特定风险溢价 %
+	Warning          string  // 缺资产负债表时的降级提示（否则 ""）
+}
+
+// equityCostCAPM 股权成本 Re = Rf + β × ERP（%）。β=1.0 → 8.0%（与既有硬编码股权成本吻合）。
+func equityCostCAPM(beta float64) float64 {
+	return valRiskFreeRate + beta*valEquityRiskPrem
+}
+
+// normalizeIndustryType 把大模型返回的行业类型（原始串）归一化到白名单 key：
+// 命中（含中/英文写法与常见变体）返回 valIndustry* 之一，无法识别返回 ""（不猜、不报错）。
+// 匹配顺序 cyclical → utility → general：general 的关键词最泛（「一般」），放最后避免吞掉其它档位。
+// 纯字符串匹配、无 IO、无随机，供 betaFor 与展示复用。
+func normalizeIndustryType(raw string) string {
+	n := strings.ToLower(strings.TrimSpace(raw))
+	if n == "" {
+		return ""
+	}
+	switch n { // 精确命中（AI 照 prompt 输出 ASCII key 时的正常路径）
+	case valIndustryCyclical, valIndustryGeneral, valIndustryUtility:
+		return n
+	}
+	switch {
+	case strings.Contains(n, "cycl") || strings.Contains(n, "周期"):
+		return valIndustryCyclical
+	case strings.Contains(n, "utilit") || strings.Contains(n, "公用"):
+		return valIndustryUtility
+	case strings.Contains(n, "general") || strings.Contains(n, "normal") || strings.Contains(n, "一般"):
+		return valIndustryGeneral
+	}
+	return ""
+}
+
+// betaFor 由「AI 行业分类 + 经营波动性」确定 β 档位（AI 分类为主、volatile 仅兜底，见 §19.12.2 / §19.11 #8）。
+// β 是唯一入口：其余代码不得自行映射，其输出恒 ∈ {0.8, 1.0, 1.2}。
+// 返回 tierKey/tierName 为**生效 β 档位**（AI 分类有效时即该分类档，volatile 不再抬升）；
+// basis 为 β 取值依据（内部可观测字段，供日志与单测），取值范围只有三种：
+// 「AI 行业分类」/「波动兜底」/「缺省回落」。
+func betaFor(industryType string, volatile bool) (beta float64, tierKey, tierName, basis string) {
+	key := normalizeIndustryType(industryType)
+	if key != "" { // ① AI 分类有效 → 常量表取值（主信号，volatile 不抬升）
+		return valIndustryBetas[key], key, valIndustryTypeNames[key], "AI 行业分类"
+	}
+	// ② AI 分类缺失/非法 → volatile 两档兜底（与初稿方案逐位一致）。
+	if volatile {
+		return valBetaCyclical, valIndustryCyclical, valIndustryTypeNames[valIndustryCyclical], "波动兜底"
+	}
+	return valBetaNormal, valIndustryGeneral, valIndustryTypeNames[valIndustryGeneral], "缺省回落"
+}
+
+// recommendDiscountRate P1 出口：AI 行业分类 → β → Re → WACC 基线 + 风险溢价 → clamp[8,15] → 0.5 网格（纯函数）。
+// industryType 为大模型输出的原始行业分类（预推导阶段传 ""），β 的解析全部在本函数内完成。
+// 缺资产负债表（无法评估资本结构）时回落保守默认值 valDiscountFallback（10.0%）并给出 Warning。
+func recommendDiscountRate(balanceByYear, incomeByYear map[int]model.ReportRow, latest int,
+	volatile bool, industryType string, riskPoints int, hasBalance bool) discountResult {
+	beta, tierKey, tierName, basis := betaFor(industryType, volatile)
+	re := equityCostCAPM(beta)
+
+	// 行业类型（展示用）：AI 的定性归属；AI 缺失/非法时回落档即 betaFor 的兜底档（tierKey，非波动 → general）。
+	indType := normalizeIndustryType(industryType)
+	if indType == "" {
+		indType = tierKey
+	}
+	res := discountResult{
+		EquityCost:       re,
+		Beta:             beta,
+		BetaTier:         tierName,
+		BetaBasis:        basis,
+		IndustryType:     indType,
+		IndustryTypeName: valIndustryTypeNames[indType],
+	}
 	if !hasBalance {
-		return valDiscountFallback
+		res.Rate = valDiscountFallback
+		res.Warning = "缺少资产负债表，无法评估资本结构与财务成本，折现率回落保守默认值 10.0%。"
+		return res
 	}
-	if riskPoints < 0 {
-		riskPoints = 0
+
+	// WACC 基线：投入资本=0（无债务且无权益）时退化为纯股权成本 Re。
+	if base := waccWithEquityCost(balanceByYear, incomeByYear, latest, re); base != nil {
+		res.WaccBaseline = *base
+	} else {
+		res.WaccBaseline = re
 	}
-	if riskPoints > len(valDiscountTable)-1 {
-		riskPoints = len(valDiscountTable) - 1
+	res.RiskPremium = math.Min(float64(riskPoints)*1.0, valRiskPremiumCap)
+	res.Rate = clampDiscountRate(res.WaccBaseline + res.RiskPremium)
+	return res
+}
+
+// clampDiscountRate 折现率收口：四舍五入到 0.5 网格后 clamp 到 [8, 15]（先取网格再截断，边界唯一）。
+func clampDiscountRate(raw float64) float64 {
+	r := math.Round(raw/valDiscountRateStep) * valDiscountRateStep
+	if r < valDiscountRateMin {
+		return valDiscountRateMin
 	}
-	return valDiscountTable[riskPoints]
+	if r > valDiscountRateMax {
+		return valDiscountRateMax
+	}
+	return r
+}
+
+// isFinancialLike 金融股（银行/保险/券商）近似判定：营业收入 > 0 且「营业成本」科目缺失/为 0。
+// 依据项目已知限制「银行/金融股无营业成本科目」（OPERATE_COST），属启发式（待实测，见 §19.10 #3）。
+func isFinancialLike(income model.ReportRow) bool {
+	return revenue(income) > 0 && v0(income, "OPERATE_COST") == 0
 }
 
 // valuationRiskPoints 财务风险点计数（0–3）与资产负债表是否可用。

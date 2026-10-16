@@ -59,6 +59,25 @@ type AIValuation struct {
 	FCFCustomValue float64 `json:"fcf_custom_value,omitempty"` // custom 展示值（单位见 fcf_custom_unit，取整到整亿）
 	FCFCustomUnit  string  `json:"fcf_custom_unit,omitempty"`  // custom 单位 key（本期固定 "yi"）
 	FCFRationale   string  `json:"fcf_rationale,omitempty"`    // 确定性口径说明
+
+	// R15/P1 新增：折现率 WACC 基线化的可观测分量（服务端确定性回填，只读）。
+	// 均设 omitempty：wacc_baseline / risk_premium 为 0 时省略属正常语义（如 riskPoints=0 → 无 risk_premium）。
+	RiskFreeRate      float64 `json:"risk_free_rate,omitempty"`      // Rf 无风险利率 %
+	EquityRiskPremium float64 `json:"equity_risk_premium,omitempty"` // ERP 股权风险溢价 %
+	Beta              float64 `json:"beta,omitempty"`                // β（由行业类型常量表映射；恒为非零 → 必输出）
+	BetaTier          string  `json:"beta_tier,omitempty"`           // 生效 β 档位中文名
+	WaccBaseline      float64 `json:"wacc_baseline,omitempty"`       // WACC 基线 %（缺资产负债表时为 0 → 省略）
+	RiskPremium       float64 `json:"risk_premium,omitempty"`        // 公司特定风险溢价 %
+
+	// R15/P1 新增：不适用判定（Q6）。Applicable 不设 omitempty：true/false 均须出现，
+	// 前端用 === false 守卫，缺字段的旧响应不会被误禁用。
+	Applicable         bool   `json:"applicable"`                    // 现金流贴现法是否适用
+	InapplicableReason string `json:"inapplicable_reason,omitempty"` // 不适用原因（Applicable=false 时非空）
+
+	// R15/P1（2026-10-16 修订）：行业类型。IndustryType 双向——AI 输出时=原始分类，
+	// 服务端回填时=归一化 key（cyclical/general/utility）；IndustryTypeName 为中文名（只出）。
+	IndustryType     string `json:"industry_type,omitempty"`      // 归一化行业 key（服务端回填）
+	IndustryTypeName string `json:"industry_type_name,omitempty"` // 行业类型中文名
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -82,6 +101,23 @@ type ValuationRecommendation struct {
 	FCFCustomYuan float64 // custom 推荐值（元，整亿倍数）；非 custom 为 0
 	FCFCustomUnit string  // custom 单位 key（本期固定 "yi"）；非 custom 为 ""
 	FCFRationale  string  // 确定性口径说明（供展示与喂给大模型写理由）
+
+	// R15/P1：折现率 WACC 基线化的可观测分量（只读，供展示、日志与喂给大模型写理由）。
+	RiskFreeRate      float64 // Rf 无风险利率 %（常量 2.5）
+	EquityRiskPremium float64 // ERP 股权风险溢价 %（常量 5.5）
+	Beta              float64 // β（由 IndustryType 经常量表映射；AI 未分类时由 volatile 兜底）
+	BetaTier          string  // 生效 β 档位中文名（「周期性行业」/「一般行业」/「公用事业」）
+	WaccBaseline      float64 // WACC 基线 %（含债务加权，未加公司特定风险溢价；缺资产负债表时为 0）
+	RiskPremium       float64 // 公司特定风险溢价 %（= riskPoints，0~3）
+
+	// R15/P1（2026-10-16 修订）：行业类型（AI 定性分类，受约束枚举；服务端归一化后回填）。
+	IndustryType     string // 归一化枚举 key：cyclical / general / utility（AI 缺省/非法时回落 general）
+	IndustryTypeName string // 中文名（「周期性行业」/「一般行业」/「公用事业」）
+	BetaBasis        string // β 取值依据（纯内部，无 JSON tag；供日志与单测断言 β 来源）
+
+	// R15/P1：不适用判定（Q6）。
+	Applicable         bool   // 现金流贴现法是否适用（false 时前端禁用「套用到估值」）
+	InapplicableReason string // 不适用原因（Applicable=false 时非空）
 }
 
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。

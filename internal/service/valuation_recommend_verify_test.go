@@ -213,18 +213,15 @@ func TestVerifyRecommendOutputGridCompliance(t *testing.T) {
 		fixture{"波动+三阶段", nil, nil, vfyRevFixture(map[int]float64{2021: 100, 2022: 105, 2023: 157.5, 2024: 236.25}, []int{2021, 2022, 2023, 2024})},
 	)
 
-	validDiscount := map[float64]bool{9.0: true, 10.0: true, 11.0: true, 12.0: true}
 	for _, f := range fixtures {
 		f := f
 		t.Run(f.name, func(t *testing.T) {
 			rec := RecommendValuation(f.balance, f.cashflow, f.income)
 
-			// 折现率：必须是 FR-1 网格内的值（本规则产出 9/10/11/12 四档）。
-			if !validDiscount[rec.DiscountRate] {
-				t.Errorf("折现率 %v 不在规则产出的 {9,10,11,12} 档", rec.DiscountRate)
-			}
-			if rec.DiscountRate < 8 || rec.DiscountRate > 12 || math.Abs(rec.DiscountRate*2-math.Round(rec.DiscountRate*2)) > 1e-9 {
-				t.Errorf("折现率 %v 不在 8.0–12.0 且非 0.5 的整数倍", rec.DiscountRate)
+			// 折现率：R15/P1 由 WACC 基线 + 风险溢价收口 → [8,15] 且为 0.5 的整数倍。
+			if rec.DiscountRate < valDiscountRateMin || rec.DiscountRate > valDiscountRateMax ||
+				math.Abs(rec.DiscountRate*2-math.Round(rec.DiscountRate*2)) > 1e-9 {
+				t.Errorf("折现率 %v 不在 [8,15] 且非 0.5 的整数倍", rec.DiscountRate)
 			}
 			// 风险点 0–3。
 			if rec.RiskPoints < 0 || rec.RiskPoints > 3 {

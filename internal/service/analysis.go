@@ -1741,14 +1741,21 @@ func effectiveTaxRateNote(incomeByYear map[int]model.ReportRow, years []int) str
 // 投入资本 = 有息债务 + 股东权益；股权资本成本默认 8%；税后债务资本成本 = 债务资本成本×(1−实际所得税税率)。
 // 无有息债务时债务成本项为 0，退化为纯股权成本 8%。投入资本为 0 时返回 nil。
 func wacc(balanceByYear, incomeByYear map[int]model.ReportRow, year int) *float64 {
+	// 直接写字面量 8.0（而非 equityCostRate×100）以保证与抽取前逐位相同，避免浮点舍入引入 1 ulp 差异。
+	return waccWithEquityCost(balanceByYear, incomeByYear, year, 8.0)
+}
+
+// waccWithEquityCost 与 wacc 同构，但股权资本成本由入参给出（R15/P1：供估值模块传入 CAPM 的股权成本 Re）。
+// 复用 debtCapitalCost / effectiveTaxRate / interestBearingDebt / equityValue；投入资本为 0 时返回 nil。
+// 无有息债务（或债务成本不可得）时债务成本项为 0，退化为纯股权成本 equityCost。
+func waccWithEquityCost(balanceByYear, incomeByYear map[int]model.ReportRow, year int, equityCost float64) *float64 {
 	b := balanceByYear[year]
 	debt := interestBearingDebt(b)
-	equity := v0(b, "TOTAL_EQUITY")
+	equity := equityValue(b)
 	invested := debt + equity
 	if invested == 0 {
 		return nil
 	}
-	equityCost := 8.0 // %，文档默认股权资本成本
 	afterTaxDebtCost := 0.0
 	if dc := debtCapitalCost(balanceByYear, incomeByYear, year); dc != nil {
 		afterTaxDebtCost = *dc * (1 - effectiveTaxRate(incomeByYear[year]))
