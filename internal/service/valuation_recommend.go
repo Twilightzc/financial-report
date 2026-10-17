@@ -100,6 +100,24 @@ const (
 	valRDDoubleCondition = true // 研发双条件总开关（false 时回退旧单条件，便于灰度与回滚）
 )
 
+// R15/P5 成长型 FCF 噪声修复（生效日期 2026-10-17）。
+const (
+	// 修复点 1：成长性否决（营收趋势 + 毛利率稳定性）
+	valGrowthVetoMinYears    = 3     // 至少 3 个营收年报观测（2 个同比点）才可判定
+	valGrowthVetoMinCAGR     = 15.0  // 营收窗口 CAGR ≥ 15% 视为持续高增长
+	valGrowthVetoStrongYoY   = 10.0  // 单年营收同比 ≥ 10% 计为「强增长年」
+	valGrowthVetoStrongYears = 2     // 至少 2 个强增长年
+	valGrowthVetoMaxDecline  = -10.0 // 营收同比最小值不得低于 -10%（容忍小幅波动）
+	valGrowthVetoMaxGMRange  = 20.0  // 窗口内毛利率极差 ≤ 20pp（排除商品价格周期）
+	valFCFYearsGrowth        = 5     // 成长性否决后的 fcf_years（不按强周期取 7）
+
+	// 修复点 2：FCF 增速分项可靠性
+	valFCFGrowthMinPoints = 2 // FCF 增速至少 2 个有效同比点（否则单点不代表趋势）
+
+	// 修复点 3：稳定性信号下行口径（valStabilityPenalty=2.0 复用既有常量，不改斜率；
+	// 只把输入从「全幅极差」换成「下行极差」）。
+)
+
 // R15/P1（2026-10-16 修订）：行业类型受约束枚举的 key（与 AI 输出、前端、prompt 三处共用同一批字面量）。
 const (
 	valIndustryCyclical = "cyclical" // 周期性行业
@@ -157,10 +175,34 @@ type modelScoreResult struct {
 // fcfCycle FCF 周期性判定的确定性结果（纯计算）。
 type fcfCycle struct {
 	Evaluated   bool    // 是否具备判定条件（≥3 年且均值 > 0）
-	Cyclical    bool    // 强周期：CV > 0.5 或正负交替 ≥ 2 次
+	RawCyclical bool    // 原始判据：CV > 0.5 或符号翻转 ≥ 2
+	Cyclical    bool    // 生效判据：RawCyclical && !GrowthVeto
+	GrowthVeto  bool    // 成长性否决是否命中
 	CV          float64 // 变异系数 = 总体标准差 ÷ 均值（均值 ≤ 0 时为 0）
 	SignChanges int     // 相邻非零值的符号翻转次数
 	WindowYears int     // 实际参与判定的年数（≤ 7）
+}
+
+// growthPattern 成长性判定结果（纯函数；只吃利润表营收/营业成本）。
+type growthPattern struct {
+	Evaluated        bool    // 是否具备判定条件（≥3 个年报、首末营收 >0、≥2 个同比点）
+	RevenueCAGR      float64 // 窗口首末营收 CAGR %
+	MinYoY           float64 // 窗口内营收同比最小值 %
+	StrongYears      int     // 营收同比 ≥ valGrowthVetoStrongYoY 的年度数
+	YoYCount         int     // 有效营收同比点数
+	GrossMarginRange float64 // 毛利率极差 pp
+	GrossMarginOK    bool    // 至少 2 个年度可算毛利率
+	Veto             bool    // 成长性否决：满足全部成长条件
+	Basis            string  // 确定性口径说明（供展示/prompt，不编造）
+}
+
+// fcfGrowthTerm FCF 增速分项的可用性/计入结果。
+type fcfGrowthTerm struct {
+	Value     float64 // 稳健增速 %
+	Basis     string  // 同比去极值中位数 / CAGR
+	Available bool    // 是否能算出增速
+	Included  bool    // 是否计入 X
+	Reason    string  // 未计入原因（计入时为空）
 }
 
 // RecommendValuation 由财报数据确定性推导估值模型与参数（预推导：行业类型未知，β 走波动/周期兜底）。
@@ -168,10 +210,11 @@ type fcfCycle struct {
 // 纯函数：无 IO、无随机、无时间依赖，同一组报表任意次调用结果完全相同（FR-6 幂等）。
 // 参数只由报表数据本身决定（取数据中最近的若干完整年度），与请求的年份范围、分析模式无关。
 //
-// 口径见《技术设计文档》R15 19.6~19.8：
+// 口径见《技术设计文档》R15 19.6~19.8、19.14（P5）：
 //  1. 基准增速 X = 营业收入 / 重构净利润 / 经营资产自由现金流三项稳健增速的显式等权（窗口 5 年，缺项归一化）；
-//  2. 模型由「增速 0.6 + 稳定性 0.2 + ROE 0.2」三信号评分落档（门槛 70/45/25，硬闸门 X≥12/≥6/<3→zero）；
-//  3. g1 = X × (1 − clamp(增速离散度×0.004, 0, 0.40))，并受 floor(SGR) 上限约束；
+//     FCF 序列不稳定（原始强周期 / 有效同比点不足 / 增速极差 >40pp）时不把 FCF 计入 X；
+//  2. 模型由「增速 0.6 + 稳定性 0.2（下行口径） + ROE 0.2」三信号评分落档（门槛 70/45/25，硬闸门 X≥12/≥6/<3→zero）；
+//  3. g1 = X × (1 − clamp(全幅增速离散度×0.004, 0, 0.40))，并受 floor(SGR) 上限约束；
 //  4. 三阶段强制 g1 > g2 > g3，无解按 three→two→perpetual→zero 降级；
 //  5. 折现率由 WACC 基线 + 公司风险溢价收口到 [8,15] 的 0.5 网格；
 //  6. 基期年统一为利润表 ∩ 现金流量表的最新共同年（C7）。
@@ -211,14 +254,20 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		fcfByYear[y] = operatingFreeCashFlow(incomeByYear[y], cfByYear[y])
 	}
 
+	// —— G8 修复点 1：周期判定前移（FCF 增速分项的可靠性依赖原始周期判据）——
+	// 成长性判定只依赖利润表（营收/营业成本），不依赖 X，无循环依赖。
+	gp := assessGrowthPattern(incomeByYear, incomeWindow)
+	cycle := detectFCFCycle(fcfByYear, fcfYears, gp)
+
 	// —— G3：三项稳健增速显式等权（缺项不补 0，按可用项数归一化）——
+	// 修复点 2：FCF 序列不稳定（原始强周期 / 有效同比点不足 / 增速极差过大）时不把 FCF 计入 X。
 	xRev, basisRev, okRev := rowSeriesGrowth(incomeByYear, incomeWindow, revenue)
 	xNP, basisNP, okNP := rowSeriesGrowth(incomeByYear, incomeWindow, netProfitReconstructed)
-	xFCF, basisFCF, okFCF := fcfSeriesGrowth(fcfByYear, fcfGrowthYears)
-	x, k := weightedGrowth(xRev, okRev, xNP, okNP, xFCF, okFCF)
+	fcfTerm := assessFCFGrowth(fcfByYear, fcfGrowthYears, okRev || okNP, cycle)
+	x, k := weightedGrowth(xRev, okRev, xNP, okNP, fcfTerm.Value, fcfTerm.Included)
 	insufficient := k == 0
 
-	// —— G5 稳定性信号：营收/净利润各自同比增速极差的最大值（不含经营现金流增速）——
+	// —— G5 稳定性信号：全幅极差（volatile / g1 折减）+ 下行极差（稳定性分）——
 	revYoY := rowYoY(incomeByYear, incomeWindow, revenue)
 	npYoY := rowYoY(incomeByYear, incomeWindow, netProfitReconstructed)
 	revSpread, revOK := spreadIf(revYoY, valVolatileMinSamples)
@@ -230,12 +279,21 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 	if npOK && npSpread > dispersion {
 		dispersion = npSpread
 	}
+	// 修复点 3：稳定性分只惩罚下行波动（以 0 为锚），正向大波动不扣分。
+	revDown, revDownOK := downsideIf(revYoY, valVolatileMinSamples)
+	npDown, npDownOK := downsideIf(npYoY, valVolatileMinSamples)
+	downsideDispersion := 0.0
+	if revDownOK {
+		downsideDispersion = revDown
+	}
+	if npDownOK && npDown > downsideDispersion {
+		downsideDispersion = npDown
+	}
 	stabilityAvailable := revOK || npOK
 	volatile := (revOK && revSpread > valVolatileSpread) || (npOK && npSpread > valVolatileSpread)
 
-	// —— G8：FCF 周期识别（β 兜底依赖 Cyclical，必须先于折现率计算）——
-	cycle := detectFCFCycle(fcfByYear, fcfYears)
-	fallbackCyclical := volatile || cycle.Cyclical
+	// β 兜底：成长性否决抑制 volatile 信号（AI 行业分类仍优先，见 §19.14.4）。
+	fallbackCyclical := (volatile && !gp.Veto) || cycle.Cyclical
 
 	// 折现率：取基期年评估财务风险；由 WACC 基线 + 公司风险溢价收口（R15/P1）。
 	inc := incomeByYear[latest]
@@ -257,7 +315,7 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 			roeVals = append(roeVals, *v)
 		}
 	}
-	ms := classifyModelScore(x, dispersion, stabilityAvailable, roeVals, insufficient)
+	ms := classifyModelScore(x, downsideDispersion, stabilityAvailable, roeVals, insufficient)
 	mdl, score := ms.Model, ms.Score
 
 	// —— G4：留存率与 SGR（不可用时不设上限，不编造留存率）——
@@ -309,13 +367,14 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		if okNP {
 			usedYears = append(usedYears, rowYoYYears(incomeByYear, incomeWindow, netProfitReconstructed)...)
 		}
-		if okFCF {
+		if fcfTerm.Included { // 未计入 X 的 FCF 年份不参与「同比年度」计数
 			usedYears = append(usedYears, fcfYoYYears(fcfByYear, fcfGrowthYears)...)
 		}
 		note = buildBaseGrowthNote(uniqueYears(usedYears), k,
-			growthParts(xRev, okRev, xNP, okNP, xFCF, okFCF),
-			growthBases(basisRev, okRev, basisNP, okNP, basisFCF, okFCF),
-			growthMissing(okRev, okNP, okFCF))
+			growthParts(xRev, okRev, xNP, okNP, fcfTerm.Value, fcfTerm.Included),
+			growthBases(basisRev, okRev, basisNP, okNP, fcfTerm.Basis, fcfTerm.Included),
+			growthMissing(okRev, okNP, fcfTerm.Available),
+			growthExcluded(fcfTerm)...)
 	}
 
 	// —— P4 一致性校验（C1~C3 构造保证；C4 已在上方复核；C5/C6/C7 只告警）——
@@ -417,11 +476,11 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		// R15/P2：基准增速构成 + 多信号分档 + SGR。
 		GrowthRevenue:     xRev,
 		GrowthProfit:      xNP,
-		GrowthFCF:         xFCF,
+		GrowthFCF:         fcfTerm.Value,
 		GrowthDispersion:  dispersion,
 		GrowthRevenueOK:   okRev,
 		GrowthProfitOK:    okNP,
-		GrowthFCFOK:       okFCF,
+		GrowthFCFOK:       fcfTerm.Available,
 		ModelScore:        score,
 		ScoreGrowth:       ms.ScoreGrowth,
 		ScoreStability:    ms.ScoreStability,
@@ -437,6 +496,13 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		FCFSignChanges: cycle.SignChanges,
 		FCFWindowYears: fcfWindow,
 		RDExpansion:    rdExpand,
+		// R15/P5：成长型 FCF 噪声修复的可观测字段（只读、确定性回填）。
+		GrowthFCFIncluded:        fcfTerm.Included,
+		GrowthFCFExcludeReason:   fcfTerm.Reason,
+		GrowthDownsideDispersion: downsideDispersion,
+		FCFRawCyclical:           cycle.RawCyclical,
+		FCFGrowthVeto:            cycle.GrowthVeto,
+		GrowthVetoBasis:          gp.Basis,
 		// R15/P4：一致性校验的可观测字段。
 		BaseYear:       latest,
 		CapexCoverage:  capexRatio,
@@ -607,7 +673,8 @@ func growthMissing(okRev, okNP, okFCF bool) []string {
 // buildBaseGrowthNote 构造基准增速口径说明。
 // years 是参与增速计算的「同比终点年」（不含窗口首年），因此用「同比年度」而非「完整年度」，
 // 避免把 5 年观测窗口写成 4 个完整年度（B5）。
-func buildBaseGrowthNote(years []int, k int, parts, bases, missing []string) string {
+// excluded 为「可算但未计入 X」的分项说明（如 FCF 序列不稳定）——与 missing（真正不可用）严格区分。
+func buildBaseGrowthNote(years []int, k int, parts, bases, missing []string, excluded ...string) string {
 	prefix := fmt.Sprintf("近 %d 个同比年度", len(years))
 	if !continuousYears(years) {
 		prefix = fmt.Sprintf("可计算的 %d 个同比年度", len(years))
@@ -620,11 +687,22 @@ func buildBaseGrowthNote(years []int, k int, parts, bases, missing []string) str
 	if len(missing) > 0 {
 		b.WriteString(fmt.Sprintf("（%s样本不足）", strings.Join(missing, "、")))
 	}
+	if len(excluded) > 0 {
+		b.WriteString("；" + strings.Join(excluded, "；"))
+	}
 	b.WriteString("。")
 	if len(bases) > 0 {
 		b.WriteString(fmt.Sprintf("（%s）。", strings.Join(bases, "；")))
 	}
 	return b.String()
+}
+
+// growthExcluded 可算但未计入 X 的分项说明（missing 只放真正不可用的分项，禁止混用）。
+func growthExcluded(t fcfGrowthTerm) []string {
+	if !t.Available || t.Included {
+		return nil
+	}
+	return []string{fmt.Sprintf("FCF %.2f%% 未计入（%s）", t.Value, t.Reason)}
 }
 
 // continuousYears 年份是否逐年连续（相邻年份差恰为 1）。
@@ -669,9 +747,10 @@ func commonYears(a, b []int) []int {
 // classifyModelScore 多信号评分 → 模型档位（返回总分与 sg/st/sr 分项，用于解释为何分类）。
 //
 // 三信号：增速 Sg（0.6）、稳定性 Sst（0.2）、ROE Sroe（0.2）；缺失信号按剩余权重归一化，
-// 不把缺失信号当 0 分。落档按序命中：X<3/样本不足 → zero；score≥70 且 X≥12 → three；
+// 不把缺失信号当 0 分。Sst 的输入为「下行离散度」pp（R15/P5：只惩罚下行波动，正向大波动不扣分）。
+// 落档按序命中：X<3/样本不足 → zero；score≥70 且 X≥12 → three；
 // score≥45 且 X≥6 → two；score≥25 → perpetual；否则 zero。
-func classifyModelScore(x, dispersion float64, stabilityAvailable bool, roeVals []float64, insufficient bool) modelScoreResult {
+func classifyModelScore(x, downsideDispersion float64, stabilityAvailable bool, roeVals []float64, insufficient bool) modelScoreResult {
 	res := modelScoreResult{
 		ScoreGrowth:  clampFloat(valGrowthScoreOffset+valGrowthScoreSlope*x, 0, 100),
 		HasStability: stabilityAvailable,
@@ -681,7 +760,7 @@ func classifyModelScore(x, dispersion float64, stabilityAvailable bool, roeVals 
 	weighted := valModelWeightGrowth * res.ScoreGrowth
 
 	if stabilityAvailable {
-		res.ScoreStability = clampFloat(100-valStabilityPenalty*dispersion, 0, 100)
+		res.ScoreStability = clampFloat(100-valStabilityPenalty*downsideDispersion, 0, 100)
 		total += valModelWeightStability
 		weighted += valModelWeightStability * res.ScoreStability
 	}
@@ -760,7 +839,18 @@ func sustainableGrowth(balanceByYear, incomeByYear map[int]model.ReportRow, year
 //	R9 FCF 增速极差 > 40 → median；R10 兜底 → average。
 //
 // custom 取整到整亿后 ≤ 0 时不产出 custom，退回 median（保证推荐值 > 0，FR-4 边界）。
+//
+// R15/P5：R3 只看「生效」周期判据（cycle.Cyclical）；成长性否决命中时追加豁免口径说明。
 func RecommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fcfRecommendation {
+	rec := recommendBaseFCF(fcfByYear, years, cycle)
+	if cycle.GrowthVeto {
+		rec.Rationale += "（成长性豁免：营收持续高增长，FCF 高波动不视为强周期）"
+	}
+	return rec
+}
+
+// recommendBaseFCF RecommendBaseFCF 的规则主体（按序命中的原样实现，不含成长性豁免文案）。
+func recommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fcfRecommendation {
 	available := len(years)
 	if available == 0 { // R0
 		return fcfRecLatest("无可用经营自由现金流数据（现金流量表为空），退回最近一年。")
@@ -782,7 +872,7 @@ func RecommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fc
 		return fcfRecLatest(fmt.Sprintf("近年（%s）经营自由现金流均为非正，无法构成可持续中枢，退回最近一年。", joinYears(win)))
 	}
 
-	// R3：强周期且去极值平均为正 → 强制取完整周期的去极值平均。
+	// R3：生效强周期（CV/符号翻转命中且未被成长性否决）且去极值平均为正 → 强制取完整周期的去极值平均。
 	if cycle.Cyclical {
 		if trim := trimMeanOf(vals); trim > 0 {
 			return fcfRecommendation{
@@ -880,8 +970,9 @@ func fcfGrowthPoints(fcfByYear map[int]float64, years []int) []float64 {
 // detectFCFCycle 用最近 ≤7 年 FCF 序列判定周期性（纯函数，无 IO/随机/时间）。
 //
 // 变异系数 = 总体标准差（÷n）÷ 均值；均值 ≤ 0 时不做判定（CV 无意义）。
-// 强周期 = CV > 0.5 或相邻非零值符号翻转 ≥ 2 次（0 值跳过、不改 prevSign）。
-func detectFCFCycle(fcfByYear map[int]float64, years []int) fcfCycle {
+// 原始判据 RawCyclical = CV > 0.5 或相邻非零值符号翻转 ≥ 2 次（0 值跳过、不改 prevSign）。
+// 生效判据 Cyclical = RawCyclical && !GrowthVeto：营收持续高增长的成长股即使 FCF 波动大也不判强周期。
+func detectFCFCycle(fcfByYear map[int]float64, years []int, gp growthPattern) fcfCycle {
 	if len(years) == 0 {
 		return fcfCycle{}
 	}
@@ -928,16 +1019,138 @@ func detectFCFCycle(fcfByYear map[int]float64, years []int) fcfCycle {
 		}
 		c.CV = math.Sqrt(variance/float64(m)) / mean
 	}
-	c.Cyclical = c.Evaluated && (c.CV > valCycleCVThreshold || c.SignChanges >= valCycleSignChanges)
+	c.RawCyclical = c.Evaluated && (c.CV > valCycleCVThreshold || c.SignChanges >= valCycleSignChanges)
+	c.GrowthVeto = c.RawCyclical && gp.Veto
+	c.Cyclical = c.RawCyclical && !c.GrowthVeto
 	return c
 }
 
+// assessGrowthPattern 用利润表最近 ≤5 年（incomeWindow）判定是否「持续成长型」。
+// 四层判据：营收 CAGR、最小同比、强增长年数、毛利率极差；全部满足才否决周期判定。
+// 纯函数：只读营收(TOTAL_OPERATE_INCOME)与营业成本(OPERATE_COST)，无 IO/随机/时间。
+func assessGrowthPattern(incomeByYear map[int]model.ReportRow, years []int) growthPattern {
+	gp := growthPattern{}
+	if len(years) < valGrowthVetoMinYears {
+		return gp
+	}
+	obs := make([]float64, len(years))
+	for i, y := range years {
+		obs[i] = revenue(incomeByYear[y])
+	}
+	first, last := obs[0], obs[len(obs)-1]
+	span := years[len(years)-1] - years[0]
+	if first <= 0 || last <= 0 || span <= 0 {
+		return gp
+	}
+
+	yoy := make([]float64, 0, len(obs)-1)
+	for i := 1; i < len(obs); i++ {
+		if obs[i-1] > 0 {
+			yoy = append(yoy, (obs[i]-obs[i-1])/obs[i-1]*100)
+		}
+	}
+	if len(yoy) < 2 {
+		return gp
+	}
+
+	gp.Evaluated = true
+	gp.RevenueCAGR = (math.Pow(last/first, 1/float64(span)) - 1) * 100
+	gp.MinYoY = yoy[0]
+	for _, v := range yoy[1:] {
+		if v < gp.MinYoY {
+			gp.MinYoY = v
+		}
+	}
+	for _, v := range yoy {
+		if v >= valGrowthVetoStrongYoY {
+			gp.StrongYears++
+		}
+	}
+	gp.YoYCount = len(yoy)
+
+	// 毛利率极差：仅统计 revenue>0 且 operateCost>0 的年度（缺失 → 该条件不阻塞）。
+	gms := make([]float64, 0, len(years))
+	for _, y := range years {
+		rev, cost := revenue(incomeByYear[y]), operateCost(incomeByYear[y])
+		if rev > 0 && cost > 0 {
+			gms = append(gms, (rev-cost)/rev*100)
+		}
+	}
+	if len(gms) >= 2 {
+		gp.GrossMarginOK = true
+		gp.GrossMarginRange = spread(gms)
+	}
+
+	gp.Veto = gp.RevenueCAGR >= valGrowthVetoMinCAGR &&
+		gp.MinYoY >= valGrowthVetoMaxDecline &&
+		gp.StrongYears >= valGrowthVetoStrongYears &&
+		(!gp.GrossMarginOK || gp.GrossMarginRange <= valGrowthVetoMaxGMRange)
+
+	gmText := "不可用"
+	if gp.GrossMarginOK {
+		gmText = fmt.Sprintf("%.2fpp", gp.GrossMarginRange)
+	}
+	gp.Basis = fmt.Sprintf("营收 CAGR %.2f%%、最小同比 %.2f%%、强增长年 %d/%d、毛利率极差 %s",
+		gp.RevenueCAGR, gp.MinYoY, gp.StrongYears, gp.YoYCount, gmText)
+	return gp
+}
+
+// assessFCFGrowth 计算 FCF 增速并判定是否计入 X（纯函数）。
+//
+// otherAvailable = okRev || okNP（至少有一个非 FCF 分项可用）。不稳定判定按序命中、唯一原因：
+// 原始强周期 → 有效同比点不足 → 增速极差 > 40pp。FCF 是唯一可用分项时即使不稳定也保留，
+// 避免 k=0 被误判为「样本不足」。
+func assessFCFGrowth(fcfByYear map[int]float64, years []int, otherAvailable bool, cycle fcfCycle) fcfGrowthTerm {
+	v, basis, ok := fcfSeriesGrowth(fcfByYear, years)
+	t := fcfGrowthTerm{Value: v, Basis: basis, Available: ok, Included: ok}
+	if !ok {
+		return t
+	}
+	if !otherAvailable {
+		return t
+	}
+	yoys := fcfGrowthPoints(fcfByYear, years)
+	switch {
+	case cycle.RawCyclical:
+		t.Included = false
+		t.Reason = fmt.Sprintf("序列不稳定：变异系数 %.2f、正负交替 %d 次", cycle.CV, cycle.SignChanges)
+	case len(yoys) < valFCFGrowthMinPoints:
+		t.Included = false
+		t.Reason = fmt.Sprintf("有效同比点仅 %d 个（窗口内存在非正 FCF）", len(yoys))
+	case spread(yoys) > valFCFGrowthSpread:
+		t.Included = false
+		t.Reason = fmt.Sprintf("同比增速极差 %.2f pp（> %.0f pp）", spread(yoys), valFCFGrowthSpread)
+	}
+	return t
+}
+
+// downsideIf 下行离散度 = max(0, −min(values))；样本数不足 min 时 ok=false。
+func downsideIf(values []float64, min int) (float64, bool) {
+	if len(values) < min {
+		return 0, false
+	}
+	lo := values[0]
+	for _, v := range values[1:] {
+		if v < lo {
+			lo = v
+		}
+	}
+	if lo >= 0 {
+		return 0, true
+	}
+	return -lo, true
+}
+
 // fcfWindowYears 按 FCF 周期状态给出推荐窗口年数（不含可用年数截断）。
+// 成长性否决必须放在 CV 分支之前：否决后 Cyclical=false 但 CV 仍可能 >0.5，
+// 若保留旧的 `Cyclical || CV>阈值` 分支会再次返回 7 年，修复失效。
 func fcfWindowYears(c fcfCycle) int {
 	switch {
 	case !c.Evaluated:
 		return valFCFRecMaxYears // 数据不足：不额外缩短，交给 R1 兜底
-	case c.Cyclical || c.CV > valCycleCVThreshold:
+	case c.GrowthVeto:
+		return valFCFYearsGrowth
+	case c.Cyclical:
 		return valFCFYearsCyclical
 	case c.CV > valFCVMildThreshold:
 		return valFCFYearsMild

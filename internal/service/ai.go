@@ -132,11 +132,31 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	}
 	// R15/P2：基准增速构成、多信号分档与 SGR（只解释口径，不得改写数字）。
 	// 缺失分项标记「不可用」而不是写成 0%，避免向大模型编造数据点（A3）。
-	b.WriteString(fmt.Sprintf("- 基准增速构成：营收 %s / 净利润 %s / FCF %s（三项等权，缺失项按可用项归一化）；盈利增速极差 %s。\n",
+	// R15/P5：FCF 不稳定时单独标注「未计入」，不得写成「三项等权」或「样本不足」。
+	terms := 0
+	for _, ok := range []bool{rec.GrowthRevenueOK, rec.GrowthProfitOK, rec.GrowthFCFOK && rec.GrowthFCFIncluded} {
+		if ok {
+			terms++
+		}
+	}
+	weightText := fmt.Sprintf("按 %d 项等权", terms)
+	if terms == 0 {
+		weightText = "无可用分项，基准增速按 0 计"
+	}
+	fcfExcluded := ""
+	if rec.GrowthFCFOK && !rec.GrowthFCFIncluded {
+		fcfExcluded = "；FCF 未计入：" + rec.GrowthFCFExcludeReason
+	}
+	downsideText := "不可用"
+	if rec.HasStabilityScore {
+		downsideText = fmt.Sprintf("%.2f pp（稳定性分按此计算）", rec.GrowthDownsideDispersion)
+	}
+	b.WriteString(fmt.Sprintf("- 基准增速构成：营收 %s / 净利润 %s / FCF %s（%s%s）；盈利增速极差 %s；下行波动 %s。\n",
 		growthPromptValue(rec.GrowthRevenue, rec.GrowthRevenueOK),
 		growthPromptValue(rec.GrowthProfit, rec.GrowthProfitOK),
 		growthPromptValue(rec.GrowthFCF, rec.GrowthFCFOK),
-		dispersionPromptValue(rec.GrowthDispersion, rec.HasStabilityScore)))
+		weightText, fcfExcluded,
+		dispersionPromptValue(rec.GrowthDispersion, rec.HasStabilityScore), downsideText))
 	b.WriteString(fmt.Sprintf("- 模型分档：得分 %.2f（%s）→ %s（权重 增速 0.6 / 稳定性 0.2 / ROE 0.2，阈值 70/45/25；X<3%% 直接零增长）。\n",
 		rec.ModelScore, modelScoreParts(rec), rec.ModelName))
 	if rec.SGR > 0 {
@@ -145,10 +165,17 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	} else {
 		b.WriteString("- 可持续增长率：不可用（留存率/ROE 数据不足），高增长期增长率未施加上限。\n")
 	}
-	// R15/P3：FCF 周期与研发双条件。
+	// R15/P3：FCF 周期与研发双条件；R15/P5：同时给出原始判据、成长性豁免与生效判据。
 	if rec.FCFWindowYears > 0 {
-		b.WriteString(fmt.Sprintf("- 周期性：FCF 变异系数 %.2f（符号翻转 %d 次）→ %s；基期 FCF 判定窗口 %d 年、方式 %s。\n",
-			rec.FCFCV, rec.FCFSignChanges, boolText(rec.FCFCyclical, "强周期", "非强周期"),
+		vetoBasis := rec.GrowthVetoBasis
+		if vetoBasis == "" {
+			vetoBasis = "营收数据不足，未判定"
+		}
+		b.WriteString(fmt.Sprintf("- 周期性：FCF 变异系数 %.2f（符号翻转 %d 次）→ 原始判据%s；成长性豁免%s（%s）→ 生效判据%s；基期 FCF 判定窗口 %d 年、方式 %s。\n",
+			rec.FCFCV, rec.FCFSignChanges,
+			boolText(rec.FCFRawCyclical, "强周期", "非强周期"),
+			boolText(rec.FCFGrowthVeto, "命中", "未命中"), vetoBasis,
+			boolText(rec.FCFCyclical, "强周期", "非强周期"),
 			rec.FCFWindowYears, rec.FCFModeName))
 	}
 	if rec.RDRatio > 0 {
@@ -451,6 +478,13 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	r.Valuation.CapexCoverage = rec.CapexCoverage
 	r.Valuation.DeltaNWCRatio = rec.DeltaNWCRatio
 	r.Valuation.FCFProfitRatio = rec.FCFProfitRatio
+	// R15/P5：成长型 FCF 噪声修复（确定性回填；GrowthFCFExcluded 只在「有增速但未计入」时为 true）。
+	r.Valuation.GrowthFCFExcluded = rec.GrowthFCFOK && !rec.GrowthFCFIncluded
+	r.Valuation.GrowthFCFExcludeReason = rec.GrowthFCFExcludeReason
+	r.Valuation.GrowthDownsideDispersion = rec.GrowthDownsideDispersion
+	r.Valuation.FCFCyclicalRaw = rec.FCFRawCyclical
+	r.Valuation.FCFGrowthVeto = rec.FCFGrowthVeto
+	r.Valuation.GrowthVetoBasis = rec.GrowthVetoBasis
 	// Rationale 保持大模型返回值，不覆盖
 }
 

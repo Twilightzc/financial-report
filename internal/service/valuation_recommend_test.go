@@ -61,10 +61,14 @@ func sampleRecommendation() model.ValuationRecommendation {
 		FCFCV:             0.2,
 		FCFWindowYears:    3,
 		RDExpansion:       1e8,
-		BaseYear:          2024,
-		CapexCoverage:     1.5,
-		DeltaNWCRatio:     0.4,
-		FCFProfitRatio:    1.2,
+		// R15/P5：成长型 FCF 噪声修复字段（稳定性样本的 FCF 计入 X）。
+		GrowthFCFIncluded:        true,
+		GrowthDownsideDispersion: 5.0,
+		GrowthVetoBasis:          "营收 CAGR 12.00%、最小同比 10.00%、强增长年 2/3、毛利率极差 1.00pp",
+		BaseYear:                 2024,
+		CapexCoverage:            1.5,
+		DeltaNWCRatio:            0.4,
+		FCFProfitRatio:           1.2,
 	}
 }
 
@@ -1028,9 +1032,10 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 	// R15/P2~P4：基准增速构成、模型分档、SGR、周期、研发双条件与一致性校验各一行。
 	wants = append(wants,
 		"基准增速构成：营收 12.50% / 净利润 12.00% / FCF 10.00%",
+		"（按 3 项等权）；盈利增速极差 20.00 pp；下行波动 5.00 pp（稳定性分按此计算）",
 		"模型分档：得分 80.00（增速分 70.00 / 稳定性分 100.00 / ROE 分 90.00）→ 两阶段模型",
 		"可持续增长率：15.00%（留存率 50.0%）",
-		"周期性：FCF 变异系数 0.20（符号翻转 0 次）→ 非强周期；基期 FCF 判定窗口 3 年、方式 近几年中位数",
+		"周期性：FCF 变异系数 0.20（符号翻转 0 次）→ 原始判据非强周期；成长性豁免未命中（营收 CAGR 12.00%、最小同比 10.00%、强增长年 2/3、毛利率极差 1.00pp）→ 生效判据非强周期；基期 FCF 判定窗口 3 年、方式 近几年中位数",
 		"研发：费用率 6.00%，同比扩张 1.00 亿元 → 建议开启研发调整",
 		"一致性：基期年 2024（利润表 ∩ 现金流量表）",
 		"只解释口径，不得改写数字",

@@ -245,24 +245,24 @@ func TestRecommendBaseFCFDynamicWindow(t *testing.T) {
 func TestDetectFCFCycle(t *testing.T) {
 	// 稳定增长：CV 小、无翻转。
 	up := map[int]float64{2022: 1e8, 2023: 1.1e8, 2024: 1.21e8}
-	if c := detectFCFCycle(up, []int{2022, 2023, 2024}); c.Cyclical || !c.Evaluated || c.SignChanges != 0 {
+	if c := detectFCFCycle(up, []int{2022, 2023, 2024}, growthPattern{}); c.RawCyclical || c.Cyclical || !c.Evaluated || c.SignChanges != 0 {
 		t.Errorf("稳定序列不应判为周期：%+v", c)
 	}
 
-	// 正负交替 2 次（+,-,+）→ 强周期；0 值跳过、不计翻转。
+	// 正负交替 2 次（+,-,+）→ 原始与生效判据均为强周期（无成长性否决）；0 值跳过、不计翻转。
 	sign := map[int]float64{2020: 1e8, 2021: -1e8, 2022: 0, 2023: 2e8}
-	if c := detectFCFCycle(sign, []int{2020, 2021, 2022, 2023}); !c.Cyclical || c.SignChanges != 2 {
+	if c := detectFCFCycle(sign, []int{2020, 2021, 2022, 2023}, growthPattern{}); !c.RawCyclical || !c.Cyclical || c.SignChanges != 2 {
 		t.Errorf("正负交替 2 次应判强周期：%+v", c)
 	}
 
 	// 均值 ≤ 0 → 不做判定（CV 无意义）。
 	neg := map[int]float64{2022: -1e8, 2023: 1e8, 2024: -1e8}
-	if c := detectFCFCycle(neg, []int{2022, 2023, 2024}); c.Evaluated {
+	if c := detectFCFCycle(neg, []int{2022, 2023, 2024}, growthPattern{}); c.Evaluated {
 		t.Errorf("均值 ≤ 0 不应判定周期：%+v", c)
 	}
 
 	// 年数不足 3 → Evaluated=false。
-	if c := detectFCFCycle(map[int]float64{2023: 1e8, 2024: 2e8}, []int{2023, 2024}); c.Evaluated || c.WindowYears != 2 {
+	if c := detectFCFCycle(map[int]float64{2023: 1e8, 2024: 2e8}, []int{2023, 2024}, growthPattern{}); c.Evaluated || c.WindowYears != 2 {
 		t.Errorf("不足 3 年不应判定：%+v", c)
 	}
 
@@ -272,7 +272,7 @@ func TestDetectFCFCycle(t *testing.T) {
 	for _, y := range years {
 		fcf[y] = 1e8
 	}
-	if c := detectFCFCycle(fcf, years); c.WindowYears != valCycleWindowYears {
+	if c := detectFCFCycle(fcf, years, growthPattern{}); c.WindowYears != valCycleWindowYears {
 		t.Errorf("窗口应截断到 %d 年，实际 %d", valCycleWindowYears, c.WindowYears)
 	}
 }
@@ -286,8 +286,12 @@ func TestFCFWindowYears(t *testing.T) {
 		{fcfCycle{Evaluated: false}, valFCFYearsCyclical}, // 不可判定不额外缩短（交给 R1）
 		{fcfCycle{Evaluated: true, CV: 0.29}, valFCFYearsStable},
 		{fcfCycle{Evaluated: true, CV: 0.31}, valFCFYearsMild},
-		{fcfCycle{Evaluated: true, CV: 0.51}, valFCFYearsCyclical},
+		// CV 高但未判周期（如成长性否决后 Cyclical=false）不再单独触发 7 年：
+		// 7 年只由生效判据 Cyclical 决定（R15/P5 修复点 1 的回归守卫）。
+		{fcfCycle{Evaluated: true, CV: 0.51}, valFCFYearsMild},
+		{fcfCycle{Evaluated: true, Cyclical: true, CV: 0.51}, valFCFYearsCyclical},
 		{fcfCycle{Evaluated: true, Cyclical: true, CV: 0.1}, valFCFYearsCyclical},
+		{fcfCycle{Evaluated: true, RawCyclical: true, GrowthVeto: true, CV: 0.51}, valFCFYearsGrowth},
 	}
 	for _, c := range cases {
 		if got := fcfWindowYears(c.c); got != c.want {

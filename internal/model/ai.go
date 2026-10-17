@@ -90,7 +90,7 @@ type AIValuation struct {
 	ModelDegraded    bool    `json:"model_degraded,omitempty"`    // 是否发生模型降级
 
 	// R15/P3 新增：FCF 周期识别与研发扩张（服务端确定性回填，只读；全部 omitempty）。
-	FCFCyclical    bool    `json:"fcf_cyclical,omitempty"`     // 强周期（CV>0.5 或符号翻转≥2）
+	FCFCyclical    bool    `json:"fcf_cyclical,omitempty"`     // 生效强周期（原始判据 && !成长性否决）
 	FCFCV          float64 `json:"fcf_cv,omitempty"`           // FCF 变异系数（不可判定为 0）
 	FCFSignChanges int     `json:"fcf_sign_changes,omitempty"` // FCF 符号翻转次数
 	FCFWindowYears int     `json:"fcf_window_years,omitempty"` // 判定/推荐窗口年数（3/5/7）
@@ -101,6 +101,15 @@ type AIValuation struct {
 	CapexCoverage  float64 `json:"capex_coverage,omitempty"`   // C5 购建长期资产现金 ÷ 保全性资本支出
 	DeltaNWCRatio  float64 `json:"delta_nwc_ratio,omitempty"`  // ΔNWC ÷ 基期 FCF（不可算/为负为 0）
 	FCFProfitRatio float64 `json:"fcf_profit_ratio,omitempty"` // C6 FCF ÷ 净利润中位数
+
+	// R15/P5 新增：成长型 FCF 噪声修复（服务端确定性回填，只读；全部 omitempty）。
+	// GrowthFCFExcluded 用反向命名：Go 的 omitempty 会省略 false，反向字段才能让「未计入」显式出现。
+	GrowthFCFExcluded        bool    `json:"growth_fcf_excluded,omitempty"`        // FCF 有增速但未计入 X
+	GrowthFCFExcludeReason   string  `json:"growth_fcf_exclude_reason,omitempty"`  // 未计入原因
+	GrowthDownsideDispersion float64 `json:"growth_downside_dispersion,omitempty"` // 下行离散度 pp（稳定性分输入）
+	FCFCyclicalRaw           bool    `json:"fcf_cyclical_raw,omitempty"`           // 原始周期判据（被成长性否决时为 true）
+	FCFGrowthVeto            bool    `json:"fcf_growth_veto,omitempty"`            // 成长性豁免标记
+	GrowthVetoBasis          string  `json:"growth_veto_basis,omitempty"`          // 成长性判定依据
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -163,7 +172,7 @@ type ValuationRecommendation struct {
 	ModelDegraded     bool    // 是否发生 three_stage→two_stage→perpetual→zero 降级
 
 	// R15/P3：FCF 周期识别与研发扩张（只读）。
-	FCFCyclical    bool    // 强周期（CV>0.5 或符号翻转≥2）
+	FCFCyclical    bool    // 生效强周期（原始判据 && !成长性否决）
 	FCFCV          float64 // FCF 变异系数（不可判定为 0）
 	FCFSignChanges int     // FCF 符号翻转次数
 	FCFWindowYears int     // 本次实际使用的窗口年数（3/5/7）
@@ -174,6 +183,14 @@ type ValuationRecommendation struct {
 	CapexCoverage  float64 // C5 购建长期资产现金 ÷ 保全性资本支出（不可算为 0）
 	DeltaNWCRatio  float64 // ΔNWC ÷ 基期 FCF（不可算/为负为 0）
 	FCFProfitRatio float64 // C6 FCF ÷ 净利润中位数（不可算为 0）
+
+	// R15/P5：成长型 FCF 噪声修复（只读；前 5 项为内部字段，无 JSON tag）。
+	GrowthFCFIncluded        bool    // FCF 分项是否计入 X（与 GrowthFCFOK 的「数据可算」区分）
+	GrowthFCFExcludeReason   string  // 未计入原因（计入时为空）
+	GrowthDownsideDispersion float64 // 下行离散度 pp（稳定性分输入）
+	FCFRawCyclical           bool    // FCF 原始周期判据（CV/符号翻转）
+	FCFGrowthVeto            bool    // 成长性否决是否命中
+	GrowthVetoBasis          string  // 成长性判定口径说明
 }
 
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。
