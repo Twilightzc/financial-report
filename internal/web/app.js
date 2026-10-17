@@ -1934,8 +1934,18 @@ const app = createApp({
             <div class="vh-title">估值记录
               <span v-if="valuationHistory.length" class="vh-count">{{ valuationHistory.length }}</span>
             </div>
-            <el-button v-if="valuationHistory.length" text type="danger" size="small"
-                       @click="clearValuationHistory">清空全部</el-button>
+            <div class="vh-head-actions">
+              <el-button v-if="valuationHistory.length" text type="danger" size="small"
+                         @click="clearValuationHistory">清空全部</el-button>
+              <!-- 显式关闭入口：手机端抽屉全宽会盖住遮罩、也没有 Esc，必须始终可见 -->
+              <button type="button" class="vh-close" title="关闭" aria-label="关闭估值记录"
+                      @click="valHistoryOpen = false">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
+              </button>
+            </div>
           </div>
 
           <div v-if="valuationHistory.length" class="vh-list">

@@ -669,7 +669,18 @@ td.num, .val, .yoy {
 .vh-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .vh-title { font-size: 16px; font-weight: 700; color: var(--ink); min-width: 0; }
+/* 头部操作区：清空（危险文字按钮）+ 关闭（中性描边图标按钮），两者语义与视觉区分 */
+.vh-head-actions { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
 .vh-head .el-button { flex: 0 0 auto; }
+.vh-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; color: var(--muted); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.vh-close svg { display: block; flex: 0 0 auto; }
+.vh-close:hover { color: var(--ink); border-color: var(--ink-2); background: #faf7f7; }
 .vh-count { margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
 .vh-list { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
   padding: 12px; display: flex; flex-direction: column; gap: 10px; }
