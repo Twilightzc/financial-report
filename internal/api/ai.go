@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -8,12 +9,20 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"financial-report/internal/client"
+	"financial-report/internal/model"
 	"financial-report/internal/service"
 )
+
+// errInvalidYearRange 显式传入的年份范围非法（startYear/endYear 非正或 start > end）。
+// computeAIAnalysis 返回该哨兵，由 GetAIAnalysis 映射回原有的 HTTP 400 语义。
+var errInvalidYearRange = errors.New("年份范围无效")
 
 // GetAIAnalysis 一键 AI 分析：复用六维指标计算，把指标发给 DeepSeek 大模型，
 // 返回五维评分（雷达图）+ 结论 + 行业分析 + 估值模型推荐。
 // apikey / model / base_url 取程序启动参数（-apikey / -model / -baseurl），apikey 未配置时回落环境变量。
+//
+// 结果按「股票 + reasoning 档位 + 年份范围」缓存 24h（技术设计 §19.15），
+// 命中时跳过全部取数与 LLM 调用；并发同 key 只计算一次。
 func (h *Handler) GetAIAnalysis(c *gin.Context) {
 	code := c.Param("code")
 	if len(code) != 6 {
@@ -44,31 +53,55 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 		reasoningEffort = "low" // 非法值回落到默认的快速档
 	}
 
-	quote, err := h.c.FetchQuote(code)
+	startYear, endYear, rangeOK := parseYearRange(c)
+	key := aiCacheKeyFor(code, reasoningEffort, startYear, endYear, rangeOK)
+
+	result, outcome, err := h.aiCache.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
+		return h.computeAIAnalysis(code, apiKey, modelName, baseURL, reasoningEffort, startYear, endYear, rangeOK)
+	})
 	if err != nil {
+		if errors.Is(err, errInvalidYearRange) {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 1, "message": "年份范围无效", "data": nil})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 1, "message": err.Error(), "data": nil})
 		return
+	}
+	if outcome != aiCacheMiss {
+		log.Printf("AI 分析缓存%s: code=%s reasoning=%s years=%d-%d",
+			outcomeLabel(outcome), code, reasoningEffort, startYear, endYear)
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": result})
+}
+
+// computeAIAnalysis 执行一次完整分析：取行情 → 取三表 → 年份兜底/校验 → 六维指标
+// → 估值参数预推导 → 主营构成 → prompt → LLM → 解析 → 终态重算 → 确定性回填。
+// 成功返回最终 *model.AIAnalysisResult（含 Usage），由缓存层决定是否写入；任何失败不缓存。
+func (h *Handler) computeAIAnalysis(
+	code, apiKey, modelName, baseURL, reasoningEffort string,
+	startYear, endYear int,
+	rangeOK bool,
+) (*model.AIAnalysisResult, error) {
+	quote, err := h.c.FetchQuote(code)
+	if err != nil {
+		return nil, err
 	}
 
 	cashflow, balance, income, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 1, "message": analysisErrMsg(err), "data": nil})
-		return
+		return nil, errors.New(analysisErrMsg(err))
 	}
 
-	startYear, endYear, ok := parseYearRange(c)
-	if !ok {
+	if !rangeOK {
 		latest := latestAnnualYear(cashflow)
 		if latest == 0 {
-			c.JSON(http.StatusOK, gin.H{"code": 1, "message": "未获取到年报数据，请确认代码是否正确", "data": nil})
-			return
+			return nil, errors.New("未获取到年报数据，请确认代码是否正确")
 		}
 		endYear = latest
 		startYear = latest - 4
 	}
 	if startYear <= 0 || endYear <= 0 || startYear > endYear {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 1, "message": "年份范围无效", "data": nil})
-		return
+		return nil, errInvalidYearRange
 	}
 
 	analysis := service.ComputeAnalysis(balance, cashflow, income, startYear, endYear)
@@ -85,14 +118,12 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 	llm := client.NewDeepSeek(apiKey, baseURL, modelName, reasoningEffort)
 	raw, usage, err := llm.Chat(system, user)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 1, "message": err.Error(), "data": nil})
-		return
+		return nil, err
 	}
 
 	result, err := service.ParseAIResult(raw)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 1, "message": err.Error(), "data": nil})
-		return
+		return nil, err
 	}
 	// ② 终态重算：先取出 AI 的行业分类原始串（Apply 会覆盖该字段），据此重解析 β 并重算 r / gk / Params。
 	industryRaw := result.Valuation.IndustryType
@@ -108,5 +139,5 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 		rec.RiskPoints, rec.AdjustRD, rec.RDRatio, rec.RDExpansion/1e8,
 		rec.BaseYear, rec.CapexCoverage, rec.DeltaNWCRatio, rec.FCFProfitRatio)
 	result.Usage = &usage
-	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": result})
+	return &result, nil
 }

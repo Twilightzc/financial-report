@@ -21,6 +21,8 @@ type Handler struct {
 	aiAPIKey  string
 	aiModel   string
 	aiBaseURL string
+	// aiCache AI 分析结果内存缓存（技术设计 §19.15），生命周期与 Handler 一致。
+	aiCache *aiResultCache
 }
 
 // 分析最多支持 10 个年报；每个自然年约 4 期（Q1/中报/Q3/年报）。
@@ -32,7 +34,13 @@ const (
 )
 
 func NewHandler(c *client.Client, aiAPIKey, aiModel, aiBaseURL string) *Handler {
-	return &Handler{c: c, aiAPIKey: aiAPIKey, aiModel: aiModel, aiBaseURL: aiBaseURL}
+	return &Handler{
+		c:         c,
+		aiAPIKey:  aiAPIKey,
+		aiModel:   aiModel,
+		aiBaseURL: aiBaseURL,
+		aiCache:   newAIResultCache(),
+	}
 }
 
 // GetIndicators 聚合返回单只股票的行情与核心指标
