@@ -193,6 +193,39 @@ type ValuationRecommendation struct {
 	GrowthVetoBasis          string  // 成长性判定口径说明
 }
 
+// LeaderCompany 行业龙头（R17：后端确定性回填，非 AI 输出）。
+type LeaderCompany struct {
+	Name         string  `json:"name"`                     // 证券简称（已 trim；为空的行在 client 层丢弃）
+	Code         string  `json:"code"`                     // 6 位数字（非 6 位在 client 层丢弃）
+	Market       string  `json:"market"`                   // sh / sz / bj（复用 client.quotePrefix）
+	MarketLabel  string  `json:"market_label"`             // 沪 / 深 / 京（复用 client.marketLabel）
+	TotalCap     float64 `json:"total_cap,omitempty"`      // 总市值（元）；缺失为 0 不输出
+	TotalCapRank int     `json:"total_cap_rank,omitempty"` // 同行总市值排名（从 1 开始）；缺失时按排序下标+1
+	IsSelf       bool    `json:"is_self"`                  // 不设 omitempty：前端稳定用 === true 判断
+}
+
+// LeaderBoard 行业龙头榜（leaders 容器）。
+type LeaderBoard struct {
+	IndustryCode string          `json:"industry_code,omitempty"` // DMSK 原始值，实测为 "1277"（不是 "BK1277"）
+	IndustryName string          `json:"industry_name,omitempty"` // 实测 "白酒Ⅱ"
+	Companies    []LeaderCompany `json:"companies"`               // 0–3 家，按总市值降序；非 nil（空数组）
+}
+
+// CompanyRef AI 推断的产业链/合作公司（名称是唯一展示主键，Code 仅作精确同名消歧）。
+type CompanyRef struct {
+	Name     string `json:"name"`               // 证券简称，≤30 字
+	Code     string `json:"code,omitempty"`     // 可选；仅保留 6 位数字，前端不展示、不直接跳转
+	Market   string `json:"market,omitempty"`   // A股 / 非A股；清洗后恒为二者之一
+	Relation string `json:"relation,omitempty"` // 关系标签，≤20 字
+	Note     string `json:"note,omitempty"`     // 一句话说明，≤30 字
+}
+
+// AIChain 产业链上下游（AI 推断）。
+type AIChain struct {
+	Upstream   []CompanyRef `json:"upstream,omitempty"`   // 上游供应商侧，0–3 家
+	Downstream []CompanyRef `json:"downstream,omitempty"` // 下游客户/渠道侧，0–3 家
+}
+
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。
 type AIAnalysisResult struct {
 	Scores     []AIScore    `json:"scores"`
@@ -200,6 +233,11 @@ type AIAnalysisResult struct {
 	Industry   AIIndustry   `json:"industry"`   // 行业分析
 	Businesses []AIBusiness `json:"businesses"` // 业务板块分析
 	Valuation  AIValuation  `json:"valuation"`  // 估值模型推荐
+
+	// R17：相关公司（只增不改；旧缓存/旧响应缺字段时前端按空处理）
+	Leaders  *LeaderBoard `json:"leaders,omitempty"`  // 后端确定性回填；无有效龙头时为 nil（整块不输出）
+	Chain    *AIChain     `json:"chain,omitempty"`    // AI 输出；上下游都为空时为 nil
+	Partners []CompanyRef `json:"partners,omitempty"` // AI 输出；为空时不输出
 
 	Usage *TokenUsage `json:"usage,omitempty"` // 本次大模型调用的 token 用量（服务端回填）
 }

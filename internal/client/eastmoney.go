@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,11 @@ import (
 const (
 	datacenterURL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 	quoteURL      = "https://qt.gtimg.cn/q=" // 腾讯行情接口（GBK 编码）
+
+	// R17：行业龙头榜（同行市值榜）接口与短超时。
+	industryAnalysisURL = "https://emweb.securities.eastmoney.com/PC_HSF10/IndustryAnalysis/PageAjax"
+	industryPeersTopN   = 3
+	industryHTTPTimeout = 2 * time.Second
 )
 
 // ErrEmptyData 表示东财接口成功但返回空数据（如金融股使用不同的全量报表名）。
@@ -32,6 +38,7 @@ type Client struct {
 	hc       *http.Client // 常规接口（行情/摘要报表），15s 超时
 	hcSlow   *http.Client // 全量报表接口（F10，冷启动慢），60s 超时
 	hcSearch *http.Client // 搜索联想接口，2s 超时（上游实测 0.21s，留约 10 倍余量）
+	hcFast   *http.Client // R17：行业龙头/行业分类等短超时接口，2s
 
 	// 报表缓存：财务报告按季度更新，短 TTL 内复用可省去「分析→AI 分析」的重复拉取（F10 冷启动 ~12s）。
 	mu    sync.Mutex
@@ -56,6 +63,7 @@ func New() *Client {
 		hc:          &http.Client{Timeout: 15 * time.Second},
 		hcSlow:      &http.Client{Timeout: 60 * time.Second},
 		hcSearch:    &http.Client{Timeout: 2 * time.Second},
+		hcFast:      &http.Client{Timeout: industryHTTPTimeout},
 		cache:       make(map[string]reportCacheEntry),
 		searchCache: make(map[string]searchCacheEntry),
 	}
@@ -407,8 +415,10 @@ func toReportRows(rows []map[string]any) []model.ReportRow {
 	out := make([]model.ReportRow, 0, len(rows))
 	for _, r := range rows {
 		row := model.ReportRow{
-			ReportDate: trimDate(toString(r["REPORT_DATE"])),
-			Fields:     make(map[string]*float64, len(r)),
+			ReportDate:   trimDate(toString(r["REPORT_DATE"])),
+			IndustryCode: strings.TrimSpace(toString(r["INDUSTRY_CODE"])), // R17：仅 DMSK 报表携带
+			IndustryName: strings.TrimSpace(toString(r["INDUSTRY_NAME"])),
+			Fields:       make(map[string]*float64, len(r)),
 		}
 		for k, v := range r {
 			if f := toFloatPtr(v); f != nil {
@@ -418,4 +428,141 @@ func toReportRows(rows []map[string]any) []model.ReportRow {
 		out = append(out, row)
 	}
 	return out
+}
+
+// ===================== R17 行业龙头 / 行业分类 =====================
+
+// industryPeer 同行市值榜单行。
+type industryPeer struct {
+	Code         string `json:"CORRE_SECURITY_CODE"`
+	Name         string `json:"CORRE_SECURITY_NAME"`
+	TotalCap     any    `json:"TOTAL_CAP"`      // number（元）；用 toFloat 兼容 string/number
+	TotalCapRank any    `json:"TOTAL_CAP_RANK"` // 可能为 null
+}
+
+// industryAnalysisResp 同行市值榜响应（只取自身 + 同行总市值榜）。
+type industryAnalysisResp struct {
+	Gsgm    []industryPeer `json:"gsgm"`     // 自身
+	GsgmZsz []industryPeer `json:"gsgm_zsz"` // 同行（按总市值降序，含哨兵行）
+}
+
+// isSixDigitCode 是否为 6 位纯数字股票代码。
+func isSixDigitCode(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// industryURL 生成同行市值榜 URL：SH/SZ/BJ + 6 位代码。
+func industryURL(code string) string {
+	return industryAnalysisURL + "?code=" + strings.ToUpper(quotePrefix(code)) + code
+}
+
+// FetchIndustryPeers 获取公司所属行业的同行市值榜（0–3 家，含自身）。
+// 失败返回 error，由 api 层静默降级；不缓存（随 AI 结果缓存）。
+func (c *Client) FetchIndustryPeers(code string) (model.LeaderBoard, error) {
+	if !isSixDigitCode(code) {
+		return model.LeaderBoard{}, fmt.Errorf("股票代码需为6位数字")
+	}
+	return c.fetchIndustryPeersURL(code, industryURL(code))
+}
+
+// fetchIndustryPeersURL 与 FetchIndustryPeers 相同，但 URL 可注入（便于单测超时/非 JSON）。
+func (c *Client) fetchIndustryPeersURL(selfCode, rawURL string) (model.LeaderBoard, error) {
+	body, err := c.get(c.hcFast, rawURL)
+	if err != nil {
+		return model.LeaderBoard{}, err
+	}
+	// 与既有接口同款护栏：限流/代理拦截可能返回 HTML
+	if trimmed := strings.TrimSpace(string(body)); strings.HasPrefix(trimmed, "<") {
+		return model.LeaderBoard{}, fmt.Errorf("行业同行接口返回了非 JSON 内容（疑似限流或代理拦截）：%s", truncate(trimmed, 200))
+	}
+	var r industryAnalysisResp
+	if err := json.Unmarshal(body, &r); err != nil {
+		return model.LeaderBoard{}, err
+	}
+	peers := make([]industryPeer, 0, len(r.Gsgm)+len(r.GsgmZsz))
+	peers = append(peers, r.Gsgm...)
+	peers = append(peers, r.GsgmZsz...)
+	return buildLeaderBoard(selfCode, peers), nil
+}
+
+// buildLeaderBoard 合并自身与同行，过滤哨兵/非法行，去重，按总市值降序取前 3。
+func buildLeaderBoard(selfCode string, peers []industryPeer) model.LeaderBoard {
+	seen := make(map[string]bool, len(peers))
+	list := make([]model.LeaderCompany, 0, len(peers))
+	for idx, p := range peers {
+		name := strings.TrimSpace(p.Name)
+		code := strings.TrimSpace(p.Code)
+		if name == "" || !isSixDigitCode(code) {
+			continue
+		}
+		if strings.Contains(name, "行业平均") || strings.Contains(name, "行业中值") {
+			continue // 哨兵行（代码已非 6 位，双保险）
+		}
+		if seen[code] {
+			continue // 同一代码只保留首次出现（gsgm 在前，自身优先保留）
+		}
+		seen[code] = true
+		capValue := toFloat(p.TotalCap)
+		rank := int(toFloat(p.TotalCapRank))
+		if rank <= 0 {
+			rank = idx + 1
+		}
+		m := quotePrefix(code)
+		list = append(list, model.LeaderCompany{
+			Name:         name,
+			Code:         code,
+			Market:       m,
+			MarketLabel:  marketLabel(m),
+			TotalCap:     capValue,
+			TotalCapRank: rank,
+			IsSelf:       code == selfCode,
+		})
+	}
+
+	sort.SliceStable(list, func(i, j int) bool {
+		ci, cj := list[i].TotalCap, list[j].TotalCap
+		if ci == 0 && cj == 0 {
+			return false // 均缺失：保持接口返回顺序（SliceStable）
+		}
+		if ci == 0 {
+			return false // 缺失市值后置
+		}
+		if cj == 0 {
+			return true
+		}
+		if ci != cj {
+			return ci > cj
+		}
+		return list[i].Code < list[j].Code // 同市值按代码升序，保证确定性
+	})
+
+	if len(list) > industryPeersTopN {
+		list = list[:industryPeersTopN]
+	}
+	return model.LeaderBoard{Companies: list}
+}
+
+// FetchIndustry 从 DMSK 资产负债表行读取行业分类（最新一期带行业字段的行）。
+// 与 FetchBalanceSheets(code, 8) 共享报表缓存 key，正常页面流程下不产生上游请求。
+func (c *Client) FetchIndustry(code string) (industryCode, industryName string, err error) {
+	rows, err := c.fetchFinancial(c.hcFast, "RPT_DMSK_FN_BALANCE", code, 8)
+	if err != nil {
+		return "", "", err
+	}
+	for _, r := range rows { // 行已按 REPORT_DATE 倒序
+		name := strings.TrimSpace(toString(r["INDUSTRY_NAME"]))
+		ic := strings.TrimSpace(toString(r["INDUSTRY_CODE"]))
+		if name != "" || ic != "" {
+			return ic, name, nil
+		}
+	}
+	return "", "", nil
 }

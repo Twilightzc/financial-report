@@ -87,9 +87,36 @@ func (h *Handler) computeAIAnalysis(
 		return nil, err
 	}
 
+	// ★R17：龙头请求尽早并发启动，与 F10 冷启动、LLM 调用重叠。
+	// 缓冲 1：即使后续提前 return（LLM/解析失败），goroutine 也能写入后退出。
+	leaderCh := make(chan model.LeaderBoard, 1)
+	go func() {
+		board, err := h.c.FetchIndustryPeers(code)
+		if err != nil {
+			log.Printf("行业龙头获取失败（已降级为空）: code=%s err=%v", code, err)
+			board = model.LeaderBoard{}
+		}
+		leaderCh <- board
+	}()
+
 	cashflow, balance, income, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
 	if err != nil {
 		return nil, errors.New(analysisErrMsg(err))
+	}
+
+	// ★R17：行业分类优先读本次分析报表行（F10 无 → 通常为空），为空才回退 DMSK（2s，短请求）。
+	industryCode, industryName := service.IndustryFromReportRows(balance, income, cashflow)
+	industryCh := make(chan [2]string, 1)
+	if industryCode == "" && industryName == "" {
+		go func() {
+			ic, in, err := h.c.FetchIndustry(code)
+			if err != nil {
+				log.Printf("行业分类获取失败（仅影响龙头标题）: code=%s err=%v", code, err)
+			}
+			industryCh <- [2]string{ic, in}
+		}()
+	} else {
+		industryCh <- [2]string{industryCode, industryName} // 立即就绪
 	}
 
 	if !rangeOK {
@@ -121,7 +148,7 @@ func (h *Handler) computeAIAnalysis(
 		return nil, err
 	}
 
-	result, err := service.ParseAIResult(raw)
+	result, err := service.ParseAIResult(raw, quote.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +165,27 @@ func (h *Handler) computeAIAnalysis(
 		rec.FCFCyclical, rec.FCFCV, rec.FCFSignChanges, rec.FCFWindowYears,
 		rec.RiskPoints, rec.AdjustRD, rec.RDRatio, rec.RDExpansion/1e8,
 		rec.BaseYear, rec.CapexCoverage, rec.DeltaNWCRatio, rec.FCFProfitRatio)
+
+	// ★R17：汇合（正常情况下 LLM 耗时已覆盖两个 2s 请求，此处近零等待）。
+	board := <-leaderCh
+	ind := <-industryCh
+	board.IndustryCode, board.IndustryName = ind[0], ind[1]
+	if len(board.Companies) > 0 {
+		result.Leaders = &board
+	}
+	chainUp, chainDown := chainCounts(result.Chain)
+	log.Printf("AI 相关公司: code=%s 龙头=%d（行业=%s/%s） 上游=%d 下游=%d 合作=%d",
+		code, len(board.Companies), board.IndustryCode, board.IndustryName,
+		chainUp, chainDown, len(result.Partners))
+
 	result.Usage = &usage
 	return &result, nil
+}
+
+// chainCounts 空 chain 返回 0/0，避免日志处判空。
+func chainCounts(c *model.AIChain) (up, down int) {
+	if c == nil {
+		return 0, 0
+	}
+	return len(c.Upstream), len(c.Downstream)
 }

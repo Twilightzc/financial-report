@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"financial-report/internal/model"
 )
@@ -27,6 +28,11 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
   "conclusion": "总体结论（{conclusion}，分段分点、用换行分隔，覆盖：①公司质地与商业模式，②核心竞争优势/护城河，③财务健康与盈利质量（结合盈利能力/偿债能力/现金获取能力三个维度），④主要风险与隐忧，⑤综合评级与是否值得关注）",
   "industry": {"name": "行业名称", "prospect": "前景(1-2句)", "competition": "竞争格局(1-2句)", "application": "应用方向/需求(1-2句)"},
   "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)"}],
+  "chain": {
+    "upstream": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "上游角色", "note": "一句话说明"}],
+    "downstream": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "下游角色", "note": "一句话说明"}]
+  },
+  "partners": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "合作类型", "note": "一句话说明"}],
   "valuation": {"industry_type": "cyclical|general|utility", "rationale": "选择理由(2-3句，只能解释、不能改数)"}
 }
 
@@ -60,6 +66,18 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - 依据主营构成数据（各板块营收占比、利润占比、毛利率）与行业知识，列出公司主要业务板块（2-4 个）。
 - 每个板块：name（板块名）、stage（所处阶段：起步/成长/成熟/衰退）、contribution（贡献占比，同时看营收占比与利润占比，如「营收占 87%、利润占 89%」；若利润占比明显低于营收占比，说明该板块盈利质量偏弱，要在前景/风险里点出）、prospect（前景 1 句）、risk（主要风险 1 句）。
 - 占比必须贴近主营构成数据给出的实际数值，不要凭空编造；结合毛利率判断该板块是否真正赚钱。
+
+## 相关公司规则（产业链上下游 / 合作公司）
+- 行业龙头由系统确定性获取，**不要输出 leaders 字段**；即使输出也会被忽略。
+- 必须输出 chain.upstream、chain.downstream、partners 三组字段；无内容时输出空数组 []。
+- 产业链上下游围绕公司营收占比最大的主营板块展开；上游=原材料/零部件/设备/能源等供应商侧，
+  下游=客户/渠道/终端应用等需求侧。竞争对手不得放入上游或下游。
+- 公司统一使用证券简称（如「贵州茅台」「宁德时代」），不得使用「XX股份有限公司」等法定全称；优先 A 股上市公司。
+- 上游、下游、合作公司各最多 3 家；不得包含当前公司自身；同一列表内不得重复。
+- code 为可选项，只在确信时填写 6 位数字；不确定就留空，不得猜测或编造。
+- 合作关系只列公开可查、较高把握的内容；不确定时输出空数组，不得编造合作方。
+- relation ≤ 20 字，note ≤ 30 字；只描述产业链角色或合作内容，不写买卖建议、评级、目标价。
+- 不得改动既有 scores / conclusion / industry / businesses / valuation 的任何内容。
 `
 
 // aiScoreDimensions 五个评分维度的固定顺序与名称。
@@ -370,7 +388,10 @@ func formatAmount(v float64) string {
 // ParseAIResult 解析大模型返回的 JSON 文本为 AIAnalysisResult。
 // 容忍 markdown 代码块包裹、浮点评分（88.0/88.5 → 四舍五入为整数）、
 // 维度名写法差异（模糊匹配到规范名并按规范顺序重排）。
-func ParseAIResult(raw string) (model.AIAnalysisResult, error) {
+//
+// selfName 可选（R17）：传入当前公司证券简称，用于在「截取前 3 家」之前排除自身；
+// 既有 ParseAIResult(raw) 调用与测试无需修改（缺省为空串，不做自身排除）。
+func ParseAIResult(raw string, selfName ...string) (model.AIAnalysisResult, error) {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "```json")
 	s = strings.TrimPrefix(s, "```")
@@ -387,6 +408,10 @@ func ParseAIResult(raw string) (model.AIAnalysisResult, error) {
 		Industry   model.AIIndustry   `json:"industry"`
 		Businesses []model.AIBusiness `json:"businesses"`
 		Valuation  model.AIValuation  `json:"valuation"`
+
+		// R17：RawMessage 容忍 null / 错误类型；未知字段（含 AI 返回的 leaders）自动忽略
+		Chain    json.RawMessage `json:"chain"`
+		Partners json.RawMessage `json:"partners"`
 	}
 	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
 		return model.AIAnalysisResult{}, fmt.Errorf("解析 AI 返回失败: %w（原始返回：%s）", err, clip(s, 200))
@@ -409,7 +434,18 @@ func ParseAIResult(raw string) (model.AIAnalysisResult, error) {
 		byDim[dim] = model.AIScore{Dimension: dim, Score: score, Comment: sc.Comment}
 	}
 
-	r := model.AIAnalysisResult{Conclusion: parsed.Conclusion, Industry: parsed.Industry, Businesses: parsed.Businesses, Valuation: parsed.Valuation}
+	self := ""
+	if len(selfName) > 0 {
+		self = selfName[0]
+	}
+	r := model.AIAnalysisResult{
+		Conclusion: parsed.Conclusion,
+		Industry:   parsed.Industry,
+		Businesses: parsed.Businesses,
+		Valuation:  parsed.Valuation,
+		Chain:      parseChain(parsed.Chain, self),
+		Partners:   sanitizeCompanyRefs(parseCompanyRefs(parsed.Partners), self),
+	}
 	for _, dim := range aiScoreDimensions {
 		sc, ok := byDim[dim]
 		if !ok {
@@ -418,6 +454,156 @@ func ParseAIResult(raw string) (model.AIAnalysisResult, error) {
 		r.Scores = append(r.Scores, sc)
 	}
 	return r, nil
+}
+
+// ===================== R17 产业链 / 合作公司解析 =====================
+
+const (
+	aiCompanyMax       = 3  // 上游/下游/合作公司各自上限
+	aiCompanyNameMax   = 30 // 公司名最大字符数
+	aiRelationMaxRunes = 20 // 关系标签最大字符数
+	aiNoteMaxRunes     = 30 // 说明最大字符数
+)
+
+// parseChain 解析 chain 对象；整体缺失/类型错误/上下游均空 → nil。
+// selfName 透传给 sanitizeCompanyRefs，确保自身在截断前被排除。
+func parseChain(raw json.RawMessage, selfName string) *model.AIChain {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var c struct {
+		Upstream   json.RawMessage `json:"upstream"`
+		Downstream json.RawMessage `json:"downstream"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil
+	}
+	up := sanitizeCompanyRefs(parseCompanyRefs(c.Upstream), selfName)
+	down := sanitizeCompanyRefs(parseCompanyRefs(c.Downstream), selfName)
+	if len(up) == 0 && len(down) == 0 {
+		return nil
+	}
+	return &model.AIChain{Upstream: up, Downstream: down}
+}
+
+// parseCompanyRefs 逐条宽松解析：顶层不是数组 → nil；单条类型异常只丢该条/该字段。
+func parseCompanyRefs(raw json.RawMessage) []model.CompanyRef {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	out := make([]model.CompanyRef, 0, len(items))
+	for _, item := range items {
+		var m map[string]any
+		if err := json.Unmarshal(item, &m); err != nil {
+			continue
+		}
+		out = append(out, model.CompanyRef{
+			Name:     stringField(m, "name"),
+			Code:     codeField(m, "code"),
+			Market:   stringField(m, "market"),
+			Relation: stringField(m, "relation"),
+			Note:     stringField(m, "note"),
+		})
+	}
+	return out
+}
+
+// stringField 取字符串字段；非字符串一律按空处理（脏类型不使整体解析失败）。
+func stringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// codeField 兼容 AI 把代码写成数字；数字 000858 会退化为 858，随后因非 6 位被丢弃（可接受）。
+func codeField(m map[string]any, key string) string {
+	switch v := m[key].(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		return ""
+	}
+}
+
+// sanitizeCompanyRefs 清洗、去重、排除自身、截断、上限。
+// selfName 非空时，同名条目在「记入 seen / 计入上限」之前直接丢弃——
+// 避免自身占用 3 个名额导致最终只剩 2 家（必须先排除再截断）。
+func sanitizeCompanyRefs(in []model.CompanyRef, selfName string) []model.CompanyRef {
+	seen := make(map[string]bool, len(in))
+	selfKey := NormalizeQuery(selfName)
+	out := make([]model.CompanyRef, 0, aiCompanyMax)
+	for _, c := range in {
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			continue
+		}
+		key := NormalizeQuery(name) // 与 R11 同口径：去全部空白 + 大写
+		if key == "" || key == selfKey || seen[key] {
+			continue
+		}
+		code := strings.TrimSpace(c.Code)
+		if !isSixDigitCode(code) {
+			code = "" // 代码非法只丢字段，不丢整条
+		}
+		market := strings.TrimSpace(c.Market)
+		if market != "非A股" {
+			market = "A股" // 缺省/非法一律按 A股
+		}
+		seen[key] = true
+		out = append(out, model.CompanyRef{
+			Name:     truncateRunes(name, aiCompanyNameMax),
+			Code:     code,
+			Market:   market,
+			Relation: truncateRunes(strings.TrimSpace(c.Relation), aiRelationMaxRunes),
+			Note:     truncateRunes(strings.TrimSpace(c.Note), aiNoteMaxRunes),
+		})
+		if len(out) == aiCompanyMax {
+			break
+		}
+	}
+	return out
+}
+
+// truncateRunes 按字符截断并加省略号，保证总长度 ≤ max。
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:max-1]) + "…"
+}
+
+// isSixDigitCode 是否为 6 位纯数字股票代码（与 client 同口径，service 包内独立实现）。
+func isSixDigitCode(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// IndustryFromReportRows 从已拉取的报表行中找最近一期带行业字段的行（行已按报告期倒序）。
+// F10 全量报表当前没有 INDUSTRY_*，返回空，由 client.FetchIndustry 回退。
+func IndustryFromReportRows(lists ...[]model.ReportRow) (code, name string) {
+	for _, rows := range lists {
+		for _, r := range rows {
+			if r.IndustryName != "" || r.IndustryCode != "" {
+				return r.IndustryCode, r.IndustryName
+			}
+		}
+	}
+	return "", ""
 }
 
 // ApplyValuationRecommendation 用确定性推导结果覆盖大模型返回的估值参数字段，只保留其 rationale。

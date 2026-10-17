@@ -327,6 +327,11 @@ const app = createApp({
     const aiReasoning = ref('low'); // 分析模式：low 简洁 / medium 标准 / high 详细
     const aiCache = new Map(); // AI 分析结果缓存（code|年份|模式 → 结果，同条件复用避免重复消耗 token）
 
+    // R17 相关公司（行业龙头 + 产业链/合作公司）
+    const companyHint = ref('');      // 行内提示（不弹全局错误）
+    const companyResolving = ref(''); // 正在解析的公司归一化名称（loading/禁用态）
+    let companyResolveBusy = false;   // 同一时刻只允许一个解析/跳转请求
+
     // 搜索历史（localStorage 持久化，最多保留 MAX_HISTORY 条）
     const MAX_HISTORY = 10;
     const HISTORY_KEY = 'stockSearchHistory';
@@ -974,6 +979,8 @@ const app = createApp({
       searchBusy = true;
       try {
         searchHint.value = '';
+        companyHint.value = '';      // R17：换股时清理相关公司的行内提示/解析态
+        companyResolving.value = '';
         const norm = normalizeQueryInput(raw);
         if (!/^\d{6}$/.test(norm)) {
           const r = await fetchSearch(raw);
@@ -1021,6 +1028,8 @@ const app = createApp({
     // AI 一键分析：把财务指标发给大模型，返回评分/结论/行业/估值推荐。
     async function fetchAIAnalysis() {
       if (!code.value.trim()) return;
+      companyHint.value = '';      // R17：重新分析时清理相关公司的行内提示/解析态
+      companyResolving.value = '';
       const reqCode = code.value.trim();
       const cacheKey = `${reqCode}|${analysisStartYear.value || ''}|${analysisEndYear.value || ''}|${aiReasoning.value || 'low'}`;
       const cached = aiCache.get(cacheKey);
@@ -1056,6 +1065,81 @@ const app = createApp({
         aiError.value = '请求失败：' + e.message;
       } finally {
         if (code.value.trim() === reqCode) aiLoading.value = false;
+      }
+    }
+
+    // ===================== R17 相关公司：展示与跳转 =====================
+
+    function isSixDigitCode(s) { return /^\d{6}$/.test(String(s || '')); }
+    // 公司归一化名称：同一家公司在前端做去重/解析态匹配的唯一键。
+    function companyKey(c) { return normalizeQueryInput(c && c.name); }
+
+    function leaderTitle(l) {
+      return l && l.industry_name
+        ? `行业龙头 · ${l.industry_name}（按总市值排序）`
+        : '行业龙头（按总市值排序）';
+    }
+    function hasChainCompanies(r) {
+      return !!(r && r.chain && ((r.chain.upstream && r.chain.upstream.length)
+        || (r.chain.downstream && r.chain.downstream.length)));
+    }
+    function hasRelatedCompanies(r) {
+      return hasChainCompanies(r) || !!(r && r.partners && r.partners.length);
+    }
+
+    // 龙头按代码直接换股（可信代码路径）：全程不发起名称搜索请求。
+    function jumpToLeader(c) {
+      if (!c || companyResolveBusy || searchBusy) return; // 同一时刻只允许一个跳转/解析
+      if (c.is_self) {               // 本公司：不换股，滚回 AI 结果顶部
+        const el = document.getElementById('ai-analysis-card');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      if (!isSixDigitCode(c.code)) return; // 非法代码不跳转（后端已过滤，这里是防御）
+      code.value = String(c.code);
+      doSearch();
+    }
+
+    // AI 公司按名称解析为 A 股代码：只认精确同名；code 仅在「完全同名 > 1」时消歧。
+    async function openAICompany(c) {
+      if (!c || companyResolveBusy || searchBusy) return;
+      if (c.market === '非A股') {
+        companyHint.value = '非 A 股公司，暂不支持财报分析';
+        return;
+      }
+      const key = companyKey(c);
+      companyResolveBusy = true;
+      companyResolving.value = key;
+      companyHint.value = '';
+      try {
+        const r = await fetchSearch(c.name); // 复用 R11：60s 缓存、失败静默
+        if (!r.ok) {
+          companyHint.value = `搜索服务暂不可用，请手动搜索「${c.name}」`;
+          return;
+        }
+        const norm = normalizeQueryInput(c.name);
+        const exact = r.items.filter(it => normalizeQueryInput(it.name) === norm);
+        let hit = null;
+        if (exact.length === 1) {
+          hit = exact[0];                       // ① 名称完全相等
+        } else if (exact.length > 1) {
+          // ② 完全同名多于一条：仅当 AI code 为 6 位且命中同名候选时才用它消歧
+          if (isSixDigitCode(c.code)) {
+            hit = exact.find(it => it.code === String(c.code)) || null;
+          }
+        } else if (r.items.length === 1) {
+          hit = r.items[0];                     // ③ 无完全同名且仅 1 条候选
+        }
+        if (!hit) {
+          companyHint.value = `未找到唯一匹配的 A 股公司，请手动搜索「${c.name}」`;
+          return;
+        }
+        companyHint.value = `已解析为 ${hit.name}（${hit.code}），正在切换…`;
+        code.value = hit.code;                  // 最终必须用 6 位代码
+        await doSearch();                       // 清空 aiResult、加载新公司数据；不自动触发 AI 分析
+      } finally {
+        companyResolveBusy = false;
+        companyResolving.value = '';
       }
     }
 
@@ -1385,6 +1469,9 @@ const app = createApp({
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
+      // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
+      companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies,
+      jumpToLeader, openAICompany, isSixDigitCode,
       radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
       history, querySearch, handleSelect, clearHistory,
@@ -1835,7 +1922,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card" v-loading="aiLoading">
+          <section class="card" id="ai-analysis-card" v-loading="aiLoading">
             <div class="card-head"><h2 class="card-title">AI 智能分析</h2></div>
             <div class="card-body">
               <div class="ai-form">
@@ -1848,7 +1935,7 @@ const app = createApp({
                   </el-select>
                   <el-button type="primary" :loading="aiLoading" @click="fetchAIAnalysis">一键分析</el-button>
                 </div>
-                <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析与估值模型推荐。分析模式：简洁更快、标准均衡、详细更深入。</div>
+                <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
               <template v-if="aiResult">
@@ -1871,6 +1958,22 @@ const app = createApp({
                     <div><span class="ai-k">竞争格局</span><span class="ai-v">{{ aiResult.industry.competition }}</span></div>
                     <div><span class="ai-k">应用方向</span><span class="ai-v">{{ aiResult.industry.application }}</span></div>
                   </div>
+                  <!-- R17 行业龙头：后端确定性数据，按总市值排序 -->
+                  <div class="ai-leaders"
+                       v-if="aiResult.leaders && aiResult.leaders.companies && aiResult.leaders.companies.length">
+                    <div class="ai-sub-title">{{ leaderTitle(aiResult.leaders) }}</div>
+                    <div class="ai-chips">
+                      <button v-for="c in aiResult.leaders.companies" :key="c.code" type="button"
+                              class="ai-chip ai-chip-leader" :class="{ 'is-self': c.is_self }"
+                              :aria-disabled="c.is_self ? 'true' : 'false'"
+                              @click="jumpToLeader(c)">
+                        <span class="ai-chip-name">{{ c.name }}</span>
+                        <span class="ai-chip-tag" v-if="c.market_label">{{ c.market_label }}</span>
+                        <span class="ai-chip-tag ai-chip-self" v-if="c.is_self">本公司</span>
+                      </button>
+                    </div>
+                    <p class="ai-disclaimer">名单来自东财行业分类与同行市值数据，按总市值排序，随行情与行业分类更新；排序不代表投资价值，不构成投资建议。</p>
+                  </div>
                 </div>
                 <div class="ai-section" v-if="aiResult.businesses && aiResult.businesses.length">
                   <div class="ai-section-title">业务板块分析</div>
@@ -1885,6 +1988,70 @@ const app = createApp({
                       <div class="ai-biz-row"><span class="ai-k">风险</span><span class="ai-v">{{ b.risk }}</span></div>
                     </div>
                   </div>
+                </div>
+                <!-- R17 相关公司：产业链上下游 + 合作/关联公司（AI 推断） -->
+                <div class="ai-section" v-if="hasRelatedCompanies(aiResult)">
+                  <div class="ai-section-title">相关公司</div>
+                  <p class="ai-disclaimer">产业链与合作公司信息由 AI 生成、龙头信息来自第三方数据，均仅用于拓展研究，不构成投资建议。</p>
+
+                  <div class="ai-related" v-if="hasChainCompanies(aiResult)">
+                    <div class="ai-sub-head">
+                      <span class="ai-sub-title">产业链上下游</span>
+                      <span class="ai-badge">AI 推断 · 供参考</span>
+                    </div>
+                    <div class="ai-related-cols">
+                      <div class="ai-related-col" v-if="aiResult.chain.upstream && aiResult.chain.upstream.length">
+                        <div class="ai-related-label">上游</div>
+                        <div class="ai-chips">
+                          <button v-for="c in aiResult.chain.upstream" :key="c.name" type="button"
+                                  class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
+                                  :aria-disabled="companyResolving ? 'true' : 'false'"
+                                  @click="openAICompany(c)">
+                            <span class="ai-chip-name">{{ c.name }}</span>
+                            <span class="ai-chip-tag" v-if="c.relation">{{ c.relation }}</span>
+                            <span class="ai-chip-tag ai-chip-nonashare" v-if="c.market === '非A股'">非A股</span>
+                            <span class="ai-chip-loading" v-if="companyResolving === companyKey(c)">解析中…</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div class="ai-related-col" v-if="aiResult.chain.downstream && aiResult.chain.downstream.length">
+                        <div class="ai-related-label">下游</div>
+                        <div class="ai-chips">
+                          <button v-for="c in aiResult.chain.downstream" :key="c.name" type="button"
+                                  class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
+                                  :aria-disabled="companyResolving ? 'true' : 'false'"
+                                  @click="openAICompany(c)">
+                            <span class="ai-chip-name">{{ c.name }}</span>
+                            <span class="ai-chip-tag" v-if="c.relation">{{ c.relation }}</span>
+                            <span class="ai-chip-tag ai-chip-nonashare" v-if="c.market === '非A股'">非A股</span>
+                            <span class="ai-chip-loading" v-if="companyResolving === companyKey(c)">解析中…</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <p class="ai-disclaimer">基于公司主营业务的产业链推断，不代表真实交易关系。</p>
+                  </div>
+
+                  <div class="ai-related" v-if="aiResult.partners && aiResult.partners.length">
+                    <div class="ai-sub-head">
+                      <span class="ai-sub-title">合作 / 关联公司</span>
+                      <span class="ai-badge">AI 推断 · 需核实</span>
+                    </div>
+                    <div class="ai-chips">
+                      <button v-for="c in aiResult.partners" :key="c.name" type="button"
+                              class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
+                              :aria-disabled="companyResolving ? 'true' : 'false'"
+                              @click="openAICompany(c)">
+                        <span class="ai-chip-name">{{ c.name }}</span>
+                        <span class="ai-chip-tag" v-if="c.relation">{{ c.relation }}</span>
+                        <span class="ai-chip-tag ai-chip-nonashare" v-if="c.market === '非A股'">非A股</span>
+                        <span class="ai-chip-loading" v-if="companyResolving === companyKey(c)">解析中…</span>
+                      </button>
+                    </div>
+                    <p class="ai-disclaimer">合作关系可能已变化或未被公开披露，请以公司公告为准；不构成投资建议。</p>
+                  </div>
+
+                  <p class="ai-company-hint" v-if="companyHint">{{ companyHint }}</p>
                 </div>
                 <div class="ai-section">
                   <div class="ai-section-title">估值模型推荐</div>

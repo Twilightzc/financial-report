@@ -3,6 +3,7 @@ package service
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"financial-report/internal/model"
 )
@@ -159,5 +160,193 @@ func TestFormatAmount(t *testing.T) {
 	}
 	if formatAmount(0) != "0" {
 		t.Fatalf("零值错误: %s", formatAmount(0))
+	}
+}
+
+// ===================== R17 产业链 / 合作公司解析 =====================
+
+// aiScoresJSON 返回合法的五维评分片段（R17 测试只关心新增字段）。
+func aiScoresJSON() string {
+	return `[{"dimension":"盈利能力","score":88,"comment":""},{"dimension":"偿债能力","score":90,"comment":""},{"dimension":"现金获取能力","score":85,"comment":""},{"dimension":"经营效率","score":76,"comment":""},{"dimension":"成长能力","score":82,"comment":""}]`
+}
+
+// aiRawWith 拼接一份合法 AI 返回（extra 为附加的 JSON 字段片段，如 ,"chain":{...}）。
+func aiRawWith(extra string) string {
+	return `{"scores":` + aiScoresJSON() + `,"conclusion":"c","industry":{"name":"n"},"valuation":{"model":"zero","model_name":"零增长模型","discount_rate":8}` + extra + `}`
+}
+
+func TestParseAIResultWithChainPartners(t *testing.T) {
+	raw := aiRawWith(`,"chain":{"upstream":[{"name":" 某包装 ","code":"600000","market":"","relation":"包装材料","note":"长期供应酒类包材"}],"downstream":[{"name":"某商贸","market":"非A股"}]},"partners":[{"name":"某集团","code":"12345","market":"港股","relation":"战略合作","note":"公开披露"}]`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if r.Chain == nil || len(r.Chain.Upstream) != 1 || len(r.Chain.Downstream) != 1 {
+		t.Fatalf("chain 解析不符: %+v", r.Chain)
+	}
+	up := r.Chain.Upstream[0]
+	if up.Name != "某包装" || up.Code != "600000" || up.Market != "A股" || up.Relation != "包装材料" {
+		t.Fatalf("上游字段清洗不符: %+v", up)
+	}
+	if r.Chain.Downstream[0].Market != "非A股" {
+		t.Fatalf("下游 market 应保留非A股: %+v", r.Chain.Downstream[0])
+	}
+	if len(r.Partners) != 1 {
+		t.Fatalf("partners 数量不符: %d", len(r.Partners))
+	}
+	// 非法 code 只丢字段；非法 market 归 A股。
+	if r.Partners[0].Code != "" || r.Partners[0].Market != "A股" {
+		t.Fatalf("partners 字段清洗不符: %+v", r.Partners[0])
+	}
+}
+
+func TestParseAIResultMissingRelated(t *testing.T) {
+	cases := []struct{ name, extra string }{
+		{"缺失字段", ""},
+		{"显式 null", `,"chain":null,"partners":null`},
+		{"空数组", `,"chain":{"upstream":[],"downstream":[]},"partners":[]`},
+	}
+	for _, c := range cases {
+		r, err := ParseAIResult(aiRawWith(c.extra))
+		if err != nil {
+			t.Fatalf("%s: 解析不应失败: %v", c.name, err)
+		}
+		if r.Chain != nil {
+			t.Fatalf("%s: chain 应为 nil: %+v", c.name, r.Chain)
+		}
+		if len(r.Partners) != 0 {
+			t.Fatalf("%s: partners 应为空: %+v", c.name, r.Partners)
+		}
+	}
+}
+
+func TestParseAIResultWrongTypes(t *testing.T) {
+	// chain 为字符串、partners 为对象：整体按空处理，不使解析失败。
+	r, err := ParseAIResult(aiRawWith(`,"chain":"oops","partners":{"name":"x"}`))
+	if err != nil {
+		t.Fatalf("脏类型不应使解析失败: %v", err)
+	}
+	if r.Chain != nil || len(r.Partners) != 0 {
+		t.Fatalf("脏类型应按空处理: chain=%+v partners=%+v", r.Chain, r.Partners)
+	}
+
+	// 单条非对象只丢该条；note 为数字只丢该字段；code 为数字按 6 位保留。
+	r, err = ParseAIResult(aiRawWith(`,"chain":{"upstream":[1,"x",{"name":"甲","note":123},{"name":"乙","code":600000}]}`))
+	if err != nil {
+		t.Fatalf("单条脏数据不应使解析失败: %v", err)
+	}
+	if r.Chain == nil || len(r.Chain.Upstream) != 2 {
+		t.Fatalf("应保留 2 条有效记录: %+v", r.Chain)
+	}
+	if r.Chain.Upstream[0].Note != "" {
+		t.Fatalf("数字 note 应按空处理: %+v", r.Chain.Upstream[0])
+	}
+	if r.Chain.Upstream[1].Code != "600000" {
+		t.Fatalf("数字 code 应格式化为 6 位: %+v", r.Chain.Upstream[1])
+	}
+}
+
+func TestParseAIResultIgnoresLeaders(t *testing.T) {
+	// AI 返回的 leaders 不在解析结构中，应被忽略且不影响其余字段。
+	r, err := ParseAIResult(aiRawWith(`,"chain":{"upstream":[{"name":"甲"}]},"leaders":{"companies":[{"name":"伪造"}]}`))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if r.Leaders != nil {
+		t.Fatalf("AI 返回的 leaders 不应生效: %+v", r.Leaders)
+	}
+	if r.Chain == nil || len(r.Chain.Upstream) != 1 {
+		t.Fatalf("其余字段应正常解析: %+v", r.Chain)
+	}
+}
+
+func TestSanitizeCompanyRefs(t *testing.T) {
+	in := []model.CompanyRef{
+		{Name: "  "},
+		{Name: "甲", Code: "600000", Market: "美股"},
+		{Name: "甲", Code: "600001"}, // 同名去重
+		{Name: "乙", Code: "12345"},  // 非法 code 只丢字段
+		{Name: "丙", Market: "非A股", Relation: strings.Repeat("关", 25), Note: strings.Repeat("注", 35)},
+		{Name: "丁"},
+		{Name: "戊"},
+	}
+	out := sanitizeCompanyRefs(in, "")
+	if len(out) != aiCompanyMax {
+		t.Fatalf("应截断为 %d 家: %+v", aiCompanyMax, out)
+	}
+	if out[0].Name != "甲" || out[0].Code != "600000" || out[0].Market != "A股" {
+		t.Fatalf("首条清洗不符: %+v", out[0])
+	}
+	if out[1].Name != "乙" || out[1].Code != "" {
+		t.Fatalf("非法 code 应只丢字段: %+v", out[1])
+	}
+	if out[2].Market != "非A股" {
+		t.Fatalf("非A股应保留: %+v", out[2])
+	}
+	if utf8.RuneCountInString(out[2].Relation) != aiRelationMaxRunes || !strings.HasSuffix(out[2].Relation, "…") {
+		t.Fatalf("relation 截断不符: %q", out[2].Relation)
+	}
+	if utf8.RuneCountInString(out[2].Note) != aiNoteMaxRunes || !strings.HasSuffix(out[2].Note, "…") {
+		t.Fatalf("note 截断不符: %q", out[2].Note)
+	}
+}
+
+func TestParseAIResultExcludesSelf(t *testing.T) {
+	// 自身位于前 3 时应先排除、再补足后续公司（而不是截断后只剩 2 家）。
+	raw := aiRawWith(`,"chain":{"upstream":[{"name":"贵州茅台"},{"name":"甲"},{"name":"乙"},{"name":"丙"}]},"partners":[{"name":" 贵州 茅台 "}]`)
+	r, err := ParseAIResult(raw, "贵州茅台")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if r.Chain == nil || len(r.Chain.Upstream) != aiCompanyMax {
+		t.Fatalf("排除自身后应补足 3 家: %+v", r.Chain)
+	}
+	want := []string{"甲", "乙", "丙"}
+	for i, w := range want {
+		if r.Chain.Upstream[i].Name != w {
+			t.Fatalf("上游顺序不符: %+v", r.Chain.Upstream)
+		}
+	}
+	if len(r.Partners) != 0 {
+		t.Fatalf("全部为自身时 partners 应为空: %+v", r.Partners)
+	}
+
+	// 上下游全部为自身 → chain 为 nil。
+	r, err = ParseAIResult(aiRawWith(`,"chain":{"upstream":[{"name":"贵州茅台"}],"downstream":[{"name":"贵州茅台"}]}`), "贵州茅台")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if r.Chain != nil {
+		t.Fatalf("上下游均清空时 chain 应为 nil: %+v", r.Chain)
+	}
+}
+
+func TestParseAIResultWithoutSelf(t *testing.T) {
+	// 不传 selfName 时行为与既有完全一致：不做自身排除。
+	raw := aiRawWith(`,"chain":{"upstream":[{"name":"贵州茅台"},{"name":"甲"},{"name":"乙"},{"name":"丙"}]}`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if r.Chain == nil || len(r.Chain.Upstream) != aiCompanyMax {
+		t.Fatalf("上游数量不符: %+v", r.Chain)
+	}
+	if r.Chain.Upstream[0].Name != "贵州茅台" {
+		t.Fatalf("未传 selfName 时不应排除自身: %+v", r.Chain.Upstream)
+	}
+}
+
+func TestIndustryFromReportRows(t *testing.T) {
+	empty := []model.ReportRow{{ReportDate: "2024-12-31"}}
+	withIndustry := []model.ReportRow{
+		{ReportDate: "2024-12-31"},
+		{ReportDate: "2023-12-31", IndustryCode: "1277", IndustryName: "白酒Ⅱ"},
+	}
+	code, name := IndustryFromReportRows(empty, withIndustry, []model.ReportRow{{IndustryCode: "9999"}})
+	if code != "1277" || name != "白酒Ⅱ" {
+		t.Fatalf("应取第一个非空行业字段: %s/%s", code, name)
+	}
+	if code, name := IndustryFromReportRows(empty, empty); code != "" || name != "" {
+		t.Fatalf("全空应返回空串: %s/%s", code, name)
 	}
 }

@@ -74,8 +74,10 @@ type FieldGroup struct {
 
 // ReportRow 单期报表原始行（仅数值字段，nil 表示该科目本期无数据）
 type ReportRow struct {
-	ReportDate string
-	Fields     map[string]*float64
+	ReportDate   string
+	IndustryCode string // R17：DMSK 报表行携带；F10 全量报表行没有（空串）
+	IndustryName string // 同上
+	Fields       map[string]*float64
 }
 
 // StatementItem 单个科目的跨年度数值（与 Statement.Years 对齐，nil=无数据）
