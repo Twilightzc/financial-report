@@ -74,7 +74,7 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - businesses 内仅允许新增 related，name/stage/contribution/prospect/risk 保持既有要求。
 
 ## 相关公司规则（产业链上下游 / 合作公司）
-- 行业龙头由系统确定性获取，**不要输出 leaders 字段**；即使输出也会被忽略。
+- 行业龙头与主要竞争对手由系统确定性获取，**不要输出 leaders / competitors 字段**；即使输出也会被忽略。
 - 必须输出 chain.upstream、chain.downstream、partners 三组字段；无内容时输出空数组 []。
 - 产业链上下游围绕公司营收占比最大的主营板块展开；上游=原材料/零部件/设备/能源等供应商侧，
   下游=客户/渠道/终端应用等需求侧。竞争对手不得放入上游或下游。

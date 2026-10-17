@@ -23,9 +23,11 @@ const (
 	quoteURL      = "https://qt.gtimg.cn/q=" // 腾讯行情接口（GBK 编码）
 
 	// R17：行业龙头榜（同行市值榜）接口与短超时。
-	industryAnalysisURL = "https://emweb.securities.eastmoney.com/PC_HSF10/IndustryAnalysis/PageAjax"
-	industryPeersTopN   = 3
-	industryHTTPTimeout = 2 * time.Second
+	industryAnalysisURL   = "https://emweb.securities.eastmoney.com/PC_HSF10/IndustryAnalysis/PageAjax"
+	industryPeersTopN     = 3
+	industryCompetitorMin = 2
+	industryCompetitorMax = 4
+	industryHTTPTimeout   = 2 * time.Second
 )
 
 // ErrEmptyData 表示东财接口成功但返回空数据（如金融股使用不同的全量报表名）。
@@ -464,40 +466,44 @@ func industryURL(code string) string {
 	return industryAnalysisURL + "?code=" + strings.ToUpper(quotePrefix(code)) + code
 }
 
-// FetchIndustryPeers 获取公司所属行业的同行市值榜（0–3 家，含自身）。
-// 失败返回 error，由 api 层静默降级；不缓存（随 AI 结果缓存）。
-func (c *Client) FetchIndustryPeers(code string) (model.LeaderBoard, error) {
+// FetchIndustryPeers 获取公司所属行业的同行市值榜，并同时派生
+// leaders（前 3 家，含自身）与 competitors（本公司排名相邻 2–4 家，D9）。
+// 一次请求、一份排名榜；失败返回 error，由 api 层静默降级；不缓存（随 AI 结果缓存）。
+func (c *Client) FetchIndustryPeers(code string) (model.LeaderBoard, *model.CompetitorBoard, error) {
 	if !isSixDigitCode(code) {
-		return model.LeaderBoard{}, fmt.Errorf("股票代码需为6位数字")
+		return model.LeaderBoard{}, nil, fmt.Errorf("股票代码需为6位数字")
 	}
 	return c.fetchIndustryPeersURL(code, industryURL(code))
 }
 
 // fetchIndustryPeersURL 与 FetchIndustryPeers 相同，但 URL 可注入（便于单测超时/非 JSON）。
-func (c *Client) fetchIndustryPeersURL(selfCode, rawURL string) (model.LeaderBoard, error) {
+func (c *Client) fetchIndustryPeersURL(selfCode, rawURL string) (model.LeaderBoard, *model.CompetitorBoard, error) {
 	body, err := c.get(c.hcFast, rawURL)
 	if err != nil {
-		return model.LeaderBoard{}, err
+		return model.LeaderBoard{}, nil, err
 	}
 	// 与既有接口同款护栏：限流/代理拦截可能返回 HTML
 	if trimmed := strings.TrimSpace(string(body)); strings.HasPrefix(trimmed, "<") {
-		return model.LeaderBoard{}, fmt.Errorf("行业同行接口返回了非 JSON 内容（疑似限流或代理拦截）：%s", truncate(trimmed, 200))
+		return model.LeaderBoard{}, nil, fmt.Errorf("行业同行接口返回了非 JSON 内容（疑似限流或代理拦截）：%s", truncate(trimmed, 200))
 	}
 	var r industryAnalysisResp
 	if err := json.Unmarshal(body, &r); err != nil {
-		return model.LeaderBoard{}, err
+		return model.LeaderBoard{}, nil, err
 	}
 	peers := make([]industryPeer, 0, len(r.Gsgm)+len(r.GsgmZsz))
 	peers = append(peers, r.Gsgm...)
 	peers = append(peers, r.GsgmZsz...)
-	return buildLeaderBoard(selfCode, peers), nil
+	leaders, competitors := buildIndustryBoards(selfCode, peers)
+	return leaders, competitors, nil
 }
 
-// buildLeaderBoard 合并自身与同行，过滤哨兵/非法行，去重，按总市值降序取前 3。
-func buildLeaderBoard(selfCode string, peers []industryPeer) model.LeaderBoard {
+// rankIndustryPeers 合并自身与同行，过滤哨兵/非法行，去重，按总市值降序，
+// 并回填有效排名：优先响应里的 TOTAL_CAP_RANK，缺失时按排序后的榜单位置（index+1）。
+// 这是 leaders 与 competitors 共用的唯一排序/排名口径。
+func rankIndustryPeers(selfCode string, peers []industryPeer) []model.LeaderCompany {
 	seen := make(map[string]bool, len(peers))
 	list := make([]model.LeaderCompany, 0, len(peers))
-	for idx, p := range peers {
+	for _, p := range peers {
 		name := strings.TrimSpace(p.Name)
 		code := strings.TrimSpace(p.Code)
 		if name == "" || !isSixDigitCode(code) {
@@ -510,19 +516,14 @@ func buildLeaderBoard(selfCode string, peers []industryPeer) model.LeaderBoard {
 			continue // 同一代码只保留首次出现（gsgm 在前，自身优先保留）
 		}
 		seen[code] = true
-		capValue := toFloat(p.TotalCap)
-		rank := int(toFloat(p.TotalCapRank))
-		if rank <= 0 {
-			rank = idx + 1
-		}
 		m := quotePrefix(code)
 		list = append(list, model.LeaderCompany{
 			Name:         name,
 			Code:         code,
 			Market:       m,
 			MarketLabel:  marketLabel(m),
-			TotalCap:     capValue,
-			TotalCapRank: rank,
+			TotalCap:     toFloat(p.TotalCap),
+			TotalCapRank: int(toFloat(p.TotalCapRank)), // 可能为 0，排序后回填
 			IsSelf:       code == selfCode,
 		})
 	}
@@ -544,10 +545,100 @@ func buildLeaderBoard(selfCode string, peers []industryPeer) model.LeaderBoard {
 		return list[i].Code < list[j].Code // 同市值按代码升序，保证确定性
 	})
 
-	if len(list) > industryPeersTopN {
-		list = list[:industryPeersTopN]
+	for i := range list {
+		if list[i].TotalCapRank <= 0 {
+			list[i].TotalCapRank = i + 1 // 回退：市值降序榜位置
+		}
 	}
+	return list
+}
+
+// buildLeaderBoard 保持原签名/原语义，供既有单测与调用方使用。
+func buildLeaderBoard(selfCode string, peers []industryPeer) model.LeaderBoard {
+	return topLeaderBoard(rankIndustryPeers(selfCode, peers))
+}
+
+// buildIndustryBoards 从同一份合并排名榜派生 leaders 与 competitors。
+func buildIndustryBoards(selfCode string, peers []industryPeer) (model.LeaderBoard, *model.CompetitorBoard) {
+	ranked := rankIndustryPeers(selfCode, peers)
+	return topLeaderBoard(ranked), buildCompetitors(ranked)
+}
+
+// topLeaderBoard 取排名榜前 3 家；榜单为空时仍返回非 nil 空数组（既有契约）。
+func topLeaderBoard(ranked []model.LeaderCompany) model.LeaderBoard {
+	n := len(ranked)
+	if n > industryPeersTopN {
+		n = industryPeersTopN
+	}
+	list := make([]model.LeaderCompany, n) // n=0 时仍是非 nil 空数组
+	copy(list, ranked[:n])
 	return model.LeaderBoard{Companies: list}
+}
+
+// buildCompetitors 以本公司有效排名 R 为锚，按 R-1 → R+1 → R-2 → R+2 取同行。
+// 用排名映射而非数组相邻（上游排名可能不连续）；单侧至多 2 家、合计至多 4 家；
+// 有效候选 <2 家返回 nil（整块不输出）。与 leaders 重叠不去重。
+func buildCompetitors(ranked []model.LeaderCompany) *model.CompetitorBoard {
+	selfIdx := -1
+	for i := range ranked {
+		if ranked[i].IsSelf {
+			selfIdx = i
+			break
+		}
+	}
+	if selfIdx < 0 {
+		return nil // 榜单里没有本公司，无法确定锚点
+	}
+	selfRank := ranked[selfIdx].TotalCapRank
+	if selfRank <= 0 {
+		return nil // rankIndustryPeers 已回填，理论不会发生
+	}
+
+	// 排名 → 同行；同排名只保留市值榜中靠前者（确定性）。
+	byRank := make(map[int]model.LeaderCompany, len(ranked))
+	for _, c := range ranked {
+		if c.IsSelf {
+			continue
+		}
+		if _, ok := byRank[c.TotalCapRank]; !ok {
+			byRank[c.TotalCapRank] = c
+		}
+	}
+
+	targets := []struct{ rank, distance int }{
+		{selfRank - 1, 1},
+		{selfRank + 1, 1},
+		{selfRank - 2, 2},
+		{selfRank + 2, 2},
+	}
+
+	out := make([]model.LeaderCompany, 0, industryCompetitorMax)
+	for _, t := range targets {
+		if t.rank <= 0 {
+			continue
+		}
+		c, ok := byRank[t.rank]
+		if !ok {
+			continue // 目标排名在榜中不存在：跳过
+		}
+		c.RankDistance = t.distance
+		out = append(out, c)
+		delete(byRank, t.rank) // 四个目标互不重复，双保险
+		if len(out) == industryCompetitorMax {
+			break
+		}
+	}
+	if len(out) < industryCompetitorMin {
+		return nil // 有效候选 <2 家：整块为空
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].TotalCapRank != out[j].TotalCapRank {
+			return out[i].TotalCapRank < out[j].TotalCapRank
+		}
+		return out[i].Code < out[j].Code
+	})
+	return &model.CompetitorBoard{SelfRank: selfRank, Companies: out}
 }
 
 // FetchIndustry 从 DMSK 资产负债表行读取行业分类（最新一期带行业字段的行）。

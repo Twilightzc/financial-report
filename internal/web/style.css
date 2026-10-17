@@ -773,6 +773,8 @@ td.num, .val, .yoy {
 .ai-chip-nonashare { background: #fdf6ec; color: #b88230; }
 .ai-chip-loading { color: var(--muted); font-size: 11px; }
 .ai-related { margin-top: 14px; }
+.ai-competitors { margin-top: 14px; }          /* D9：行业龙头之下 */
+.ai-chip-rank { background: #f0f2f5; color: var(--muted); }
 .ai-related-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .ai-related-col { min-width: 0; } /* 防止长名称把 grid 撑出横向滚动 */
 .ai-related-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }

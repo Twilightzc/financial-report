@@ -1079,6 +1079,11 @@ const app = createApp({
         ? `行业龙头 · ${l.industry_name}（按总市值排序）`
         : '行业龙头（按总市值排序）';
     }
+    function competitorTitle(c) {
+      return c && c.self_rank
+        ? `主要竞争对手 · 本公司行业第 ${c.self_rank} 名`
+        : '主要竞争对手';
+    }
     function hasChainCompanies(r) {
       return !!(r && r.chain && ((r.chain.upstream && r.chain.upstream.length)
         || (r.chain.downstream && r.chain.downstream.length)));
@@ -1474,7 +1479,7 @@ const app = createApp({
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
-      companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessRelated,
+      companyHint, companyResolving, companyKey, leaderTitle, competitorTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessRelated,
       jumpToLeader, openAICompany, isSixDigitCode,
       radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
@@ -1977,6 +1982,20 @@ const app = createApp({
                       </button>
                     </div>
                     <p class="ai-disclaimer">名单来自东财行业分类与同行市值数据，按总市值排序，随行情与行业分类更新；排序不代表投资价值，不构成投资建议。</p>
+                  </div>
+                  <!-- R17/D9 主要竞争对手：与龙头同源同一次取数，按排名相邻 2–4 家 -->
+                  <div class="ai-competitors"
+                       v-if="aiResult.competitors && aiResult.competitors.companies && aiResult.competitors.companies.length">
+                    <div class="ai-sub-title">{{ competitorTitle(aiResult.competitors) }}</div>
+                    <div class="ai-chips">
+                      <button v-for="c in aiResult.competitors.companies" :key="c.code" type="button"
+                              class="ai-chip ai-chip-leader" @click="jumpToLeader(c)">
+                        <span class="ai-chip-name">{{ c.name }}</span>
+                        <span class="ai-chip-tag" v-if="c.market_label">{{ c.market_label }}</span>
+                        <span class="ai-chip-tag ai-chip-rank" v-if="c.rank_distance">相邻 {{ c.rank_distance }} 名</span>
+                      </button>
+                    </div>
+                    <p class="ai-disclaimer">按行业总市值排名选取本公司相邻公司（排名前后各至多 2 家），不代表竞争关系强弱，不构成投资建议。</p>
                   </div>
                 </div>
                 <div class="ai-section" v-if="aiResult.businesses && aiResult.businesses.length">

@@ -205,6 +205,7 @@ type LeaderCompany struct {
 	TotalCap     float64 `json:"total_cap,omitempty"`      // 总市值（元）；缺失为 0 不输出
 	TotalCapRank int     `json:"total_cap_rank,omitempty"` // 同行总市值排名（从 1 开始）；缺失时按排序下标+1
 	IsSelf       bool    `json:"is_self"`                  // 不设 omitempty：前端稳定用 === true 判断
+	RankDistance int     `json:"rank_distance,omitempty"`  // D9：与本公司排名距离（1/2）；leaders 恒为 0 不输出
 }
 
 // LeaderBoard 行业龙头榜（leaders 容器）。
@@ -212,6 +213,15 @@ type LeaderBoard struct {
 	IndustryCode string          `json:"industry_code,omitempty"` // DMSK 原始值，实测为 "1277"（不是 "BK1277"）
 	IndustryName string          `json:"industry_name,omitempty"` // 实测 "白酒Ⅱ"
 	Companies    []LeaderCompany `json:"companies"`               // 0–3 家，按总市值降序；非 nil（空数组）
+}
+
+// CompetitorBoard 主要竞争对手（competitors 容器，D9）。
+// 与 leaders 同源同一次取数；companies 复用 LeaderCompany，与 leaders 重叠不去重。
+type CompetitorBoard struct {
+	IndustryCode string          `json:"industry_code,omitempty"` // 与 leaders 使用同一份 DMSK 行业分类
+	IndustryName string          `json:"industry_name,omitempty"`
+	SelfRank     int             `json:"self_rank"` // 本公司行业总市值排名（>0；不设 omitempty）
+	Companies    []LeaderCompany `json:"companies"` // 2–4 家，按 total_cap_rank 升序；非 nil
 }
 
 // CompanyRef AI 推断的产业链/合作公司（名称是唯一展示主键，Code 仅作精确同名消歧）。
@@ -238,9 +248,10 @@ type AIAnalysisResult struct {
 	Valuation  AIValuation  `json:"valuation"`  // 估值模型推荐
 
 	// R17：相关公司（只增不改；旧缓存/旧响应缺字段时前端按空处理）
-	Leaders  *LeaderBoard `json:"leaders,omitempty"`  // 后端确定性回填；无有效龙头时为 nil（整块不输出）
-	Chain    *AIChain     `json:"chain,omitempty"`    // AI 输出；上下游都为空时为 nil
-	Partners []CompanyRef `json:"partners,omitempty"` // AI 输出；为空时不输出
+	Leaders     *LeaderBoard     `json:"leaders,omitempty"`     // 后端确定性回填；无有效龙头时为 nil（整块不输出）
+	Competitors *CompetitorBoard `json:"competitors,omitempty"` // D9：后端确定性回填；有效候选 <2 家时为 nil
+	Chain       *AIChain         `json:"chain,omitempty"`       // AI 输出；上下游都为空时为 nil
+	Partners    []CompanyRef     `json:"partners,omitempty"`    // AI 输出；为空时不输出
 
 	Usage *TokenUsage `json:"usage,omitempty"` // 本次大模型调用的 token 用量（服务端回填）
 }

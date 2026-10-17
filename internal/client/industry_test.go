@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -140,7 +141,7 @@ func TestBuildLeaderBoardMarket(t *testing.T) {
 
 func TestFetchIndustryPeersInvalidCode(t *testing.T) {
 	c := New()
-	if _, err := c.FetchIndustryPeers("12345"); err == nil {
+	if _, _, err := c.FetchIndustryPeers("12345"); err == nil {
 		t.Fatal("非 6 位代码应报错")
 	}
 }
@@ -158,8 +159,8 @@ func TestFetchIndustryPeersTimeout(t *testing.T) {
 			}
 		}),
 	}}
-	if _, err := c.fetchIndustryPeersURL("600519", "http://example.invalid/industry"); err == nil {
-		t.Fatal("超时应返回错误")
+	if _, competitors, err := c.fetchIndustryPeersURL("600519", "http://example.invalid/industry"); err == nil || competitors != nil {
+		t.Fatalf("超时应返回错误且 competitors 为 nil: %v", err)
 	}
 }
 
@@ -169,9 +170,9 @@ func TestFetchIndustryPeersNonJSON(t *testing.T) {
 			return fakeResponse("<html>blocked</html>"), nil
 		}),
 	}}
-	_, err := c.fetchIndustryPeersURL("600519", "http://example.invalid/industry")
-	if err == nil || !strings.Contains(err.Error(), "非 JSON") {
-		t.Fatalf("HTML 响应应命中非 JSON 护栏: %v", err)
+	_, competitors, err := c.fetchIndustryPeersURL("600519", "http://example.invalid/industry")
+	if err == nil || !strings.Contains(err.Error(), "非 JSON") || competitors != nil {
+		t.Fatalf("HTML 响应应命中非 JSON 护栏且 competitors 为 nil: %v", err)
 	}
 }
 
@@ -200,5 +201,227 @@ func TestToReportRowsIndustry(t *testing.T) {
 	}
 	if rows[0].IndustryCode != "1277" || rows[0].IndustryName != "白酒Ⅱ" {
 		t.Fatalf("行业字段映射不符: %+v", rows[0])
+	}
+}
+
+// ===================== R17/D9 主要竞争对手 =====================
+
+// rankedPeer 构造指定排名的同行行：市值随排名递减，代码按排名区分。
+// TotalCap/TotalCapRank 必须用 float64（toFloat 不识别 int）。
+func rankedPeer(rank int, name string) industryPeer {
+	return industryPeer{
+		Name:         name,
+		Code:         fmt.Sprintf("6000%02d", rank),
+		TotalCap:     float64(10000 - rank*100),
+		TotalCapRank: float64(rank),
+	}
+}
+
+// ranksPeer 构造排名 1..n 的同行列表。
+func ranksPeer(n int) []industryPeer {
+	out := make([]industryPeer, 0, n)
+	for r := 1; r <= n; r++ {
+		out = append(out, rankedPeer(r, fmt.Sprintf("公司%d", r)))
+	}
+	return out
+}
+
+func TestBuildCompetitorsFirstRank(t *testing.T) {
+	ranked := rankIndustryPeers("600001", ranksPeer(4)) // 自身排名 1
+	board := buildCompetitors(ranked)
+	if board == nil {
+		t.Fatal("R=1 应产生 competitors")
+	}
+	if board.SelfRank != 1 {
+		t.Fatalf("self_rank 不符: %d", board.SelfRank)
+	}
+	want := []struct {
+		rank int
+		dist int
+	}{{2, 1}, {3, 2}}
+	if len(board.Companies) != len(want) {
+		t.Fatalf("竞争对手数量不符: %+v", board.Companies)
+	}
+	for i, w := range want {
+		c := board.Companies[i]
+		if c.TotalCapRank != w.rank || c.RankDistance != w.dist || c.IsSelf {
+			t.Fatalf("第 %d 家不符: %+v (want rank=%d dist=%d)", i, c, w.rank, w.dist)
+		}
+	}
+}
+
+func TestBuildCompetitorsMiddleRank(t *testing.T) {
+	ranked := rankIndustryPeers("600003", ranksPeer(6)) // 自身排名 3
+	board := buildCompetitors(ranked)
+	if board == nil {
+		t.Fatal("R=3 应产生 competitors")
+	}
+	wantRanks := []int{1, 2, 4, 5}
+	wantDist := []int{2, 1, 1, 2}
+	if len(board.Companies) != len(wantRanks) {
+		t.Fatalf("竞争对手数量不符: %+v", board.Companies)
+	}
+	for i := range wantRanks {
+		c := board.Companies[i]
+		if c.TotalCapRank != wantRanks[i] || c.RankDistance != wantDist[i] {
+			t.Fatalf("第 %d 家不符: rank=%d dist=%d, want rank=%d dist=%d",
+				i, c.TotalCapRank, c.RankDistance, wantRanks[i], wantDist[i])
+		}
+	}
+}
+
+func TestBuildCompetitorsLastRank(t *testing.T) {
+	ranked := rankIndustryPeers("600006", ranksPeer(6)) // 自身排名 6（末位）
+	board := buildCompetitors(ranked)
+	if board == nil {
+		t.Fatal("R=6 应产生 competitors")
+	}
+	wantRanks := []int{4, 5}
+	wantDist := []int{2, 1}
+	if len(board.Companies) != len(wantRanks) {
+		t.Fatalf("单侧上限未生效（应只有向前 2 家）: %+v", board.Companies)
+	}
+	for i := range wantRanks {
+		c := board.Companies[i]
+		if c.TotalCapRank != wantRanks[i] || c.RankDistance != wantDist[i] {
+			t.Fatalf("第 %d 家不符: rank=%d dist=%d", i, c.TotalCapRank, c.RankDistance)
+		}
+	}
+}
+
+func TestBuildCompetitorsTooFew(t *testing.T) {
+	// 仅 1 家有效候选 → nil。
+	one := []industryPeer{
+		{Name: "甲", Code: "600001", TotalCap: 100.0, TotalCapRank: 1.0},
+		{Name: "本公司", Code: "600002", TotalCap: 50.0, TotalCapRank: 2.0},
+	}
+	leaders, competitors := buildIndustryBoards("600002", one)
+	if competitors != nil {
+		t.Fatalf("有效候选 <2 家应为 nil: %+v", competitors)
+	}
+	if len(leaders.Companies) != 2 {
+		t.Fatalf("leaders 不应受影响: %+v", leaders.Companies)
+	}
+
+	// 榜单中完全没有本公司 → nil，leaders 仍前 3。
+	leaders, competitors = buildIndustryBoards("699999", ranksPeer(3))
+	if competitors != nil {
+		t.Fatalf("无本公司锚点应为 nil: %+v", competitors)
+	}
+	if len(leaders.Companies) != 3 {
+		t.Fatalf("leaders 不应受影响: %+v", leaders.Companies)
+	}
+}
+
+func TestBuildCompetitorsRankFallback(t *testing.T) {
+	// 全部 TotalCapRank 缺失 → 回填市值降序榜位置（1..4）。
+	peers := []industryPeer{
+		{Name: "甲", Code: "600001", TotalCap: 500.0},
+		{Name: "本公司", Code: "600002", TotalCap: 400.0},
+		{Name: "乙", Code: "600003", TotalCap: 300.0},
+		{Name: "丙", Code: "600004", TotalCap: 200.0},
+	}
+	board := buildCompetitors(rankIndustryPeers("600002", peers))
+	if board == nil {
+		t.Fatal("排名回退后应产生 competitors")
+	}
+	if board.SelfRank != 2 {
+		t.Fatalf("self_rank 应回退为榜单位置 2: %d", board.SelfRank)
+	}
+	wantRanks := []int{1, 3, 4}
+	wantDist := []int{1, 1, 2}
+	if len(board.Companies) != len(wantRanks) {
+		t.Fatalf("竞争对手数量不符: %+v", board.Companies)
+	}
+	for i := range wantRanks {
+		c := board.Companies[i]
+		if c.TotalCapRank != wantRanks[i] || c.RankDistance != wantDist[i] {
+			t.Fatalf("第 %d 家不符: rank=%d dist=%d", i, c.TotalCapRank, c.RankDistance)
+		}
+	}
+}
+
+func TestBuildCompetitorsExcludesSelfAndKeepsOverlap(t *testing.T) {
+	leaders, board := buildIndustryBoards("600003", ranksPeer(4)) // 自身排名 3
+	if board == nil {
+		t.Fatal("应产生 competitors")
+	}
+	for _, c := range board.Companies {
+		if c.IsSelf {
+			t.Fatalf("competitors 不应包含自身: %+v", c)
+		}
+	}
+	// 排名 1/2 同时是龙头与竞争对手，不做去重。
+	inLeaders := map[int]bool{}
+	for _, c := range leaders.Companies {
+		inLeaders[c.TotalCapRank] = true
+	}
+	overlap := 0
+	for _, c := range board.Companies {
+		if inLeaders[c.TotalCapRank] {
+			overlap++
+		}
+	}
+	if overlap != 2 {
+		t.Fatalf("与 leaders 重叠的公司应保留（期望 2 家）: leaders=%+v competitors=%+v",
+			leaders.Companies, board.Companies)
+	}
+}
+
+func TestBuildCompetitorsRankGap(t *testing.T) {
+	// 排名不连续：1/2/4/5/6，自身 3；目标 2/4/1/5 命中，不得误取数组相邻项。
+	peers := []industryPeer{
+		rankedPeer(1, "甲"),
+		rankedPeer(2, "乙"),
+		rankedPeer(4, "丁"),
+		rankedPeer(5, "戊"),
+		rankedPeer(6, "己"),
+	}
+	self := industryPeer{Name: "本公司", Code: "600003", TotalCap: 9700.0, TotalCapRank: 3.0}
+	peers = append(peers, self)
+	board := buildCompetitors(rankIndustryPeers("600003", peers))
+	if board == nil {
+		t.Fatal("应产生 competitors")
+	}
+	wantRanks := []int{1, 2, 4, 5}
+	wantDist := []int{2, 1, 1, 2}
+	if len(board.Companies) != len(wantRanks) {
+		t.Fatalf("竞争对手数量不符: %+v", board.Companies)
+	}
+	for i := range wantRanks {
+		c := board.Companies[i]
+		if c.TotalCapRank != wantRanks[i] || c.RankDistance != wantDist[i] {
+			t.Fatalf("第 %d 家不符: rank=%d dist=%d, want rank=%d dist=%d",
+				i, c.TotalCapRank, c.RankDistance, wantRanks[i], wantDist[i])
+		}
+	}
+}
+
+func TestFetchIndustryPeersReturnsBoth(t *testing.T) {
+	c := &Client{hcFast: &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return fakeResponse(`{"gsgm":[{"CORRE_SECURITY_CODE":"600519","CORRE_SECURITY_NAME":"贵州茅台","TOTAL_CAP":1661358447729.0,"TOTAL_CAP_RANK":"1"}],` +
+				`"gsgm_zsz":[{"CORRE_SECURITY_CODE":"000858","CORRE_SECURITY_NAME":"五粮液","TOTAL_CAP":279747488920.35,"TOTAL_CAP_RANK":2.0},` +
+				`{"CORRE_SECURITY_CODE":"600809","CORRE_SECURITY_NAME":"山西汾酒","TOTAL_CAP":142369824707.4,"TOTAL_CAP_RANK":3.0}]}`), nil
+		}),
+	}}
+	leaders, competitors, err := c.fetchIndustryPeersURL("600519", "http://example.invalid/industry")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(leaders.Companies) != 3 {
+		t.Fatalf("龙头数量不符: %+v", leaders.Companies)
+	}
+	if competitors == nil || competitors.SelfRank != 1 {
+		t.Fatalf("竞争对手结果不符: %+v", competitors)
+	}
+	if len(competitors.Companies) != 2 {
+		t.Fatalf("竞争对手数量不符: %+v", competitors.Companies)
+	}
+	if competitors.Companies[0].Code != "000858" || competitors.Companies[0].RankDistance != 1 {
+		t.Fatalf("第 1 家竞争对手不符: %+v", competitors.Companies[0])
+	}
+	if competitors.Companies[1].Code != "600809" || competitors.Companies[1].RankDistance != 2 {
+		t.Fatalf("第 2 家竞争对手不符: %+v", competitors.Companies[1])
 	}
 }
