@@ -1625,6 +1625,8 @@ const app = createApp({
       jumpToLeader, openAICompany, isSixDigitCode,
       radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
+      // R18：增长假设组的三层锚/留存率口径展示辅助（模板直接调用，须在 setup 返回中暴露）
+      paramValue, reliabilityLabel, retentionBasisLabel,
       history, querySearch, handleSelect, clearHistory,
       searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
       // R16 估值历史记录（抽屉、记录操作与展示格式化）
@@ -2245,7 +2247,8 @@ const app = createApp({
                 </div>
                 <!-- R17：AI 公司解析提示为 AI 结果卡片公共节点（仅板块 related 时也可见） -->
                 <p class="ai-company-hint" v-if="companyHint">{{ companyHint }}</p>
-                <div class="ai-section">
+                <!-- 防御：旧缓存/异常响应若无 valuation，跳过整组渲染而不是让根组件渲染抛错（白屏） -->
+                <div class="ai-section" v-if="aiResult.valuation">
                   <div class="ai-section-title">估值模型推荐</div>
                   <div class="ai-valuation" style="flex-direction:column;align-items:stretch;gap:12px">
                     <!-- 组一：模型结论（结论前置，操作入口与不适用原因就近展示） -->
