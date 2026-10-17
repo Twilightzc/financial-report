@@ -1479,32 +1479,50 @@ const app = createApp({
                 </div>
                 <div class="ai-section">
                   <div class="ai-section-title">估值模型推荐</div>
-                  <div class="ai-valuation">
-                    <span class="ai-model">{{ aiResult.valuation.model_name }}</span>
-                    <span class="ai-v">折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%<template v-if="aiResult.valuation.wacc_baseline != null">（WACC 基线 {{ fmtNum(aiResult.valuation.wacc_baseline) }}%<template v-if="aiResult.valuation.risk_premium"> + 风险溢价 {{ fmtNum(aiResult.valuation.risk_premium) }}%</template>）</template></span>
-                    <span class="ai-v" v-if="aiResult.valuation.industry_type_name">行业类型 {{ aiResult.valuation.industry_type_name }}</span>
-                    <span class="ai-v" v-if="aiResult.valuation.beta">β {{ fmtNum(aiResult.valuation.beta) }}（{{ aiResult.valuation.beta_tier }}）</span>
-                    <span v-for="p in aiResult.valuation.params" :key="p.key" class="ai-v">{{ p.label }} {{ fmtNum(p.value) }}</span>
-                    <span v-if="aiResult.valuation.base_growth != null" class="ai-v">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%</span>
-                    <span class="ai-v" v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null || aiResult.valuation.growth_fcf != null">基准增速构成：<template v-if="aiResult.valuation.growth_revenue != null">营收 {{ fmtNum(aiResult.valuation.growth_revenue) }}%</template><template v-if="aiResult.valuation.growth_profit != null"><template v-if="aiResult.valuation.growth_revenue != null"> / </template>净利润 {{ fmtNum(aiResult.valuation.growth_profit) }}%</template><template v-if="aiResult.valuation.growth_fcf != null"><template v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null"> / </template>FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}%</template>（等权）</span>
-                    <span class="ai-v" v-if="aiResult.valuation.model_score">模型得分 {{ fmtNum(aiResult.valuation.model_score) }}</span>
-                    <span class="ai-v" v-if="aiResult.valuation.sgr">SGR 上限 {{ fmtNum(aiResult.valuation.sgr) }}%<template v-if="aiResult.valuation.retention_rate != null">（留存率 {{ fmtNum(aiResult.valuation.retention_rate * 100) }}%）</template></span>
-                    <span class="ai-v">基期自由现金流 {{ aiResult.valuation.fcf_mode_name }}<template v-if="aiResult.valuation.fcf_years">（{{ aiResult.valuation.fcf_years }}年）</template></span>
-                    <span class="ai-v" v-if="aiResult.valuation.fcf_mode === 'custom'">自定义值 {{ fmtNum(aiResult.valuation.fcf_custom_value) }}{{ fcfUnitLabel(aiResult.valuation.fcf_custom_unit) }}</span>
-                    <span class="ai-v" v-if="aiResult.valuation.fcf_cyclical">FCF 强周期（变异系数 {{ fmtNum(aiResult.valuation.fcf_cv) }}，正负交替 {{ aiResult.valuation.fcf_sign_changes }} 次），基期按 {{ aiResult.valuation.fcf_window_years }} 年去极值平均</span>
-                    <span class="ai-v" v-else-if="aiResult.valuation.fcf_window_years">基期 FCF 判定窗口 {{ aiResult.valuation.fcf_window_years }} 年</span>
-                    <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
+                  <div class="ai-valuation" style="flex-direction:column;align-items:stretch;gap:12px">
+                    <!-- 组一：模型结论（结论前置，操作入口与不适用原因就近展示） -->
+                    <div>
+                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">模型结论</div>
+                      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                        <span class="ai-model">{{ aiResult.valuation.model_name }}</span>
+                        <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
+                      </div>
+                      <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false" style="margin-top:6px"
+                                :title="aiResult.valuation.inapplicable_reason || '现金流贴现法不适用'" />
+                    </div>
+                    <!-- 组二：折现率（WACC 基线 + 风险溢价 + 行业 β 档位） -->
+                    <div>
+                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">折现率</div>
+                      <div class="ai-v">折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%<template v-if="aiResult.valuation.wacc_baseline != null">（WACC 基线 {{ fmtNum(aiResult.valuation.wacc_baseline) }}%<template v-if="aiResult.valuation.risk_premium"> + 风险溢价 {{ fmtNum(aiResult.valuation.risk_premium) }}%</template>）</template></div>
+                      <div class="ai-v" v-if="aiResult.valuation.industry_type_name || aiResult.valuation.beta"><template v-if="aiResult.valuation.industry_type_name">行业类型 {{ aiResult.valuation.industry_type_name }}</template><template v-if="aiResult.valuation.industry_type_name && aiResult.valuation.beta"> · </template><template v-if="aiResult.valuation.beta">β {{ fmtNum(aiResult.valuation.beta) }}（{{ aiResult.valuation.beta_tier }}）</template></div>
+                    </div>
+                    <!-- 组三：增长假设（基准增速 → 模型打分/SGR → 模型参数 → 口径说明） -->
+                    <div>
+                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">增长假设</div>
+                      <div class="ai-v" v-if="aiResult.valuation.base_growth != null">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%<template v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null || aiResult.valuation.growth_fcf != null">（<template v-if="aiResult.valuation.growth_revenue != null">营收 {{ fmtNum(aiResult.valuation.growth_revenue) }}%</template><template v-if="aiResult.valuation.growth_profit != null"><template v-if="aiResult.valuation.growth_revenue != null"> / </template>净利润 {{ fmtNum(aiResult.valuation.growth_profit) }}%</template><template v-if="aiResult.valuation.growth_fcf != null"><template v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null"> / </template>FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}%</template>，等权）</template></div>
+                      <div class="ai-v" v-if="aiResult.valuation.model_score || aiResult.valuation.sgr"><template v-if="aiResult.valuation.model_score">模型得分 {{ fmtNum(aiResult.valuation.model_score) }}</template><template v-if="aiResult.valuation.model_score && aiResult.valuation.sgr"> · </template><template v-if="aiResult.valuation.sgr">SGR 上限 {{ fmtNum(aiResult.valuation.sgr) }}%<template v-if="aiResult.valuation.retention_rate != null">（留存率 {{ fmtNum(aiResult.valuation.retention_rate * 100) }}%）</template></template></div>
+                      <div class="ai-v" v-if="aiResult.valuation.params && aiResult.valuation.params.length"><span>模型参数</span><span v-for="p in aiResult.valuation.params" :key="p.key" style="margin-left:10px">{{ p.label }} {{ fmtNum(p.value) }}</span></div>
+                      <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
+                    </div>
+                    <!-- 组四：基期现金流（方式/年数/自定义值/周期判定 + 口径说明） -->
+                    <div>
+                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">基期现金流</div>
+                      <div class="ai-v">基期自由现金流 {{ aiResult.valuation.fcf_mode_name }}<template v-if="aiResult.valuation.fcf_years">（{{ aiResult.valuation.fcf_years }}年）</template><template v-if="aiResult.valuation.fcf_mode === 'custom'">；自定义值 {{ fmtNum(aiResult.valuation.fcf_custom_value) }}{{ fcfUnitLabel(aiResult.valuation.fcf_custom_unit) }}</template></div>
+                      <div class="ai-v" v-if="aiResult.valuation.fcf_cyclical">FCF 强周期（变异系数 {{ fmtNum(aiResult.valuation.fcf_cv) }}，正负交替 {{ aiResult.valuation.fcf_sign_changes }} 次），基期按 {{ aiResult.valuation.fcf_window_years }} 年去极值平均</div>
+                      <div class="ai-v" v-else-if="aiResult.valuation.fcf_window_years">基期 FCF 判定窗口 {{ aiResult.valuation.fcf_window_years }} 年</div>
+                      <p class="ai-text" v-if="aiResult.valuation.fcf_rationale">基期自由现金流：{{ aiResult.valuation.fcf_rationale }}</p>
+                    </div>
+                    <!-- 组五：说明（推导类提示统一弱化为小字，仅保留结论） -->
+                    <div>
+                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">说明</div>
+                      <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，且研发投入同比扩张{{ fmtNum((aiResult.valuation.rd_expansion || 0) / 1e8) }} 亿元，建议开启研发调整。</p>
+                      <p class="ai-text" v-else-if="aiResult.valuation.rd_ratio > 5">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，但研发投入同比未扩张（或上年数据缺失），不建议开启研发调整。</p>
+                      <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动较大：高增长期增长率已按营收/净利润增速离散度折减（最多 40%），并受可持续增长率上限约束。</p>
+                      <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" style="margin:6px 0" />
+                      <p class="ai-text" v-if="aiResult.valuation.base_year">基期年 {{ aiResult.valuation.base_year }}<template v-if="aiResult.valuation.capex_coverage"> · Capex 覆盖率 {{ fmtNum(aiResult.valuation.capex_coverage) }}</template><template v-if="aiResult.valuation.fcf_profit_ratio"> · FCF/净利润 {{ fmtNum(aiResult.valuation.fcf_profit_ratio) }}</template></p>
+                      <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
+                    </div>
                   </div>
-                  <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false"
-                            :title="aiResult.valuation.inapplicable_reason || '现金流贴现法不适用'" />
-                  <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
-                  <p class="ai-text" v-if="aiResult.valuation.fcf_rationale">基期自由现金流：{{ aiResult.valuation.fcf_rationale }}</p>
-                  <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，且研发投入同比扩张{{ fmtNum((aiResult.valuation.rd_expansion || 0) / 1e8) }} 亿元，建议开启研发调整（点「套用到估值」会自动打开该开关）。</p>
-                  <p class="ai-text" v-else-if="aiResult.valuation.rd_ratio > 5">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，但研发投入同比未扩张（或上年数据缺失），不建议开启研发调整。</p>
-                  <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动较大：高增长期增长率已按营收/净利润增速离散度折减（最多 40%），并受可持续增长率上限约束。</p>
-                  <p class="ai-text" v-if="aiResult.valuation.base_year">基期年 {{ aiResult.valuation.base_year }}<template v-if="aiResult.valuation.capex_coverage"> · Capex 覆盖率 {{ fmtNum(aiResult.valuation.capex_coverage) }}</template><template v-if="aiResult.valuation.fcf_profit_ratio"> · FCF/净利润 {{ fmtNum(aiResult.valuation.fcf_profit_ratio) }}</template></p>
-                  <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" />
-                  <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
                 </div>
                 <div v-if="aiResult.usage" class="ai-usage">本次分析消耗约 {{ aiResult.usage.total_tokens }} tokens（输入 {{ aiResult.usage.prompt_tokens }} / 输出 {{ aiResult.usage.completion_tokens }}）</div>
               </template>
