@@ -2107,74 +2107,51 @@ const app = createApp({
                 <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
-              <!-- 等待态：星座连线动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
+              <!-- 等待态：神经网络脉冲动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
                    结果区由 aiResult 独立驱动：请求返回时 aiResult 先于 aiLoading 置位，若用 v-else-if
                    会把结果/雷达图容器推迟到 finally 之后才挂载，导致 renderRadar 拿不到 DOM。 -->
               <div v-if="aiLoading && !aiResult" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
                 <div class="ai-think-visual" aria-hidden="true">
                   <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
-                    <!-- 星座连线：静态底纹 -->
-                    <g class="ai-star-links">
-                      <path d="M34 24L16 46" pathLength="100"></path>
-                      <path d="M34 24L48 46" pathLength="100"></path>
-                      <path d="M34 24L72 26" pathLength="100"></path>
-                      <path d="M16 46L48 46" pathLength="100"></path>
-                      <path d="M16 46L32 78" pathLength="100"></path>
-                      <path d="M48 46L72 26" pathLength="100"></path>
-                      <path d="M48 46L58 68" pathLength="100"></path>
-                      <path d="M48 46L32 78" pathLength="100"></path>
-                      <path d="M72 26L96 44" pathLength="100"></path>
-                      <path d="M72 26L58 68" pathLength="100"></path>
-                      <path d="M96 44L58 68" pathLength="100"></path>
-                      <path d="M96 44L86 72" pathLength="100"></path>
-                      <path d="M58 68L86 72" pathLength="100"></path>
-                      <path d="M58 68L32 78" pathLength="100"></path>
-                      <path d="M58 68L58 100" pathLength="100"></path>
-                      <path d="M86 72L58 100" pathLength="100"></path>
-                      <path d="M86 72L104 94" pathLength="100"></path>
-                      <path d="M32 78L14 92" pathLength="100"></path>
-                      <path d="M32 78L58 100" pathLength="100"></path>
+                    <!-- 连线：3 层网络（左 3 → 中 4 → 右 3），虚线沿左→右流动 -->
+                    <g class="ai-net-edges">
+                      <line x1="18" y1="32" x2="60" y2="22"></line>
+                      <line x1="18" y1="32" x2="60" y2="48"></line>
+                      <line x1="18" y1="32" x2="60" y2="72"></line>
+                      <line x1="18" y1="32" x2="60" y2="98"></line>
+                      <line x1="18" y1="60" x2="60" y2="22"></line>
+                      <line x1="18" y1="60" x2="60" y2="48"></line>
+                      <line x1="18" y1="60" x2="60" y2="72"></line>
+                      <line x1="18" y1="60" x2="60" y2="98"></line>
+                      <line x1="18" y1="88" x2="60" y2="22"></line>
+                      <line x1="18" y1="88" x2="60" y2="48"></line>
+                      <line x1="18" y1="88" x2="60" y2="72"></line>
+                      <line x1="18" y1="88" x2="60" y2="98"></line>
+                      <line x1="60" y1="22" x2="102" y2="32"></line>
+                      <line x1="60" y1="22" x2="102" y2="60"></line>
+                      <line x1="60" y1="22" x2="102" y2="88"></line>
+                      <line x1="60" y1="48" x2="102" y2="32"></line>
+                      <line x1="60" y1="48" x2="102" y2="60"></line>
+                      <line x1="60" y1="48" x2="102" y2="88"></line>
+                      <line x1="60" y1="72" x2="102" y2="32"></line>
+                      <line x1="60" y1="72" x2="102" y2="60"></line>
+                      <line x1="60" y1="72" x2="102" y2="88"></line>
+                      <line x1="60" y1="98" x2="102" y2="32"></line>
+                      <line x1="60" y1="98" x2="102" y2="60"></line>
+                      <line x1="60" y1="98" x2="102" y2="88"></line>
                     </g>
-                    <!-- 星光流动：与底纹同路径的短亮段沿连线流动 -->
-                    <g class="ai-star-flow">
-                      <path d="M34 24L16 46" pathLength="100"></path>
-                      <path d="M34 24L48 46" pathLength="100"></path>
-                      <path d="M34 24L72 26" pathLength="100"></path>
-                      <path d="M16 46L48 46" pathLength="100"></path>
-                      <path d="M16 46L32 78" pathLength="100"></path>
-                      <path d="M48 46L72 26" pathLength="100"></path>
-                      <path d="M48 46L58 68" pathLength="100"></path>
-                      <path d="M48 46L32 78" pathLength="100"></path>
-                      <path d="M72 26L96 44" pathLength="100"></path>
-                      <path d="M72 26L58 68" pathLength="100"></path>
-                      <path d="M96 44L58 68" pathLength="100"></path>
-                      <path d="M96 44L86 72" pathLength="100"></path>
-                      <path d="M58 68L86 72" pathLength="100"></path>
-                      <path d="M58 68L32 78" pathLength="100"></path>
-                      <path d="M58 68L58 100" pathLength="100"></path>
-                      <path d="M86 72L58 100" pathLength="100"></path>
-                      <path d="M86 72L104 94" pathLength="100"></path>
-                      <path d="M32 78L14 92" pathLength="100"></path>
-                      <path d="M32 78L58 100" pathLength="100"></path>
-                    </g>
-                    <!-- 主星微光：两颗亮星的十字星芒 -->
-                    <g class="ai-star-sparkles">
-                      <path d="M30 24H38M34 20V28"></path>
-                      <path d="M52.5 68H63.5M58 62.5V73.5"></path>
-                    </g>
-                    <!-- 星点：错峰呼吸/点亮 -->
-                    <g class="ai-star-nodes">
-                      <circle cx="34" cy="24" r="3"></circle>
-                      <circle cx="16" cy="46" r="2.2"></circle>
-                      <circle cx="48" cy="46" r="2.4"></circle>
-                      <circle cx="72" cy="26" r="2.2"></circle>
-                      <circle cx="96" cy="44" r="2.8"></circle>
-                      <circle cx="58" cy="68" r="3.4"></circle>
-                      <circle cx="86" cy="72" r="2.2"></circle>
-                      <circle cx="32" cy="78" r="2.6"></circle>
-                      <circle cx="14" cy="92" r="2"></circle>
-                      <circle cx="58" cy="100" r="2.2"></circle>
-                      <circle cx="104" cy="94" r="2"></circle>
+                    <!-- 节点：三层错峰脉冲 -->
+                    <g class="ai-net-nodes">
+                      <circle cx="18" cy="32" r="4"></circle>
+                      <circle cx="18" cy="60" r="4"></circle>
+                      <circle cx="18" cy="88" r="4"></circle>
+                      <circle cx="60" cy="22" r="4"></circle>
+                      <circle cx="60" cy="48" r="4"></circle>
+                      <circle cx="60" cy="72" r="4"></circle>
+                      <circle cx="60" cy="98" r="4"></circle>
+                      <circle cx="102" cy="32" r="4"></circle>
+                      <circle cx="102" cy="60" r="4"></circle>
+                      <circle cx="102" cy="88" r="4"></circle>
                     </g>
                   </svg>
                 </div>
