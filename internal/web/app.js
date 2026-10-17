@@ -1170,8 +1170,7 @@ const app = createApp({
       if (cached) {
         // 同条件已分析过，直接复用结果，不重复调用大模型
         aiResult.value = cached;
-        await nextTick();
-        renderRadar();
+        await renderRadarAfterRender();
         return;
       }
       aiLoading.value = true;
@@ -1192,8 +1191,7 @@ const app = createApp({
         }
         aiCache.set(cacheKey, json.data);
         aiResult.value = json.data;
-        await nextTick();
-        renderRadar();
+        await renderRadarAfterRender();
       } catch (e) {
         if (code.value.trim() !== reqCode) return;
         aiError.value = '请求失败：' + e.message;
@@ -1287,6 +1285,21 @@ const app = createApp({
       if (chart) chart.dispose();
       chart = echarts.init(el);
       chart.setOption(buildRadarOption(aiResult.value.scores || [], radarNarrow.value));
+    }
+
+    // 等结果区（含雷达图容器）真正挂载后再初始化 ECharts：
+    // 首次 nextTick 后容器通常已就绪；若仍不存在或宽高为 0（分支切换/布局跨帧），
+    // 再等两个渲染帧兜底，避免 echarts.init 在 0 尺寸容器上画出空白。
+    async function renderRadarAfterRender() {
+      await nextTick();
+      const ready = () => {
+        const el = aiRadarRef.value;
+        return !!el && el.clientWidth > 0 && el.clientHeight > 0;
+      };
+      if (!ready() && aiResult.value) {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }
+      renderRadar();
     }
 
     // 窗口 resize / 手机横竖屏切换：防抖后跨阈值重设 option，并 resize() 重新测量容器高度。
@@ -2094,8 +2107,10 @@ const app = createApp({
                 <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
-              <!-- 等待态：神经网络脉冲动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩 -->
-              <div v-if="aiLoading" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
+              <!-- 等待态：AI 芯片电路动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
+                   结果区由 aiResult 独立驱动：请求返回时 aiResult 先于 aiLoading 置位，若用 v-else-if
+                   会把结果/雷达图容器推迟到 finally 之后才挂载，导致 renderRadar 拿不到 DOM。 -->
+              <div v-if="aiLoading && !aiResult" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
                 <div class="ai-think-visual" aria-hidden="true">
                   <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
                     <!-- 电路底板：芯片四周的走线，静态细线 -->
@@ -2151,7 +2166,7 @@ const app = createApp({
                 <p class="ai-think-text">分析中请稍等<span class="ai-think-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
                 <p class="ai-think-tip">AI 正在研读财务报表与行业信息</p>
               </div>
-              <template v-else-if="aiResult">
+              <template v-if="aiResult">
                 <div class="ai-radar"><div ref="aiRadarRef" class="ai-radar-box"></div></div>
                 <div class="ai-scores">
                   <div v-for="s in aiResult.scores" :key="s.dimension" class="ai-score-row">
