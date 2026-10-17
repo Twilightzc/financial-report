@@ -130,7 +130,86 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	if rec.FCFRationale != "" {
 		b.WriteString("- 基期自由现金流：" + baseFCFPromptText(rec) + "\n")
 	}
+	// R15/P2：基准增速构成、多信号分档与 SGR（只解释口径，不得改写数字）。
+	// 缺失分项标记「不可用」而不是写成 0%，避免向大模型编造数据点（A3）。
+	b.WriteString(fmt.Sprintf("- 基准增速构成：营收 %s / 净利润 %s / FCF %s（三项等权，缺失项按可用项归一化）；盈利增速极差 %s。\n",
+		growthPromptValue(rec.GrowthRevenue, rec.GrowthRevenueOK),
+		growthPromptValue(rec.GrowthProfit, rec.GrowthProfitOK),
+		growthPromptValue(rec.GrowthFCF, rec.GrowthFCFOK),
+		dispersionPromptValue(rec.GrowthDispersion, rec.HasStabilityScore)))
+	b.WriteString(fmt.Sprintf("- 模型分档：得分 %.2f（%s）→ %s（权重 增速 0.6 / 稳定性 0.2 / ROE 0.2，阈值 70/45/25；X<3%% 直接零增长）。\n",
+		rec.ModelScore, modelScoreParts(rec), rec.ModelName))
+	if rec.SGR > 0 {
+		b.WriteString(fmt.Sprintf("- 可持续增长率：%.2f%%（留存率 %.1f%%）；高增长期增长率的上限（向下取整）已受其约束。\n",
+			rec.SGR, rec.RetentionRate*100))
+	} else {
+		b.WriteString("- 可持续增长率：不可用（留存率/ROE 数据不足），高增长期增长率未施加上限。\n")
+	}
+	// R15/P3：FCF 周期与研发双条件。
+	if rec.FCFWindowYears > 0 {
+		b.WriteString(fmt.Sprintf("- 周期性：FCF 变异系数 %.2f（符号翻转 %d 次）→ %s；基期 FCF 判定窗口 %d 年、方式 %s。\n",
+			rec.FCFCV, rec.FCFSignChanges, boolText(rec.FCFCyclical, "强周期", "非强周期"),
+			rec.FCFWindowYears, rec.FCFModeName))
+	}
+	if rec.RDRatio > 0 {
+		b.WriteString(fmt.Sprintf("- 研发：费用率 %.2f%%，同比扩张 %.2f 亿元 → %s研发调整（需同时满足费用率 > 5%% 且同比扩张 > 0）。\n",
+			rec.RDRatio, rec.RDExpansion/1e8, boolText(rec.AdjustRD, "建议开启", "不建议开启")))
+	}
+	// R15/P4：一致性校验结果（只解释口径，不得改写数字）。
+	if rec.BaseYear > 0 {
+		line := fmt.Sprintf("- 一致性：基期年 %d（利润表 ∩ 现金流量表）", rec.BaseYear)
+		if rec.CapexCoverage > 0 {
+			line += fmt.Sprintf("，购建长期资产现金/保全性资本支出 %.2f", rec.CapexCoverage)
+		}
+		if rec.DeltaNWCRatio > 0 {
+			line += fmt.Sprintf("，ΔNWC/基期 FCF %.2f", rec.DeltaNWCRatio)
+		}
+		if rec.FCFProfitRatio > 0 {
+			line += fmt.Sprintf("，FCF/净利润 %.2f", rec.FCFProfitRatio)
+		}
+		b.WriteString(line + "。以上均为系统校验结果，只解释口径，不得改写数字。\n")
+	}
 	return b.String()
+}
+
+// boolText 二值文案辅助（yes/no 依 cond 选择）。
+func boolText(cond bool, yes, no string) string {
+	if cond {
+		return yes
+	}
+	return no
+}
+
+// growthPromptValue 分项增速的提示词文本：不可用 → 「不可用」，避免把缺失项写成 0%。
+func growthPromptValue(v float64, ok bool) string {
+	if !ok {
+		return "不可用"
+	}
+	return fmt.Sprintf("%.2f%%", v)
+}
+
+// dispersionPromptValue 盈利增速极差的提示词文本（稳定性信号不可用时标注）。
+func dispersionPromptValue(dispersion float64, available bool) string {
+	if !available {
+		return "不可用"
+	}
+	return fmt.Sprintf("%.2f pp", dispersion)
+}
+
+// modelScoreParts 模型分档的分项得分文本（不可用信号显式标注，不伪装成 0 分）。
+func modelScoreParts(rec model.ValuationRecommendation) string {
+	parts := []string{fmt.Sprintf("增速分 %.2f", rec.ScoreGrowth)}
+	if rec.HasStabilityScore {
+		parts = append(parts, fmt.Sprintf("稳定性分 %.2f", rec.ScoreStability))
+	} else {
+		parts = append(parts, "稳定性分 不可用")
+	}
+	if rec.HasROEScore {
+		parts = append(parts, fmt.Sprintf("ROE 分 %.2f", rec.ScoreROE))
+	} else {
+		parts = append(parts, "ROE 分 不可用")
+	}
+	return strings.Join(parts, " / ")
 }
 
 // baseFCFPromptText 把基期自由现金流推荐序列化为一行文本：方式名 +（多年度方式）年数 /（custom）推荐值 + 口径。
@@ -352,6 +431,26 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	// 行业类型：归一化后的 key 覆盖大模型原始值，脏值不外泄（须在 api 侧读取过原始值之后调用）。
 	r.Valuation.IndustryType = rec.IndustryType
 	r.Valuation.IndustryTypeName = rec.IndustryTypeName
+	// R15/P2：基准增速构成、多信号分档与 SGR（确定性回填）。
+	r.Valuation.GrowthRevenue = rec.GrowthRevenue
+	r.Valuation.GrowthProfit = rec.GrowthProfit
+	r.Valuation.GrowthFCF = rec.GrowthFCF
+	r.Valuation.GrowthDispersion = rec.GrowthDispersion
+	r.Valuation.ModelScore = rec.ModelScore
+	r.Valuation.SGR = rec.SGR
+	r.Valuation.RetentionRate = rec.RetentionRate
+	r.Valuation.ModelDegraded = rec.ModelDegraded
+	// R15/P3：FCF 周期识别与研发扩张（确定性回填）。
+	r.Valuation.FCFCyclical = rec.FCFCyclical
+	r.Valuation.FCFCV = rec.FCFCV
+	r.Valuation.FCFSignChanges = rec.FCFSignChanges
+	r.Valuation.FCFWindowYears = rec.FCFWindowYears
+	r.Valuation.RDExpansion = rec.RDExpansion
+	// R15/P4：一致性校验的可观测字段（确定性回填）。
+	r.Valuation.BaseYear = rec.BaseYear
+	r.Valuation.CapexCoverage = rec.CapexCoverage
+	r.Valuation.DeltaNWCRatio = rec.DeltaNWCRatio
+	r.Valuation.FCFProfitRatio = rec.FCFProfitRatio
 	// Rationale 保持大模型返回值，不覆盖
 }
 

@@ -167,14 +167,19 @@ func TestVerifyRDThresholdFloatBoundary(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ratio := rdSuggestion([]model.ReportRow{r8Inc("2024-12-31", c.rev, r8Ptr(c.rd))})
+			// P3/G11 双条件：补一个研发费用更低的上年（保证「同比扩张 > 0」），只让费用率决定结论。
+			rows := []model.ReportRow{
+				r8Inc("2023-12-31", c.rev, r8Ptr(c.rd*0.9)),
+				r8Inc("2024-12-31", c.rev, r8Ptr(c.rd)),
+			}
+			got, ratio := rdSuggestion(rows)
 			if got != c.want {
 				t.Errorf("suggest = %v，期望 %v（%s）", got, c.want, c.expectNote)
 			}
 			if ratio == nil {
 				t.Fatalf("ratioPct 不应为 nil")
 			}
-			if rec := RecommendValuation(nil, nil, []model.ReportRow{r8Inc("2024-12-31", c.rev, r8Ptr(c.rd))}); rec.RDRatio != c.wantRatio {
+			if rec := RecommendValuation(nil, nil, rows); rec.RDRatio != c.wantRatio {
 				t.Errorf("展示值 RDRatio = %v，期望 %v（%s）", rec.RDRatio, c.wantRatio, c.expectNote)
 			}
 		})

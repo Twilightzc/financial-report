@@ -100,8 +100,13 @@ func (h *Handler) GetAIAnalysis(c *gin.Context) {
 
 	// ③ 用确定性参数覆盖大模型返回的估值字段（含把 IndustryType 归一化回填），仅保留其 rationale。
 	service.ApplyValuationRecommendation(&result, rec)
-	log.Printf("AI 估值参数确定性推荐: code=%s 行业类型=%s β=%.1f(%s) 基准增速=%.2f%% 波动=%v 模型=%s 折现率=%.1f%% 风险点=%d 研发调整=%v 研发费用率=%.2f%%",
-		code, rec.IndustryType, rec.Beta, rec.BetaBasis, rec.BaseGrowth, rec.Volatile, rec.Model, rec.DiscountRate, rec.RiskPoints, rec.AdjustRD, rec.RDRatio)
+	log.Printf("AI 估值参数确定性推荐: code=%s 基期年=%d 行业类型=%s β=%.1f(%s) 基准增速=%.2f%%（营收=%.2f%% 净利润=%.2f%% FCF=%.2f%% 极差=%.2f） 得分=%.2f 波动=%v 模型=%s（降级=%v） 折现率=%.1f%% SGR=%.2f%% 留存率=%.2f FCF强周期=%v(CV=%.2f 翻转=%d 窗口=%d) 风险点=%d 研发调整=%v 研发费用率=%.2f%% 扩张=%.2f亿 一致性(基期年=%d Capex覆盖=%.2f ΔNWC/FCF=%.2f FCF/净利润=%.2f)",
+		code, rec.BaseYear, rec.IndustryType, rec.Beta, rec.BetaBasis, rec.BaseGrowth,
+		rec.GrowthRevenue, rec.GrowthProfit, rec.GrowthFCF, rec.GrowthDispersion, rec.ModelScore,
+		rec.Volatile, rec.Model, rec.ModelDegraded, rec.DiscountRate, rec.SGR, rec.RetentionRate,
+		rec.FCFCyclical, rec.FCFCV, rec.FCFSignChanges, rec.FCFWindowYears,
+		rec.RiskPoints, rec.AdjustRD, rec.RDRatio, rec.RDExpansion/1e8,
+		rec.BaseYear, rec.CapexCoverage, rec.DeltaNWCRatio, rec.FCFProfitRatio)
 	result.Usage = &usage
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": result})
 }

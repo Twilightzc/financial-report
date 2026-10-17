@@ -1486,16 +1486,23 @@ const app = createApp({
                     <span class="ai-v" v-if="aiResult.valuation.beta">β {{ fmtNum(aiResult.valuation.beta) }}（{{ aiResult.valuation.beta_tier }}）</span>
                     <span v-for="p in aiResult.valuation.params" :key="p.key" class="ai-v">{{ p.label }} {{ fmtNum(p.value) }}</span>
                     <span v-if="aiResult.valuation.base_growth != null" class="ai-v">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%</span>
+                    <span class="ai-v" v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null || aiResult.valuation.growth_fcf != null">基准增速构成：<template v-if="aiResult.valuation.growth_revenue != null">营收 {{ fmtNum(aiResult.valuation.growth_revenue) }}%</template><template v-if="aiResult.valuation.growth_profit != null"><template v-if="aiResult.valuation.growth_revenue != null"> / </template>净利润 {{ fmtNum(aiResult.valuation.growth_profit) }}%</template><template v-if="aiResult.valuation.growth_fcf != null"><template v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null"> / </template>FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}%</template>（等权）</span>
+                    <span class="ai-v" v-if="aiResult.valuation.model_score">模型得分 {{ fmtNum(aiResult.valuation.model_score) }}</span>
+                    <span class="ai-v" v-if="aiResult.valuation.sgr">SGR 上限 {{ fmtNum(aiResult.valuation.sgr) }}%<template v-if="aiResult.valuation.retention_rate != null">（留存率 {{ fmtNum(aiResult.valuation.retention_rate * 100) }}%）</template></span>
                     <span class="ai-v">基期自由现金流 {{ aiResult.valuation.fcf_mode_name }}<template v-if="aiResult.valuation.fcf_years">（{{ aiResult.valuation.fcf_years }}年）</template></span>
                     <span class="ai-v" v-if="aiResult.valuation.fcf_mode === 'custom'">自定义值 {{ fmtNum(aiResult.valuation.fcf_custom_value) }}{{ fcfUnitLabel(aiResult.valuation.fcf_custom_unit) }}</span>
+                    <span class="ai-v" v-if="aiResult.valuation.fcf_cyclical">FCF 强周期（变异系数 {{ fmtNum(aiResult.valuation.fcf_cv) }}，正负交替 {{ aiResult.valuation.fcf_sign_changes }} 次），基期按 {{ aiResult.valuation.fcf_window_years }} 年去极值平均</span>
+                    <span class="ai-v" v-else-if="aiResult.valuation.fcf_window_years">基期 FCF 判定窗口 {{ aiResult.valuation.fcf_window_years }} 年</span>
                     <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
                   </div>
                   <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false"
                             :title="aiResult.valuation.inapplicable_reason || '现金流贴现法不适用'" />
                   <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
                   <p class="ai-text" v-if="aiResult.valuation.fcf_rationale">基期自由现金流：{{ aiResult.valuation.fcf_rationale }}</p>
-                  <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，研发投入占比较高，建议开启研发调整（点「套用到估值」会自动打开该开关）。</p>
-                  <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动剧烈：高增长期增长率已按基准增速的 50% 取值。</p>
+                  <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，且研发投入同比扩张{{ fmtNum((aiResult.valuation.rd_expansion || 0) / 1e8) }} 亿元，建议开启研发调整（点「套用到估值」会自动打开该开关）。</p>
+                  <p class="ai-text" v-else-if="aiResult.valuation.rd_ratio > 5">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，但研发投入同比未扩张（或上年数据缺失），不建议开启研发调整。</p>
+                  <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动较大：高增长期增长率已按营收/净利润增速离散度折减（最多 40%），并受可持续增长率上限约束。</p>
+                  <p class="ai-text" v-if="aiResult.valuation.base_year">基期年 {{ aiResult.valuation.base_year }}<template v-if="aiResult.valuation.capex_coverage"> · Capex 覆盖率 {{ fmtNum(aiResult.valuation.capex_coverage) }}</template><template v-if="aiResult.valuation.fcf_profit_ratio"> · FCF/净利润 {{ fmtNum(aiResult.valuation.fcf_profit_ratio) }}</template></p>
                   <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" />
                   <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
                 </div>

@@ -78,6 +78,29 @@ type AIValuation struct {
 	// 服务端回填时=归一化 key（cyclical/general/utility）；IndustryTypeName 为中文名（只出）。
 	IndustryType     string `json:"industry_type,omitempty"`      // 归一化行业 key（服务端回填）
 	IndustryTypeName string `json:"industry_type_name,omitempty"` // 行业类型中文名
+
+	// R15/P2 新增：基准增速构成、多信号模型分档与 SGR（服务端确定性回填，只读；全部 omitempty）。
+	GrowthRevenue    float64 `json:"growth_revenue,omitempty"`    // 营收稳健增速 %
+	GrowthProfit     float64 `json:"growth_profit,omitempty"`     // 重构净利润稳健增速 %
+	GrowthFCF        float64 `json:"growth_fcf,omitempty"`        // 基期 FCF 稳健增速 %
+	GrowthDispersion float64 `json:"growth_dispersion,omitempty"` // 营收/净利润各自同比增速极差的最大值 pp
+	ModelScore       float64 `json:"model_score,omitempty"`       // 多信号得分 0–100（落档前）
+	SGR              float64 `json:"sgr,omitempty"`               // 可持续增长率 %（不可用为 0）
+	RetentionRate    float64 `json:"retention_rate,omitempty"`    // 留存率 0–1（不可用为 0）
+	ModelDegraded    bool    `json:"model_degraded,omitempty"`    // 是否发生模型降级
+
+	// R15/P3 新增：FCF 周期识别与研发扩张（服务端确定性回填，只读；全部 omitempty）。
+	FCFCyclical    bool    `json:"fcf_cyclical,omitempty"`     // 强周期（CV>0.5 或符号翻转≥2）
+	FCFCV          float64 `json:"fcf_cv,omitempty"`           // FCF 变异系数（不可判定为 0）
+	FCFSignChanges int     `json:"fcf_sign_changes,omitempty"` // FCF 符号翻转次数
+	FCFWindowYears int     `json:"fcf_window_years,omitempty"` // 判定/推荐窗口年数（3/5/7）
+	RDExpansion    float64 `json:"rd_expansion,omitempty"`     // 研发投入同比扩张额（元；未扩张/上年缺失为 0）
+
+	// R15/P4 新增：一致性校验（C4~C7）的可观测字段（服务端确定性回填，只读；全部 omitempty）。
+	BaseYear       int     `json:"base_year,omitempty"`        // C7 基期年（0 表示无共同年度）
+	CapexCoverage  float64 `json:"capex_coverage,omitempty"`   // C5 购建长期资产现金 ÷ 保全性资本支出
+	DeltaNWCRatio  float64 `json:"delta_nwc_ratio,omitempty"`  // ΔNWC ÷ 基期 FCF（不可算/为负为 0）
+	FCFProfitRatio float64 `json:"fcf_profit_ratio,omitempty"` // C6 FCF ÷ 净利润中位数
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -118,6 +141,39 @@ type ValuationRecommendation struct {
 	// R15/P1：不适用判定（Q6）。
 	Applicable         bool   // 现金流贴现法是否适用（false 时前端禁用「套用到估值」）
 	InapplicableReason string // 不适用原因（Applicable=false 时非空）
+
+	// R15/P2：基准增速构成、多信号模型分档与 SGR（只读）。
+	GrowthRevenue    float64 // 营收稳健增速 %
+	GrowthProfit     float64 // 重构净利润稳健增速 %
+	GrowthFCF        float64 // 基期 FCF 稳健增速 %
+	GrowthDispersion float64 // 营收/净利润各自同比增速极差的最大值 pp（稳定性信号）
+	// 分项可用性（仅内部使用，不序列化）：提示词/日志据此区分「增速 0%」与「样本不可用」。
+	GrowthRevenueOK bool
+	GrowthProfitOK  bool
+	GrowthFCFOK     bool
+	ModelScore      float64 // 多信号得分 0–100（落档前）
+	// 分项得分（仅内部使用，不序列化；供提示词解释「为何是该模型」）。
+	ScoreGrowth       float64 // 增速分 sg
+	ScoreStability    float64 // 稳定性分 st
+	HasStabilityScore bool    // 稳定性信号是否可用
+	ScoreROE          float64 // ROE 分 sr
+	HasROEScore       bool    // ROE 信号是否可用
+	SGR               float64 // 可持续增长率 %（不可用为 0）
+	RetentionRate     float64 // 留存率 0–1（不可用为 0）
+	ModelDegraded     bool    // 是否发生 three_stage→two_stage→perpetual→zero 降级
+
+	// R15/P3：FCF 周期识别与研发扩张（只读）。
+	FCFCyclical    bool    // 强周期（CV>0.5 或符号翻转≥2）
+	FCFCV          float64 // FCF 变异系数（不可判定为 0）
+	FCFSignChanges int     // FCF 符号翻转次数
+	FCFWindowYears int     // 本次实际使用的窗口年数（3/5/7）
+	RDExpansion    float64 // 研发投入同比扩张额（元；未扩张/上年缺失为 0）
+
+	// R15/P4：一致性校验（C4~C7）的可观测字段（只读）。
+	BaseYear       int     // C7 基期年（0 表示无共同年度）
+	CapexCoverage  float64 // C5 购建长期资产现金 ÷ 保全性资本支出（不可算为 0）
+	DeltaNWCRatio  float64 // ΔNWC ÷ 基期 FCF（不可算/为负为 0）
+	FCFProfitRatio float64 // C6 FCF ÷ 净利润中位数（不可算为 0）
 }
 
 // AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。

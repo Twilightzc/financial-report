@@ -23,7 +23,7 @@ func sampleRecommendation() model.ValuationRecommendation {
 			{Key: "g2", Label: "永续增长率", Value: 3},
 		},
 		BaseGrowth:     12.5,
-		BaseGrowthNote: "近 3 个完整年度（2022、2023、2024）营业收入 / 净利润 / 经营活动现金流量净额同比增速中位数",
+		BaseGrowthNote: "近 3 个同比年度（2022、2023、2024）营业收入 / 净利润 / 经营活动现金流量净额同比增速中位数",
 		RiskPoints:     1,
 		FCFMode:        valFCFMedian,
 		FCFModeName:    "近几年中位数",
@@ -40,6 +40,31 @@ func sampleRecommendation() model.ValuationRecommendation {
 		IndustryTypeName:  valIndustryTypeNames[valIndustryGeneral],
 		BetaBasis:         "缺省回落",
 		Applicable:        true,
+		// R15/P2~P4：基准增速构成 / 分档 / SGR / 周期 / 一致性（只读展示字段）。
+		GrowthRevenue:     12.5,
+		GrowthProfit:      12.0,
+		GrowthFCF:         10.0,
+		GrowthDispersion:  20.0,
+		GrowthRevenueOK:   true,
+		GrowthProfitOK:    true,
+		GrowthFCFOK:       true,
+		ModelScore:        80.0,
+		ScoreGrowth:       70.0,
+		ScoreStability:    100.0,
+		HasStabilityScore: true,
+		ScoreROE:          90.0,
+		HasROEScore:       true,
+		SGR:               15.0,
+		RetentionRate:     0.5,
+		AdjustRD:          true,
+		RDRatio:           6.0,
+		FCFCV:             0.2,
+		FCFWindowYears:    3,
+		RDExpansion:       1e8,
+		BaseYear:          2024,
+		CapexCoverage:     1.5,
+		DeltaNWCRatio:     0.4,
+		FCFProfitRatio:    1.2,
 	}
 }
 
@@ -85,21 +110,58 @@ func paramKeys(params []model.AIValuationParam) []string {
 	return keys
 }
 
-func TestClassifyModel(t *testing.T) {
+// TestClassifyModelScore 多信号评分落档：§19.6.4 六个算例 + 硬闸门 + 缺失信号归一化。
+func TestClassifyModelScore(t *testing.T) {
 	cases := []struct {
-		x    float64
-		want string
+		name       string
+		x          float64
+		dispersion float64
+		stability  bool
+		roe        []float64
+		insuff     bool
+		wantModel  string
+		wantScore  float64
+		wantSG     float64 // 增速分 sg
+		wantST     float64 // 稳定性分 st（不可用时为 0）
+		wantSR     float64 // ROE 分 sr（不可用时为 0）
+		wantHasST  bool
+		wantHasROE bool
 	}{
-		{20, valModelThreeStage},
-		{19.999, valModelTwoStage},
-		{8, valModelTwoStage},
-		{7.999, valModelPerpetual},
-		{0, valModelPerpetual},
-		{-0.001, valModelZero},
+		{"三阶段算例", 20, 0, true, []float64{20, 20, 20}, false, valModelThreeStage, 80.0, 70, 100, 90, true, true},
+		{"两阶段算例(波动)", 20, 50, true, []float64{10, 10}, false, valModelTwoStage, 52.0, 70, 0, 50, true, true},
+		{"两阶段算例(X12)", 12, 20, true, []float64{18, 18}, false, valModelTwoStage, 58.4, 50, 60, 82, true, true},
+		{"永续算例(X5硬闸门)", 5, 10, true, []float64{15, 15}, false, valModelPerpetual, 49.5, 32.5, 80, 70, true, true},
+		{"X2硬规则归零", 2, 0, true, []float64{30, 30}, false, valModelZero, 55.0, 25, 100, 100, true, true},
+		{"三阶段算例(X25)", 25, 20, true, []float64{22, 22}, false, valModelThreeStage, 81.1, 82.5, 60, 98, true, true},
+		// 缺 ROE → 权重按 0.8 归一化（不是把 ROE 当 0 分）：(0.6×70 + 0.2×100)/0.8 = 77.5。
+		{"缺ROE归一化", 20, 0, true, nil, false, valModelThreeStage, 77.5, 70, 100, 0, true, false},
+		// 缺稳定性信号 → 同样按剩余权重归一化：(0.6×70 + 0.2×90)/0.8 = 75。
+		{"缺稳定性归一化", 20, 0, false, []float64{20, 20}, false, valModelThreeStage, 75.0, 70, 0, 90, false, true},
+		// 增速不足样本 → 直接零增长（无论得分）。
+		{"样本不足", 20, 0, true, []float64{20, 20}, true, valModelZero, 80.0, 70, 100, 90, true, true},
+		// 得分 <25 且 X≥3 → zero。
+		{"得分过低", 4, 60, true, []float64{0, 0}, false, valModelZero, 18.0, 30, 0, 0, true, true},
 	}
 	for _, c := range cases {
-		if got := classifyModel(c.x); got != c.want {
-			t.Errorf("classifyModel(%v) = %s，期望 %s", c.x, got, c.want)
+		res := classifyModelScore(c.x, c.dispersion, c.stability, c.roe, c.insuff)
+		if res.Model != c.wantModel {
+			t.Errorf("%s：model = %s，期望 %s（score=%v）", c.name, res.Model, c.wantModel, res.Score)
+		}
+		if math.Abs(res.Score-c.wantScore) > 1e-9 {
+			t.Errorf("%s：score = %v，期望 %v", c.name, res.Score, c.wantScore)
+		}
+		if math.Abs(res.ScoreGrowth-c.wantSG) > 1e-9 {
+			t.Errorf("%s：增速分 sg = %v，期望 %v", c.name, res.ScoreGrowth, c.wantSG)
+		}
+		if math.Abs(res.ScoreStability-c.wantST) > 1e-9 {
+			t.Errorf("%s：稳定性分 st = %v，期望 %v", c.name, res.ScoreStability, c.wantST)
+		}
+		if math.Abs(res.ScoreROE-c.wantSR) > 1e-9 {
+			t.Errorf("%s：ROE 分 sr = %v，期望 %v", c.name, res.ScoreROE, c.wantSR)
+		}
+		if res.HasStability != c.wantHasST || res.HasROE != c.wantHasROE {
+			t.Errorf("%s：可用性 = (st:%v, roe:%v)，期望 (%v,%v)",
+				c.name, res.HasStability, res.HasROE, c.wantHasST, c.wantHasROE)
 		}
 	}
 }
@@ -124,71 +186,90 @@ func TestMedianOf(t *testing.T) {
 	}
 }
 
-func TestGrowthSamplesSkipNonPositivePrev(t *testing.T) {
-	years := []int{2019, 2020, 2021, 2022, 2023, 2024}
-	revSeries := map[int]float64{
-		2019: 100, // 首年无上期 → 无增速
-		2020: 0,   // 计算 -100%；使 2021 的上期为 0 → 跳过 2021
-		2021: 50,  // 上期 50 > 0 → 计入 -200%
-		2022: -50, // 使 2023 的上期为负 → 跳过 2023
-		2023: 100, // 上期 100 > 0 → 计入 +50%
-		2024: 150,
+// TestIndicatorGrowth 单指标稳健增速：去极值中位数、样本不足、上年非正跳过。
+func TestIndicatorGrowth(t *testing.T) {
+	// 5 个同比点 [10,10,10,10,100] → 去掉最高/最低后中位数 10。
+	years6 := []int{2019, 2020, 2021, 2022, 2023, 2024}
+	values6 := []float64{100, 110, 121, 133.1, 146.41, 292.82}
+	if v, basis, ok := indicatorGrowth(years6, values6); !ok || math.Abs(v-10) > 1e-9 || basis != "同比去极值中位数" {
+		t.Errorf("5 个同比点去极值中位数 = (%v, %q, %v)，期望 (10, 同比去极值中位数, true)", v, basis, ok)
 	}
-	byYear, ys := annualRows(rowsFor("TOTAL_OPERATE_INCOME", revSeries, years))
-	got := growthSamples(byYear, ys, revenue)
-	want := []float64{-100, -200, 50} // 2021（上期为 0）与 2023（上期为负）被跳过，且不记为 0
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("同比增速样本 = %v，期望 %v（上期为 0/负/缺失应跳过且不记为 0）", got, want)
+
+	// 3 个同比点（不足 4 个，不去极值）→ 中位数 20。
+	if v, _, ok := indicatorGrowth([]int{2021, 2022, 2023, 2024}, []float64{100, 110, 132, 171.6}); !ok || math.Abs(v-20) > 1e-9 {
+		t.Errorf("3 个同比点中位数 = %v（ok=%v），期望 20", v, ok)
+	}
+
+	// 2 个观测（1 个同比点）→ 中位数即该点。
+	if v, _, ok := indicatorGrowth([]int{2023, 2024}, []float64{100, 120}); !ok || math.Abs(v-20) > 1e-9 {
+		t.Errorf("2 个观测的增速 = %v（ok=%v），期望 20", v, ok)
+	}
+
+	// 上年 ≤ 0 / 为 0 的同比点跳过（不记为 0）。
+	years := []int{2019, 2020, 2021, 2022, 2023, 2024}
+	values := []float64{100, 0, 50, -50, 100, 150}
+	if v, _, ok := indicatorGrowth(years, values); !ok || math.Abs(v-(-100)) > 1e-9 {
+		t.Errorf("跳过非正上年后的中位数 = %v（ok=%v），期望 -100（样本 -100/-200/50）", v, ok)
+	}
+
+	// 样本 < 2 → 不可用。
+	if _, _, ok := indicatorGrowth([]int{2024}, []float64{100}); ok {
+		t.Error("单观测应返回 ok=false")
+	}
+	if _, _, ok := indicatorGrowth(nil, nil); ok {
+		t.Error("空样本应返回 ok=false")
 	}
 }
 
-func TestGrowthSamplesRecentThree(t *testing.T) {
+// TestYearWindow 增速/基期窗口：≤baseYear 且只取最近 N 年。
+func TestYearWindow(t *testing.T) {
 	years := []int{2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
-	revSeries := make(map[int]float64, len(years))
-	v := 100.0
-	for _, y := range years {
-		revSeries[y] = v
-		v *= 1.1
+	if got := yearWindow(years, 2024, valGrowthWindowYears); !reflect.DeepEqual(got, []int{2020, 2021, 2022, 2023, 2024}) {
+		t.Errorf("5 年窗口 = %v，期望最近 5 年", got)
 	}
-	byYear, ys := annualRows(rowsFor("TOTAL_OPERATE_INCOME", revSeries, years))
-	samples := growthSamples(byYear, ys, revenue)
-	if len(samples) != 3 {
-		t.Fatalf("10 个年报应只取最近 3 个可计算年度的增速，实际 %d 个：%v", len(samples), samples)
+	// 基期年早于最新年报 → 截断到基期年（C7）。
+	if got := yearWindow(years, 2023, valGrowthWindowYears); !reflect.DeepEqual(got, []int{2019, 2020, 2021, 2022, 2023}) {
+		t.Errorf("基期年截断窗口 = %v，期望 2019~2023", got)
 	}
-	for _, s := range samples {
-		if math.Abs(s-10) > 1e-9 {
-			t.Errorf("各年增速应约 10%%，实际 %v", s)
-		}
+	if got := yearWindow(years, 2024, valFCFRecMaxYears); len(got) != 7 || got[6] != 2024 {
+		t.Errorf("7 年窗口 = %v，期望最近 7 年", got)
 	}
-	pts := growthPoints(byYear, ys, revenue)
-	wantYears := []int{2022, 2023, 2024}
-	for i, p := range pts {
-		if p.Year != wantYears[i] {
-			t.Errorf("第 %d 个样本年份 = %d，期望 %d", i, p.Year, wantYears[i])
-		}
+	if got := yearWindow(nil, 2024, 5); len(got) != 0 {
+		t.Errorf("空年份应返回空切片，实际 %v", got)
 	}
 }
 
 func TestGrowthNoteWording(t *testing.T) {
-	// 参与年份连续 → 「近 N 个完整年度」。
-	if got := growthNote([]int{2022, 2023, 2024}); !strings.HasPrefix(got, "近 3 个完整年度（2022、2023、2024）") {
-		t.Errorf("连续年度应写「近 N 个完整年度」：%s", got)
+	// 参与年份连续 → 「近 N 个同比年度」（N 是同比终点年数，不是观测窗口年数）。
+	parts := []string{"营收 20.00%", "净利润 20.00%", "FCF 25.31%"}
+	bases := []string{"营收：同比去极值中位数", "净利润：同比去极值中位数", "FCF：CAGR"}
+	got := buildBaseGrowthNote([]int{2022, 2023, 2024}, 3, parts, bases, nil)
+	if !strings.HasPrefix(got, "近 3 个同比年度（2022、2023、2024）基准增速按 3 项等权：营收 20.00%、净利润 20.00%、FCF 25.31%。") {
+		t.Errorf("连续年度口径说明不符：%s", got)
 	}
-	// 参与年份不连续（中间年份因上期为负被跳过）→ 不含「近…完整年度」的连续暗示。
-	sparse := growthNote([]int{2018, 2019, 2020, 2023, 2024, 2025})
-	if !strings.HasPrefix(sparse, "可计算的 6 个年度（2018、2019、2020、2023、2024、2025）") {
+	if !strings.Contains(got, "营收：同比去极值中位数") || !strings.Contains(got, "FCF：CAGR") {
+		t.Errorf("口径说明应列出各分项方法：%s", got)
+	}
+	// 缺项：列出「样本不足」，且等权项数按可用项。
+	missing := buildBaseGrowthNote([]int{2022, 2023}, 2, parts[:1], bases[:1], []string{"净利润", "FCF"})
+	if !strings.Contains(missing, "按 2 项等权") || !strings.Contains(missing, "（净利润、FCF样本不足）") {
+		t.Errorf("缺项口径说明不符：%s", missing)
+	}
+	// 参与年份不连续 → 不含「近…同比年度」的连续暗示。
+	sparse := buildBaseGrowthNote([]int{2018, 2019, 2020, 2023, 2024, 2025}, 1, parts[:1], bases[:1], nil)
+	if !strings.HasPrefix(sparse, "可计算的 6 个同比年度（2018、2019、2020、2023、2024、2025）") {
 		t.Errorf("不连续年度应列出可计算年度：%s", sparse)
 	}
 	if strings.Contains(sparse, "近 ") || strings.Contains(sparse, "完整年度") {
-		t.Errorf("不连续年度不应出现「近 N 个完整年度」的措辞：%s", sparse)
+		t.Errorf("不连续年度不应出现「近 N 个同比年度」的措辞：%s", sparse)
 	}
 
-	// 端到端：年报年份不连续时，说明文字同样使用「可计算的 N 个年度」。
+	// 端到端：年报年份不连续时，说明文字同样使用「可计算的 N 个同比年度」。
 	years := []int{2019, 2020, 2024, 2025}
 	revSeries := map[int]float64{2019: 100, 2020: 120, 2024: 150, 2025: 180}
 	costSeries := map[int]float64{2019: 100, 2020: 120, 2024: 150, 2025: 180} // 净利润恒为 0 → 只留营收样本
 	rec := RecommendValuation(nil, nil, incomeRowsFor(revSeries, costSeries, years))
-	if !strings.HasPrefix(rec.BaseGrowthNote, "可计算的 2 个年度（2020、2025）") {
+	if !strings.HasPrefix(rec.BaseGrowthNote, "可计算的 3 个同比年度（2020、2024、2025）") {
 		t.Errorf("年报年份不连续时说明文字应列出可计算年度：%s", rec.BaseGrowthNote)
 	}
 }
@@ -226,43 +307,90 @@ func TestRecommendValuationInsufficientData(t *testing.T) {
 	}
 }
 
-func TestRecommendValuationVolatile(t *testing.T) {
-	// 净利润恒为 0（营业成本 = 营业收入），使样本只来自营业收入，便于精确断言。
-	t.Run("极差45pp", func(t *testing.T) {
-		years := []int{2021, 2022, 2023, 2024}
-		revSeries := map[int]float64{2021: 100, 2022: 160, 2023: 184, 2024: 211.6} // +60% / +15% / +15%
-		costSeries := map[int]float64{2021: 100, 2022: 160, 2023: 184, 2024: 211.6}
-		income := incomeRowsFor(revSeries, costSeries, years)
+// TestRecommendParamsThreeStage G7：三阶段 g2=gk+1、严格递减与降级链。
+func TestRecommendParamsThreeStage(t *testing.T) {
+	// gk=4、X=20、SGR 不可用 → g1=20、g2=5、g3=4（修复旧 min(4,gk+1) 的 g2=g3 退化）。
+	pr := recommendParams(valModelThreeStage, 20, 0, 4, nil)
+	if pr.Model != valModelThreeStage || pr.Degraded || pr.Warning != "" {
+		t.Errorf("三阶段主路径：model=%s degraded=%v warning=%q，期望 three_stage/无降级", pr.Model, pr.Degraded, pr.Warning)
+	}
+	if pr.G1 != 20 || pr.G2 != 5 || pr.G3 != 4 {
+		t.Errorf("三阶段参数 = (%v,%v,%v)，期望 (20,5,4)", pr.G1, pr.G2, pr.G3)
+	}
+	if !(pr.G1 > pr.G2 && pr.G2 > pr.G3) {
+		t.Errorf("三阶段应严格递减：%v > %v > %v", pr.G1, pr.G2, pr.G3)
+	}
+	if got := paramKeys(pr.Params); !reflect.DeepEqual(got, []string{"g1", "n1", "g2", "n2", "g3"}) {
+		t.Errorf("三阶段 key = %v", got)
+	}
 
-		rec := RecommendValuation(nil, nil, income)
-		if !rec.Volatile {
-			t.Fatalf("极差 45pp 应判定为剧烈波动，实际 base_growth=%v", rec.BaseGrowth)
-		}
-		if rec.Model != valModelTwoStage {
-			t.Fatalf("基准增速约 15%% 应为 two_stage，实际 %s", rec.Model)
-		}
-		if got := paramValue(t, rec.Params, "g1"); got != math.Floor(rec.BaseGrowth/2) {
-			t.Errorf("剧烈波动时 g1 应取基准增速 50%% 向下取整 = %v，实际 %v", math.Floor(rec.BaseGrowth/2), got)
-		}
-	})
+	// SGR 把 g1 压到 5（=g2）→ 无法严格递减 → 降为两阶段（g1=5 > g2=4）。
+	sgr := 5.0
+	pr = recommendParams(valModelThreeStage, 20, 0, 4, &sgr)
+	if pr.Model != valModelTwoStage || !pr.Degraded || pr.Warning == "" {
+		t.Errorf("SGR 压低 g1 后应降为两阶段：model=%s degraded=%v warning=%q", pr.Model, pr.Degraded, pr.Warning)
+	}
+	if pr.G1 != 5 || pr.G2 != 4 {
+		t.Errorf("降级两阶段参数 = (%v,%v)，期望 (5,4)", pr.G1, pr.G2)
+	}
 
-	t.Run("极差20pp", func(t *testing.T) {
-		years := []int{2021, 2022, 2023, 2024}
-		revSeries := map[int]float64{2021: 100, 2022: 130, 2023: 153.4, 2024: 168.74} // +30% / +18% / +10%
-		costSeries := map[int]float64{2021: 100, 2022: 130, 2023: 153.4, 2024: 168.74}
-		income := incomeRowsFor(revSeries, costSeries, years)
+	// X=3、gk=4：三阶段 → 两阶段都不满足严格递减 → 降为永续（g=round(g1)=3）。
+	pr = recommendParams(valModelThreeStage, 3, 0, 4, nil)
+	if pr.Model != valModelPerpetual || !pr.Degraded || pr.Warning == "" {
+		t.Errorf("X=3/gk=4 应降为永续：model=%s degraded=%v warning=%q", pr.Model, pr.Degraded, pr.Warning)
+	}
+	if got := paramValue(t, pr.Params, "g"); got != 3 {
+		t.Errorf("降级永续 g = %v，期望 clamp(round(3),0,4)=3", got)
+	}
 
-		rec := RecommendValuation(nil, nil, income)
-		if rec.Volatile {
-			t.Fatalf("极差 20pp 不应判定为剧烈波动，实际 base_growth=%v", rec.BaseGrowth)
-		}
-		if rec.Model != valModelTwoStage {
-			t.Fatalf("基准增速约 18%% 应为 two_stage，实际 %s", rec.Model)
-		}
-		if got, want := paramValue(t, rec.Params, "g1"), math.Round(rec.BaseGrowth); got != want {
-			t.Errorf("未剧烈波动时 g1 应取基准增速四舍五入 = %v，实际 %v", want, got)
-		}
-	})
+	// 负增速直接零增长。
+	pr = recommendParams(valModelTwoStage, -2, 0, 4, nil)
+	if pr.Model != valModelZero || !pr.Degraded || len(pr.Params) != 0 {
+		t.Errorf("负增速应降为零增长：%+v", pr)
+	}
+
+	// 连续折减：D=40pp → g1 = round(20×0.84) = 17；D≥100 → 折减封顶 40%。
+	if pr := recommendParams(valModelThreeStage, 20, 40, 4, nil); pr.G1 != 17 {
+		t.Errorf("D=40 时 g1 = %v，期望 17", pr.G1)
+	}
+	if pr := recommendParams(valModelThreeStage, 20, 200, 4, nil); pr.G1 != 12 {
+		t.Errorf("D=200 时 g1 = %v，期望 12（折减封顶 40%%）", pr.G1)
+	}
+
+	// SGR 上限：floor(8.7)=8 → g1 由 20 下调到 8，并给出提示。
+	sgr = 8.7
+	pr = recommendParams(valModelThreeStage, 20, 0, 2, &sgr)
+	if pr.G1 != 8 || !strings.Contains(pr.Warning, "可持续增长率") {
+		t.Errorf("SGR=8.7 时 g1=%v warning=%q，期望 8 且提示 SGR 约束", pr.G1, pr.Warning)
+	}
+}
+
+// TestVolatileExcludesOperatingCashFlow G5：波动判据只看营收/净利润，剔除经营现金流增速。
+func TestVolatileExcludesOperatingCashFlow(t *testing.T) {
+	years := []int{2021, 2022, 2023, 2024}
+	// 营收/净利润各自同比 +10%/+10%/+30% → 极差 20pp；经营现金流同比 +81%/+38%/-33%（旧口径会误报）。
+	revSeries := map[int]float64{2021: 1000, 2022: 1100, 2023: 1210, 2024: 1573}
+	income := incomeRowsFor(revSeries, map[int]float64{2021: 700, 2022: 770, 2023: 847, 2024: 1101.1}, years)
+	cashflow := []model.ReportRow{
+		rowAt("2021-12-31", map[string]float64{"NETCASH_OPERATE": 100, "FA_IR_DEPR": 10}),
+		rowAt("2022-12-31", map[string]float64{"NETCASH_OPERATE": 181, "FA_IR_DEPR": 10}),
+		rowAt("2023-12-31", map[string]float64{"NETCASH_OPERATE": 250, "FA_IR_DEPR": 10}),
+		rowAt("2024-12-31", map[string]float64{"NETCASH_OPERATE": 168, "FA_IR_DEPR": 10}),
+	}
+	rec := RecommendValuation(nil, cashflow, income)
+	if rec.Volatile {
+		t.Errorf("经营现金流剧烈波动不应判为 volatile（样本只取营收/净利润），实际 dispersion=%v", rec.GrowthDispersion)
+	}
+	if math.Abs(rec.GrowthDispersion-20) > 1e-9 {
+		t.Errorf("GrowthDispersion = %v，期望 20pp（两指标各自极差的最大值）", rec.GrowthDispersion)
+	}
+
+	// 营收同比 +10%/+10%/+60% → 极差 50pp → volatile=true。
+	revSeries = map[int]float64{2021: 1000, 2022: 1100, 2023: 1210, 2024: 1936}
+	income = incomeRowsFor(revSeries, map[int]float64{2021: 700, 2022: 770, 2023: 847, 2024: 1355.2}, years)
+	if rec := RecommendValuation(nil, cashflow, income); !rec.Volatile {
+		t.Errorf("营收同比极差 50pp 应判为 volatile，实际 dispersion=%v", rec.GrowthDispersion)
+	}
 }
 
 func TestRecommendParamsGridCompliance(t *testing.T) {
@@ -274,24 +402,39 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 	}
 	discounts := []float64{8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0}
 	for _, d := range discounts {
-		gk := perpetualGrowthRaw(d)
+		gk := math.Min(valLongTermGDP, perpetualGrowthRaw(d))
 		if gk != 2 && gk != 3 && gk != 4 {
 			t.Fatalf("永续增长率 %v 不在网格 {2,3,4}", gk)
 		}
-		for _, x := range []float64{8, 12, 19.9, 20, 30, 40} {
-			mdl := classifyModel(x)
-			params := recommendParams(mdl, x, false, gk)
-			if got := paramKeys(params); !reflect.DeepEqual(got, wantKeys[mdl]) {
-				t.Fatalf("x=%v 模型 %s 的参数 key = %v，期望 %v", x, mdl, got, wantKeys[mdl])
+		for _, x := range []float64{0, 3, 8, 12, 19.9, 20, 30, 40} {
+			mdl := classifyModelScore(x, 0, false, nil, false).Model
+			pr := recommendParams(mdl, x, 0, gk, nil)
+			if got := paramKeys(pr.Params); !reflect.DeepEqual(got, wantKeys[pr.Model]) {
+				t.Fatalf("x=%v 分类 %s 生效 %s 的参数 key = %v，期望 %v", x, mdl, pr.Model, got, wantKeys[pr.Model])
 			}
-			for _, p := range params {
+			for _, p := range pr.Params {
 				switch p.Key {
-				case "g", "g2", "g3":
-					if p.Value != 2 && p.Value != 3 && p.Value != 4 {
-						t.Errorf("x=%v %s=%v 不在网格 {2,3,4}", x, p.Key, p.Value)
+				case "g": // 降级永续：终值网格放宽为 [0, gk] 整数
+					if p.Value < 0 || p.Value > gk || p.Value != math.Trunc(p.Value) {
+						t.Errorf("x=%v g=%v 应为 [0,%v] 内的整数", x, p.Value, gk)
 					}
 					if p.Value >= d {
-						t.Errorf("x=%v %s=%v 应小于折现率 %v（R4 校验）", x, p.Key, p.Value, d)
+						t.Errorf("x=%v g=%v 应小于折现率 %v（R4 校验）", x, p.Value, d)
+					}
+				case "g2": // 两阶段 g2=gk；三阶段 g2=gk+1（非终值，不受长期 GDP 上限约束）
+					want := gk
+					if pr.Model == valModelThreeStage {
+						want = gk + 1
+					}
+					if p.Value != want {
+						t.Errorf("x=%v 模型 %s 的 g2=%v，期望 %v", x, pr.Model, p.Value, want)
+					}
+					if p.Value >= d {
+						t.Errorf("x=%v g2=%v 应小于折现率 %v（R4 终值校验基于 g3，此处防误配）", x, p.Value, d)
+					}
+				case "g3":
+					if p.Value != gk || p.Value >= d {
+						t.Errorf("x=%v g3=%v，期望 gk=%v 且 < 折现率 %v", x, p.Value, gk, d)
 					}
 				case "g1":
 					if p.Value < valGrowthMin || p.Value > valGrowthMax || p.Value != math.Trunc(p.Value) {
@@ -415,7 +558,7 @@ func TestBetaFor(t *testing.T) {
 		{"utility", false, 0.8, valIndustryUtility, "公用事业", "AI 行业分类"},
 		{"utility", true, 0.8, valIndustryUtility, "公用事业", "AI 行业分类"}, // AI 为主：volatile 不再抬升
 		{"", false, 1.0, valIndustryGeneral, "一般行业", "缺省回落"},
-		{"", true, 1.2, valIndustryCyclical, "周期性行业", "波动兜底"},
+		{"", true, 1.2, valIndustryCyclical, "周期性行业", "波动/周期兜底"},
 		{"mixed", false, 1.0, valIndustryGeneral, "一般行业", "缺省回落"}, // 非法串 → 同缺失
 	}
 	for _, c := range cases {
@@ -523,8 +666,8 @@ func TestRecommendDiscountRate(t *testing.T) {
 		}
 		// AI 未分类 + volatile → 波动兜底两档（此时两标签同为周期性行业）。
 		drV := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, true, "", 0, true)
-		if drV.Beta != valBetaCyclical || drV.BetaTier != "周期性行业" || drV.BetaBasis != "波动兜底" {
-			t.Errorf("AI 未分类 + volatile 应波动兜底 1.2/周期性行业，实际 %v/%s/%s", drV.Beta, drV.BetaTier, drV.BetaBasis)
+		if drV.Beta != valBetaCyclical || drV.BetaTier != "周期性行业" || drV.BetaBasis != "波动/周期兜底" {
+			t.Errorf("AI 未分类 + volatile 应波动/周期兜底 1.2/周期性行业，实际 %v/%s/%s", drV.Beta, drV.BetaTier, drV.BetaBasis)
 		}
 	})
 
@@ -709,7 +852,7 @@ func TestRecommendValuationDeterministic(t *testing.T) {
 			t.Fatalf("第 %d 次调用结果与首次不一致：\n首次 %+v\n本次 %+v", i+2, first, got)
 		}
 	}
-	if !strings.HasPrefix(first.BaseGrowthNote, "近 3 个完整年度（2022、2023、2024）") {
+	if !strings.HasPrefix(first.BaseGrowthNote, "近 3 个同比年度（2022、2023、2024）") {
 		t.Errorf("基准增速口径说明不符：%s", first.BaseGrowthNote)
 	}
 	if first.Model != valModelThreeStage {
@@ -835,8 +978,12 @@ func valuationParamsFromRec(rec model.ValuationRecommendation) model.ValuationPa
 func TestRecommendValuationParamsPassR4Validation(t *testing.T) {
 	balance, cashflow, income := recommendFixture()
 	rec := RecommendValuation(balance, cashflow, income)
-	if rec.Warning != "" {
-		t.Errorf("基期自由现金流为正时不应有套用提示，实际 %q", rec.Warning)
+	// P4：Warning 可能包含 C5/C6/SGR 等正常口径说明，不再断言为空；
+	// 改为断言「参数本身」满足 R4 校验（§19.8.9 #9）。
+	if rec.SGR > 0 {
+		if g1 := paramValue(t, rec.Params, "g1"); g1 > math.Floor(rec.SGR) {
+			t.Errorf("g1=%v 超过 floor(SGR)=%v（C4 违反）", g1, math.Floor(rec.SGR))
+		}
 	}
 	if _, err := ComputeValuation(balance, cashflow, income, valuationParamsFromRec(rec), 0); err != nil {
 		t.Fatalf("推荐参数喂回 ComputeValuation 应成功，实际报错：%v", err)
@@ -878,9 +1025,34 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 	wants = append(wants, "基期自由现金流", rec.FCFModeName, rec.FCFRationale)
 	// R15：用户消息须包含行业类型判定要求与折现率构成（预推导口径）。
 	wants = append(wants, "行业类型：请判定并在 industry_type 输出", "折现率构成", "WACC 基线 8.00%", "β 1.00（一般行业）")
+	// R15/P2~P4：基准增速构成、模型分档、SGR、周期、研发双条件与一致性校验各一行。
+	wants = append(wants,
+		"基准增速构成：营收 12.50% / 净利润 12.00% / FCF 10.00%",
+		"模型分档：得分 80.00（增速分 70.00 / 稳定性分 100.00 / ROE 分 90.00）→ 两阶段模型",
+		"可持续增长率：15.00%（留存率 50.0%）",
+		"周期性：FCF 变异系数 0.20（符号翻转 0 次）→ 非强周期；基期 FCF 判定窗口 3 年、方式 近几年中位数",
+		"研发：费用率 6.00%，同比扩张 1.00 亿元 → 建议开启研发调整",
+		"一致性：基期年 2024（利润表 ∩ 现金流量表）",
+		"只解释口径，不得改写数字",
+	)
 	for _, w := range wants {
 		if !strings.Contains(user, w) {
 			t.Errorf("用户消息缺少确定性估值参数「%s」：%s", w, user)
+		}
+	}
+
+	// A3/A4：缺失分项必须标注「不可用」，不得写成 0%；分项得分同理。
+	partial := rec
+	partial.GrowthFCF, partial.GrowthFCFOK = 0, false
+	partial.GrowthDispersion, partial.HasStabilityScore = 0, false
+	partial.ScoreStability = 0
+	block := valuationPromptBlock(partial)
+	if strings.Contains(block, "FCF 0.00%") {
+		t.Errorf("FCF 不可用时不得写成 0%%：%s", block)
+	}
+	for _, w := range []string{"FCF 不可用", "盈利增速极差 不可用", "稳定性分 不可用"} {
+		if !strings.Contains(block, w) {
+			t.Errorf("提示词应标注「%s」：%s", w, block)
 		}
 	}
 }
@@ -908,30 +1080,50 @@ func rdSuggestion(rows []model.ReportRow) (bool, *float64) {
 
 func TestRdAdjustSuggestionThreshold(t *testing.T) {
 	const rev = 1000.0
+	// P3/G11 双条件：费用率 > 5% 且研发投入同比扩张 > 0（上年研发费用取 2023=50）。
 	cases := []struct {
 		name    string
-		rd      float64
+		rd2024  float64
 		suggest bool
 		ratio   float64
 	}{
-		{"恰5%", 50, false, 5}, // 严格大于才开启，恰等于阈值按「不高于」处理
-		{"4.9%", 49, false, 4.9},
-		{"5.1%", 51, true, 5.1},
+		{"恰5%", 50, false, 5},    // 严格大于才开启；且扩张=0
+		{"4.9%", 49, false, 4.9}, // 费用率不足且同比下降
+		{"5.1%扩张", 51, true, 5.1},
+		{"6%扩张", 60, true, 6},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rows := incomeRowsRD(map[int]float64{2024: rev}, map[int]float64{2024: c.rd}, []int{2024})
+			rows := incomeRowsRD(
+				map[int]float64{2023: rev, 2024: rev},
+				map[int]float64{2023: 50, 2024: c.rd2024},
+				[]int{2023, 2024})
 			got, ratio := rdSuggestion(rows)
 			if got != c.suggest {
-				t.Errorf("研发费用率 %.1f%% → suggest=%v，期望 %v", c.rd/rev*100, got, c.suggest)
+				t.Errorf("研发费用率 %.4f%% → suggest=%v，期望 %v", c.rd2024/rev*100, got, c.suggest)
 			}
 			if ratio == nil {
-				t.Fatalf("研发费用率 %.1f%% 的 ratioPct 不应为 nil", c.rd/rev*100)
+				t.Fatalf("研发费用率 %.4f%% 的 ratioPct 不应为 nil", c.rd2024/rev*100)
 			}
-			if math.Abs(*ratio-c.ratio) > 1e-9 {
+			if math.Abs(*ratio-c.ratio) > 1e-4 {
 				t.Errorf("ratioPct = %v，期望 %v", *ratio, c.ratio)
 			}
 		})
+	}
+
+	// 费用率 > 5% 但研发投入同比扩张恰为 0 → 不建议开启（双条件的第二个条件）。
+	flat := incomeRowsRD(
+		map[int]float64{2023: rev, 2024: rev},
+		map[int]float64{2023: 50.0001, 2024: 50.0001},
+		[]int{2023, 2024})
+	if got, ratio := rdSuggestion(flat); got || ratio == nil {
+		t.Errorf("扩张为 0 应返回 (false, 非 nil)，实际 (%v, %v)", got, ratio)
+	}
+
+	// 上年缺失 → 双条件不满足，即便费用率 >5% 也不建议开启。
+	rows := incomeRowsRD(map[int]float64{2024: rev}, map[int]float64{2024: 60}, []int{2024})
+	if got, ratio := rdSuggestion(rows); got || ratio == nil || math.Abs(*ratio-6) > 1e-9 {
+		t.Errorf("上年缺失应返回 (false, 6%%)，实际 (%v, %v)", got, ratio)
 	}
 }
 
@@ -995,14 +1187,14 @@ func TestRdAdjustSuggestionRevenueEdge(t *testing.T) {
 }
 
 func TestRdAdjustSuggestionLatestAnnualYear(t *testing.T) {
-	// 首年 1%、最新年 8%：只取最新年报，不取首年、不取平均。
+	// 首年 1%、最新年 8%：只取最新年报，不取首年、不取平均（上年 2% → 扩张 > 0）。
 	rows := incomeRowsRD(
-		map[int]float64{2022: 1000, 2024: 1000},
-		map[int]float64{2022: 10, 2024: 80},
-		[]int{2022, 2024})
+		map[int]float64{2022: 1000, 2023: 1000, 2024: 1000},
+		map[int]float64{2022: 10, 2023: 20, 2024: 80},
+		[]int{2022, 2023, 2024})
 	got, ratio := rdSuggestion(rows)
 	if !got {
-		t.Errorf("最新年报研发费用率 8%% 应建议开启，实际 ratio=%v", ratio)
+		t.Errorf("最新年报研发费用率 8%% 且同比扩张应建议开启，实际 ratio=%v", ratio)
 	}
 	if ratio == nil || math.Abs(*ratio-8) > 1e-9 {
 		t.Errorf("ratioPct = %v，期望 8（取最新年报）", ratio)
@@ -1024,12 +1216,15 @@ func TestRdAdjustSuggestionSkipsQuarterly(t *testing.T) {
 }
 
 func TestRecommendValuationAdjustRD(t *testing.T) {
-	// 完整合成报表，最新年报研发费用率取 6% → 建议开启，且仅展示值取整到 2 位小数。
+	// 完整合成报表：上年研发费用率 5%、最新年报 6%（同比扩张 > 0）→ 建议开启，展示值取整到 2 位小数。
 	balance, cashflow, income := recommendFixture()
 	last := income[len(income)-1]
 	rev := v0(last, "TOTAL_OPERATE_INCOME")
 	last.Fields["RESEARCH_EXPENSE"] = fp(rev * 0.06)
 	income[len(income)-1] = last
+	prev := income[len(income)-2]
+	prev.Fields["RESEARCH_EXPENSE"] = fp(v0(prev, "TOTAL_OPERATE_INCOME") * 0.05)
+	income[len(income)-2] = prev
 
 	rec := RecommendValuation(balance, cashflow, income)
 	if !rec.AdjustRD {
@@ -1096,6 +1291,197 @@ func TestAIValuationAdjustRDJSON(t *testing.T) {
 	for _, want := range []string{`"adjust_rd":true`, `"rd_ratio":12.35`} {
 		if !strings.Contains(string(blob), want) {
 			t.Errorf("估值推荐 JSON 缺少 %s：%s", want, blob)
+		}
+	}
+}
+
+// —— R15/P2/P3 设计 §19.9 要求的补充单测 ——
+
+// TestSustainableGrowth SGR = ROE × 留存率；留存率 clamp[0,1]，数据不足/非正 → ok=false。
+func TestSustainableGrowth(t *testing.T) {
+	income := map[int]model.ReportRow{
+		2024: row(map[string]float64{"TOTAL_OPERATE_INCOME": 100, "OPERATE_COST": 80}), // 净利润 20
+	}
+	// 权益 100 → 120，净利 20 → 留存率 1.0；ROE = 20/120 → SGR = 16.67%。
+	balance := map[int]model.ReportRow{
+		2023: row(map[string]float64{"TOTAL_EQUITY": 100}),
+		2024: row(map[string]float64{"TOTAL_EQUITY": 120}),
+	}
+	sgr, ret, ok := sustainableGrowth(balance, income, 2024)
+	if !ok || math.Abs(ret-1) > 1e-9 || math.Abs(sgr-100.0/6) > 1e-9 {
+		t.Errorf("sustainableGrowth = (%v,%v,%v)，期望 (16.67,1,true)", sgr, ret, ok)
+	}
+
+	// 权益下降 → 留存率 clamp 到 0（不产生负留存率）。
+	balance[2024] = row(map[string]float64{"TOTAL_EQUITY": 80})
+	sgr, ret, ok = sustainableGrowth(balance, income, 2024)
+	if !ok || ret != 0 || sgr != 0 {
+		t.Errorf("权益下降时应 clamp 留存率为 0：(%v,%v,%v)", sgr, ret, ok)
+	}
+
+	// 净利润 ≤ 0 → 不可用。
+	loss := map[int]model.ReportRow{
+		2024: row(map[string]float64{"TOTAL_OPERATE_INCOME": 100, "OPERATE_COST": 120}),
+	}
+	if _, _, ok := sustainableGrowth(balance, loss, 2024); ok {
+		t.Error("净利润 ≤ 0 时 SGR 应不可用")
+	}
+
+	// 期末权益 ≤ 0 → 不可用。
+	balance[2024] = row(map[string]float64{"TOTAL_EQUITY": 0})
+	if _, _, ok := sustainableGrowth(balance, income, 2024); ok {
+		t.Error("权益 ≤ 0 时 SGR 应不可用")
+	}
+
+	// 期初缺表 → 不可用。
+	if _, _, ok := sustainableGrowth(map[int]model.ReportRow{2024: row(map[string]float64{"TOTAL_EQUITY": 120})}, income, 2024); ok {
+		t.Error("期初权益缺失时 SGR 应不可用")
+	}
+}
+
+// TestTrimMeanOf 去极值平均：去掉最高/最低后平均，少于 3 个退化为普通平均。
+func TestTrimMeanOf(t *testing.T) {
+	cases := []struct {
+		vals []float64
+		want float64
+	}{
+		{[]float64{1, 2, 3, 100}, 2.5},
+		{[]float64{1, 2}, 1.5},
+		{[]float64{5, 5, 5}, 5},
+		{[]float64{3, 1, 2}, 2}, // 排序后去极值 → 2
+		{nil, 0},
+	}
+	for _, c := range cases {
+		if got := trimMeanOf(c.vals); math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("trimMeanOf(%v) = %v，期望 %v", c.vals, got, c.want)
+		}
+	}
+}
+
+// TestBaseGrowthEqualWeight 三项显式等权：仅对可用项求和/计数（缺项不补 0）。
+func TestBaseGrowthEqualWeight(t *testing.T) {
+	cases := []struct {
+		name               string
+		xRev, xNP, xFCF    float64
+		okRev, okNP, okFCF bool
+		want               float64
+		wantK              int
+	}{
+		{"三项齐全", 10, 20, 30, true, true, true, 20, 3},
+		{"缺FCF", 10, 20, 0, true, true, false, 15, 2},
+		{"仅营收", 12, 0, 0, true, false, false, 12, 1},
+		{"全部缺失", 0, 0, 0, false, false, false, 0, 0},
+	}
+	for _, c := range cases {
+		got, k := weightedGrowth(c.xRev, c.okRev, c.xNP, c.okNP, c.xFCF, c.okFCF)
+		if math.Abs(got-c.want) > 1e-9 || k != c.wantK {
+			t.Errorf("%s：weightedGrowth = (%v,%d)，期望 (%v,%d)", c.name, got, k, c.want, c.wantK)
+		}
+	}
+}
+
+// TestGrowthDamping g1 连续折减：D=0/40/100/200 各档 + SGR 上限（floor）告警。
+func TestGrowthDamping(t *testing.T) {
+	cases := []struct {
+		damping float64
+		wantG1  float64
+	}{
+		{0, 20},
+		{40, 17},  // 20 × (1 − 0.16) = 16.8 → round 17
+		{100, 12}, // 20 × (1 − 0.40) = 12
+		{200, 12}, // clamp 上限 40%
+	}
+	for _, c := range cases {
+		pr := recommendParams(valModelThreeStage, 20, c.damping, 4, nil)
+		if pr.G1 != c.wantG1 {
+			t.Errorf("D=%v：g1 = %v，期望 %v", c.damping, pr.G1, c.wantG1)
+		}
+	}
+
+	sgr := 12.0
+	pr := recommendParams(valModelThreeStage, 20, 0, 4, &sgr)
+	if pr.G1 != 12 || !strings.Contains(pr.Warning, "可持续增长率") {
+		t.Errorf("SGR=12 时 g1=%v warning=%q，期望 12 且含 SGR 约束", pr.G1, pr.Warning)
+	}
+	if !strings.Contains(pr.Warning, "上限按向下取整") {
+		t.Errorf("SGR 告警应说明「上限按向下取整」：%q", pr.Warning)
+	}
+	if pr := recommendParams(valModelThreeStage, 20, 0, 4, nil); pr.G1 != 20 {
+		t.Errorf("SGR 不可用时不应设上限，g1 = %v", pr.G1)
+	}
+}
+
+// TestRecommendBaseFCFDecoupled R13 解耦：输出只由 FCF 自身序列与周期状态决定。
+// 编译期签名已无 X / volatile；这里用同一序列重复调用，保证逐字段稳定（防止未来回接）。
+func TestRecommendBaseFCFDecoupled(t *testing.T) {
+	fcf := map[int]float64{2022: 1e8, 2023: 3e8, 2024: 2e8}
+	years := []int{2022, 2023, 2024}
+	a := RecommendBaseFCF(fcf, years, fcfCycle{})
+	b := RecommendBaseFCF(fcf, years, fcfCycle{})
+	if a != b {
+		t.Fatalf("同一 FCF 序列的输出应逐字段一致：\n%+v\n%+v", a, b)
+	}
+	// R6 custom 的 gS 只随 FCF 增速中位数变化（0→0、20→15），与外部增速无关。
+	low := RecommendBaseFCF(map[int]float64{2022: 1e8, 2023: 1e8, 2024: 2e8}, []int{2022, 2023, 2024}, fcfCycle{})
+	high := RecommendBaseFCF(map[int]float64{2022: 1e8, 2023: 1.2e8, 2024: 10e8}, []int{2022, 2023, 2024}, fcfCycle{})
+	// low：latest 2 亿 > 1.3×median(1 亿)，增速极差 100pp > 40 → R6；center 1 亿 ×1.15 → 1 亿。
+	// high：latest 10 亿，gMedian≈377% → clamp 15；center = median(1,1.2,10)=1.2 亿
+	// → 1.2×1.15=1.38 → round 1 亿。
+	if low.Mode != valFCFCustom || low.CustomYuan != 1e8 {
+		t.Errorf("低增速的 custom = %+v，期望 1 亿元（center 1 亿）", low)
+	}
+	if high.Mode != valFCFCustom || high.CustomYuan != 1e8 {
+		t.Errorf("gS=20→15 的 custom = %+v，期望 1 亿元（center 1.2 亿×1.15 取整）", high)
+	}
+}
+
+// TestRecommendBaseFCFCyclical 强周期：trimMean>0 → trim_mean；trimMean≤0 → 不进 R3（落后续规则）。
+func TestRecommendBaseFCFCyclical(t *testing.T) {
+	cycle := fcfCycle{Evaluated: true, Cyclical: true, CV: 0.6, SignChanges: 2}
+	fcf := map[int]float64{2021: 1e8, 2022: 5e8, 2023: 2e8, 2024: 6e8}
+	got := RecommendBaseFCF(fcf, []int{2021, 2022, 2023, 2024}, cycle)
+	if got.Mode != valFCFTrimMean || got.Years != 4 {
+		t.Errorf("强周期且去极值平均 > 0 应取 trim_mean/4 年：%+v", got)
+	}
+	if !strings.Contains(got.Rationale, "强周期") {
+		t.Errorf("口径说明应含「强周期」：%q", got.Rationale)
+	}
+
+	// 去极值平均 ≤ 0（但并非全部非正）→ 不进入 R3；最近一年非正 → R4 latest。
+	neg := map[int]float64{2021: -10e8, 2022: -1e8, 2023: 5e8, 2024: -10e8}
+	got = RecommendBaseFCF(neg, []int{2021, 2022, 2023, 2024}, cycle)
+	if got.Mode != valFCFLatest {
+		t.Errorf("强周期且 trimMean≤0 不应取 trim_mean，实际 %+v", got)
+	}
+	if !strings.Contains(got.Rationale, "最近一年") || !strings.Contains(got.Rationale, "非正") {
+		t.Errorf("应落到 R4 的最近一年说明：%q", got.Rationale)
+	}
+}
+
+// TestConsistencyWarningDedup 告警去重、顺序稳定，且句末标点后不再插入「；」。
+func TestConsistencyWarningDedup(t *testing.T) {
+	got := dedupeWarns([]string{"A。", "B。", "A。", ""})
+	if !reflect.DeepEqual(got, []string{"A。", "B。"}) {
+		t.Errorf("dedupeWarns = %v，期望 [A。 B。]", got)
+	}
+	if joined := joinWarns(got); joined != "A。B。" {
+		t.Errorf("句末标点后应直接拼接，实际 %q", joined)
+	}
+	if joined := joinWarns([]string{"A", "B"}); joined != "A；B" {
+		t.Errorf("普通文本应以「；」连接，实际 %q", joined)
+	}
+
+	// 同输入多次推导 Warning 逐字一致，且不出现「。；」「；；」。
+	balance, cashflow, income := recommendFixture()
+	first := RecommendValuation(balance, cashflow, income)
+	for i := 0; i < 3; i++ {
+		if got := RecommendValuation(balance, cashflow, income); got.Warning != first.Warning {
+			t.Fatalf("第 %d 次 Warning 漂移：\n%q\n%q", i+2, first.Warning, got.Warning)
+		}
+	}
+	for _, bad := range []string{"。；", "；；", "。，"} {
+		if strings.Contains(first.Warning, bad) {
+			t.Errorf("Warning 出现异常标点 %q：%q", bad, first.Warning)
 		}
 	}
 }

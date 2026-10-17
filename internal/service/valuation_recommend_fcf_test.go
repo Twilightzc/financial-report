@@ -13,8 +13,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 		name          string
 		fcf           map[int]float64
 		years         []int
-		x             float64
-		volatile      bool
 		wantMode      string
 		wantYears     int
 		wantUnit      string
@@ -25,7 +23,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "稳定增长",
 			fcf:       map[int]float64{2022: 1e8, 2023: 1.1e8, 2024: 1.21e8},
 			years:     []int{2022, 2023, 2024},
-			x:         10,
 			wantMode:  valFCFLatest,
 			wantYears: 0,
 		},
@@ -33,7 +30,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "剧烈波动",
 			fcf:       map[int]float64{2022: 1e8, 2023: 3e8, 2024: 2e8},
 			years:     []int{2022, 2023, 2024},
-			x:         10,
 			wantMode:  valFCFMedian,
 			wantYears: 3,
 		},
@@ -41,7 +37,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:          "最近一年偏高不可持续",
 			fcf:           map[int]float64{2022: 1e8, 2023: 1e8, 2024: 5e8},
 			years:         []int{2022, 2023, 2024},
-			x:             -2,
 			wantMode:      valFCFCustom,
 			wantYears:     0,
 			wantUnit:      "yi",
@@ -52,7 +47,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "最近一年偏低",
 			fcf:       map[int]float64{2022: 2e8, 2023: 5e8, 2024: 3e8, 2025: 1e8},
 			years:     []int{2022, 2023, 2024, 2025},
-			x:         10,
 			wantMode:  valFCFMedian,
 			wantYears: 4,
 		},
@@ -60,7 +54,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "逐年下滑",
 			fcf:       map[int]float64{2022: 3e8, 2023: 2e8, 2024: 1e8},
 			years:     []int{2022, 2023, 2024},
-			x:         10,
 			wantMode:  valFCFLatest,
 			wantYears: 0,
 		},
@@ -68,7 +61,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "平稳",
 			fcf:       map[int]float64{2022: 1e8, 2023: 1.2e8, 2024: 1.1e8},
 			years:     []int{2022, 2023, 2024},
-			x:         10,
 			wantMode:  valFCFAverage,
 			wantYears: 3,
 		},
@@ -76,7 +68,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:          "全非正",
 			fcf:           map[int]float64{2022: -1e8, 2023: -2e8, 2024: -3e8},
 			years:         []int{2022, 2023, 2024},
-			x:             10,
 			wantMode:      valFCFLatest,
 			wantYears:     0,
 			wantRationale: "均为非正",
@@ -85,7 +76,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "最近一年非正",
 			fcf:       map[int]float64{2022: 1e8, 2023: 2e8, 2024: -1e8},
 			years:     []int{2022, 2023, 2024},
-			x:         10,
 			wantMode:  valFCFLatest,
 			wantYears: 0,
 		},
@@ -93,7 +83,6 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:          "数据不足三年",
 			fcf:           map[int]float64{2023: 1e8, 2024: 2e8},
 			years:         []int{2023, 2024},
-			x:             10,
 			wantMode:      valFCFLatest,
 			wantYears:     0,
 			wantRationale: "不足 3 年",
@@ -102,53 +91,48 @@ func TestRecommendBaseFCF(t *testing.T) {
 			name:      "无数据",
 			fcf:       nil,
 			years:     nil,
-			x:         10,
 			wantMode:  valFCFLatest,
 			wantYears: 0,
 		},
 		{
 			name:      "custom 取整到整亿",
-			fcf:       map[int]float64{2022: 40e8, 2023: 63.4e8, 2024: 120e8},
-			years:     []int{2022, 2023, 2024},
-			x:         0,
-			volatile:  true,
+			fcf:       map[int]float64{2021: 1e8, 2022: 5e8, 2023: 2e8, 2024: 6e8},
+			years:     []int{2021, 2022, 2023, 2024},
 			wantMode:  valFCFCustom,
 			wantYears: 0,
 			wantUnit:  "yi",
-			// center 63.4 亿 ×（1 + 0%）= 63.4 亿 → round(63.4) = 63 亿 = 63e8。
-			wantCustom:    63e8,
+			// latest 6 亿 > 1.3×中位数 3.5 亿，且增速极差 460pp > 40 → R6：
+			// center 3.5 亿 ×（1 + 15%）= 4.025 亿 → round = 4 亿 = 4e8。
+			wantCustom:    4e8,
 			wantRationale: "可持续中枢",
 		},
 		{
 			name:      "custom 取整溢出回落中位数",
 			fcf:       map[int]float64{2022: 0.2e8, 2023: 0.3e8, 2024: 1e8},
 			years:     []int{2022, 2023, 2024},
-			x:         0,
-			volatile:  true,
 			wantMode:  valFCFMedian, // 取整后 < 1 亿 → 不产出 custom，退回 median
 			wantYears: 3,
 		},
 		{
-			name:      "阈值边界 gSpread 恰 40pp",
-			fcf:       map[int]float64{2022: 1e8, 2023: 1.1e8, 2024: 1.65e8}, // +10% / +50% → 极差恰 40
-			years:     []int{2022, 2023, 2024},
-			x:         10,
-			wantMode:  valFCFLatest, // gSpread <= 40 视为「不波动」，R4 命中 latest
-			wantYears: 0,
+			name:  "阈值边界 gSpread 恰 40pp",
+			fcf:   map[int]float64{2022: 1e8, 2023: 1.1e8, 2024: 1.65e8}, // +10% / +50% → 极差恰 40
+			years: []int{2022, 2023, 2024},
+			// gSpread <= 40 且 latest > 1.3×median → 不命中 R4/R6，兜底 average。
+			wantMode:  valFCFAverage,
+			wantYears: 3,
 		},
 		{
 			name:      "阈值边界 latest 恰 1.3×median",
 			fcf:       map[int]float64{2022: 1e8, 2023: 1e8, 2024: 1.3e8},
 			years:     []int{2022, 2023, 2024},
-			x:         -1,
-			wantMode:  valFCFAverage, // 严格 > 1.3× 才算偏高 → 恰等于不触发 R5
-			wantYears: 3,
+			wantMode:  valFCFLatest, // 严格 > 1.3× 才算偏高 → 恰等于命中 R4
+			wantYears: 0,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := RecommendBaseFCF(c.fcf, c.years, c.x, c.volatile)
+			got := RecommendBaseFCF(c.fcf, c.years, fcfCycle{})
 			if got.Mode != c.wantMode {
 				t.Fatalf("Mode = %s，期望 %s（Rationale：%s）", got.Mode, c.wantMode, got.Rationale)
 			}
@@ -189,7 +173,7 @@ func TestRecommendBaseFCFLowRatioBoundary(t *testing.T) {
 	t.Run("恰等于 0.7×median 不触发 R7", func(t *testing.T) {
 		// vals=[3e8,10e8,2.1e8]：median=3e8，latest=2.1e8 恰等于 0.7×median=2.1e8。
 		// 因增速极差 > 40pp 走 R8 取中位数，但不得出现 R7 的「明显低于多年中枢」措辞。
-		got := RecommendBaseFCF(map[int]float64{2022: 3e8, 2023: 10e8, 2024: 2.1e8}, []int{2022, 2023, 2024}, -1, false)
+		got := RecommendBaseFCF(map[int]float64{2022: 3e8, 2023: 10e8, 2024: 2.1e8}, []int{2022, 2023, 2024}, fcfCycle{})
 		if got.Mode != valFCFMedian {
 			t.Fatalf("Mode = %s，期望 median", got.Mode)
 		}
@@ -200,7 +184,7 @@ func TestRecommendBaseFCFLowRatioBoundary(t *testing.T) {
 
 	t.Run("略低于 0.7×median 命中 R7", func(t *testing.T) {
 		// vals=[3e8,10e8,1.4e8]：median=3e8，latest=1.4e8 < 0.7×median=2.1e8 → R7 取中位数。
-		got := RecommendBaseFCF(map[int]float64{2022: 3e8, 2023: 10e8, 2024: 1.4e8}, []int{2022, 2023, 2024}, -1, false)
+		got := RecommendBaseFCF(map[int]float64{2022: 3e8, 2023: 10e8, 2024: 1.4e8}, []int{2022, 2023, 2024}, fcfCycle{})
 		if got.Mode != valFCFMedian {
 			t.Fatalf("Mode = %s，期望 median", got.Mode)
 		}
@@ -214,9 +198,9 @@ func TestRecommendBaseFCFLowRatioBoundary(t *testing.T) {
 func TestRecommendBaseFCFDeterministic(t *testing.T) {
 	fcf := map[int]float64{2022: 1e8, 2023: 1e8, 2024: 5e8}
 	years := []int{2022, 2023, 2024}
-	first := RecommendBaseFCF(fcf, years, -2, false)
+	first := RecommendBaseFCF(fcf, years, fcfCycle{})
 	for i := 0; i < 2; i++ {
-		got := RecommendBaseFCF(fcf, years, -2, false)
+		got := RecommendBaseFCF(fcf, years, fcfCycle{})
 		if got != first {
 			t.Fatalf("第 %d 次调用结果与首次不一致：\n首次 %+v\n本次 %+v", i+2, first, got)
 		}
@@ -226,14 +210,89 @@ func TestRecommendBaseFCFDeterministic(t *testing.T) {
 	}
 }
 
-// TestRecommendBaseFCFWindowCap 窗口最多取近 5 年（valFCFRecMaxYears）。
-func TestRecommendBaseFCFWindowCap(t *testing.T) {
-	years := []int{2019, 2020, 2021, 2022, 2023, 2024} // 6 年
-	// 无趋势（非单调增/减）、波动小，X<0 关闭 R4 → 兜底 average，年数应钳制到 5。
-	fcf := map[int]float64{2019: 1.1e8, 2020: 1.2e8, 2021: 1.1e8, 2022: 1.2e8, 2023: 1.1e8, 2024: 1.2e8}
-	got := RecommendBaseFCF(fcf, years, -1, false)
-	if got.Mode != valFCFAverage || got.Years != valFCFRecMaxYears {
-		t.Fatalf("窗口应钳制到 %d 年：%+v", valFCFRecMaxYears, got)
+// TestRecommendBaseFCFDynamicWindow G9：窗口按 FCF 周期动态取 3/5/7 年，且不超过可用年数。
+func TestRecommendBaseFCFDynamicWindow(t *testing.T) {
+	years := []int{2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
+	fcf := make(map[int]float64, len(years))
+	for i, y := range years {
+		fcf[y] = float64(100+i) * 1e8 // 单调递增 → 无周期时命中 R4 latest
+	}
+
+	// 稳定（CV ≤ 0.3）→ 3 年窗口。
+	got := RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, CV: 0.1, WindowYears: 8})
+	if got.Mode != valFCFLatest {
+		t.Errorf("稳定序列应命中 latest，实际 %+v", got)
+	}
+	// 中等波动（0.3 < CV ≤ 0.5）→ 5 年；不强制 trim_mean。
+	if got := RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, CV: 0.4, WindowYears: 8}); got.Mode != valFCFLatest {
+		t.Errorf("中等波动 + 单调增应命中 latest，实际 %+v", got)
+	}
+	// 强周期 → 7 年，且强制去极值平均。
+	got = RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, Cyclical: true, CV: 0.6, WindowYears: 8})
+	if got.Mode != valFCFTrimMean || got.Years != valFCFYearsCyclical {
+		t.Errorf("强周期应取 %d 年去极值平均，实际 %+v", valFCFYearsCyclical, got)
+	}
+
+	// 可用年数不足窗口时按可用年数：6 年且不可判定 → m=6。
+	short := []int{2019, 2020, 2021, 2022, 2023, 2024}
+	same := map[int]float64{2019: 1.1e8, 2020: 1.2e8, 2021: 1.1e8, 2022: 1.2e8, 2023: 1.1e8, 2024: 1.2e8}
+	if got := RecommendBaseFCF(same, short, fcfCycle{}); got.Mode != valFCFAverage || got.Years != 6 {
+		t.Errorf("6 年可用时应取 6 年，实际 %+v", got)
+	}
+}
+
+// TestDetectFCFCycle G8：总体标准差 CV、符号翻转、年数不足与窗口截断。
+func TestDetectFCFCycle(t *testing.T) {
+	// 稳定增长：CV 小、无翻转。
+	up := map[int]float64{2022: 1e8, 2023: 1.1e8, 2024: 1.21e8}
+	if c := detectFCFCycle(up, []int{2022, 2023, 2024}); c.Cyclical || !c.Evaluated || c.SignChanges != 0 {
+		t.Errorf("稳定序列不应判为周期：%+v", c)
+	}
+
+	// 正负交替 2 次（+,-,+）→ 强周期；0 值跳过、不计翻转。
+	sign := map[int]float64{2020: 1e8, 2021: -1e8, 2022: 0, 2023: 2e8}
+	if c := detectFCFCycle(sign, []int{2020, 2021, 2022, 2023}); !c.Cyclical || c.SignChanges != 2 {
+		t.Errorf("正负交替 2 次应判强周期：%+v", c)
+	}
+
+	// 均值 ≤ 0 → 不做判定（CV 无意义）。
+	neg := map[int]float64{2022: -1e8, 2023: 1e8, 2024: -1e8}
+	if c := detectFCFCycle(neg, []int{2022, 2023, 2024}); c.Evaluated {
+		t.Errorf("均值 ≤ 0 不应判定周期：%+v", c)
+	}
+
+	// 年数不足 3 → Evaluated=false。
+	if c := detectFCFCycle(map[int]float64{2023: 1e8, 2024: 2e8}, []int{2023, 2024}); c.Evaluated || c.WindowYears != 2 {
+		t.Errorf("不足 3 年不应判定：%+v", c)
+	}
+
+	// 窗口截断到 7 年（只吃最近 7 年）。
+	years := []int{2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
+	fcf := make(map[int]float64, len(years))
+	for _, y := range years {
+		fcf[y] = 1e8
+	}
+	if c := detectFCFCycle(fcf, years); c.WindowYears != valCycleWindowYears {
+		t.Errorf("窗口应截断到 %d 年，实际 %d", valCycleWindowYears, c.WindowYears)
+	}
+}
+
+// TestFCFWindowYears 周期状态 → 窗口年数。
+func TestFCFWindowYears(t *testing.T) {
+	cases := []struct {
+		c    fcfCycle
+		want int
+	}{
+		{fcfCycle{Evaluated: false}, valFCFYearsCyclical}, // 不可判定不额外缩短（交给 R1）
+		{fcfCycle{Evaluated: true, CV: 0.29}, valFCFYearsStable},
+		{fcfCycle{Evaluated: true, CV: 0.31}, valFCFYearsMild},
+		{fcfCycle{Evaluated: true, CV: 0.51}, valFCFYearsCyclical},
+		{fcfCycle{Evaluated: true, Cyclical: true, CV: 0.1}, valFCFYearsCyclical},
+	}
+	for _, c := range cases {
+		if got := fcfWindowYears(c.c); got != c.want {
+			t.Errorf("fcfWindowYears(%+v) = %d，期望 %d", c.c, got, c.want)
+		}
 	}
 }
 

@@ -56,7 +56,7 @@ func TestR15P1IndepBetaFor(t *testing.T) {
 		{"utility", false, 0.8, "公用事业", "AI 行业分类"},
 		{"utility", true, 0.8, "公用事业", "AI 行业分类"}, // AI 为主：volatile 不抬升
 		{"", false, 1.0, "一般行业", "缺省回落"},
-		{"", true, 1.2, "周期性行业", "波动兜底"},
+		{"", true, 1.2, "周期性行业", "波动/周期兜底"},
 	}
 	for _, x := range cases {
 		beta, _, name, basis := betaFor(x.in, x.volatile)
@@ -101,7 +101,7 @@ func TestR15P1IndepDiscountRate(t *testing.T) {
 	}
 	// AI 未分类 + volatile（§19.12.2 情形 5）→ 波动兜底 β=1.2，两标签同为周期性行业。
 	dr7 := recommendDiscountRate(debtFree(1000), empty, 2024, true, "", 0, true)
-	if dr7.Beta != 1.2 || dr7.BetaTier != "周期性行业" || dr7.BetaBasis != "波动兜底" {
+	if dr7.Beta != 1.2 || dr7.BetaTier != "周期性行业" || dr7.BetaBasis != "波动/周期兜底" {
 		t.Errorf("未分类+volatile：β=%v tier=%q basis=%q，期望 1.2/周期性行业/波动兜底",
 			dr7.Beta, dr7.BetaTier, dr7.BetaBasis)
 	}

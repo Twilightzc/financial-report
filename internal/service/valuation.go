@@ -394,11 +394,7 @@ func dcfThreeStage(fcf, g1, n1, g2, n2, g3, r float64) float64 {
 // 减值取利润表「资产减值损失 + 信用减值损失」（沿用既有简化：减值全部归经营）；折旧摊销、
 // 处置损失、报废损失取现金流量表补充资料；处置损失仅计损失（收益按 0）。
 func operatingFreeCashFlow(income, cf model.ReportRow) float64 {
-	capex := assetImpairmentLoss(income) + creditImpairmentLoss(income) +
-		v0(cf, "FA_IR_DEPR") + v0(cf, "USERIGHT_ASSET_AMORTIZE") +
-		v0(cf, "IA_AMORTIZE") + v0(cf, "LPE_AMORTIZE") +
-		disposalLongAssetLoss(cf) + v0(cf, "FA_SCRAP_LOSS")
-	return v0(cf, "NETCASH_OPERATE") - capex
+	return v0(cf, "NETCASH_OPERATE") - preservationCapex(income, cf)
 }
 
 // disposalLongAssetLoss 处置长期资产的损失（仅计损失，收益按 0 计）。
