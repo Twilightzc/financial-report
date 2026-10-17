@@ -2155,7 +2155,7 @@ const app = createApp({
                     </g>
                   </svg>
                 </div>
-                <p class="ai-think-text">分析中请稍等<span class="ai-think-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
+                <p class="ai-think-text">分析中，请稍等<span class="ai-think-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
                 <p class="ai-think-tip">AI 正在研读财务报表与行业信息</p>
               </div>
               <template v-if="aiResult">
