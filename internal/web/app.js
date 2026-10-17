@@ -2107,59 +2107,72 @@ const app = createApp({
                 <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
-              <!-- 等待态：AI 芯片电路动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
+              <!-- 等待态：大脑突触动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
                    结果区由 aiResult 独立驱动：请求返回时 aiResult 先于 aiLoading 置位，若用 v-else-if
                    会把结果/雷达图容器推迟到 finally 之后才挂载，导致 renderRadar 拿不到 DOM。 -->
               <div v-if="aiLoading && !aiResult" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
                 <div class="ai-think-visual" aria-hidden="true">
                   <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
-                    <!-- 电路底板：芯片四周的走线，静态细线 -->
-                    <g class="ai-circuit-base">
-                      <path d="M38 48H28V26H14" pathLength="100"></path>
-                      <path d="M38 60H20V44H8" pathLength="100"></path>
-                      <path d="M38 72H28V94H14" pathLength="100"></path>
-                      <path d="M82 48H92V26H106" pathLength="100"></path>
-                      <path d="M82 60H100V44H112" pathLength="100"></path>
-                      <path d="M82 72H92V94H106" pathLength="100"></path>
-                      <path d="M48 38V28H34V14" pathLength="100"></path>
-                      <path d="M72 38V28H86V14" pathLength="100"></path>
-                      <path d="M48 82V92H34V106" pathLength="100"></path>
-                      <path d="M72 82V92H86V106" pathLength="100"></path>
+                    <!-- 大脑轮廓（对称脑形）与脑沟回 -->
+                    <path class="ai-brain-outline" d="M60 27C55 24 50 24 46 28C42 25 36 27 34 32C29 31 25 36 26 41C21 44 20 51 23 55C19 60 20 68 24 72C21 78 24 86 30 89C32 94 39 97 45 95C50 98 56 97 60 94C64 97 70 98 75 95C81 97 88 94 90 89C96 86 99 78 96 72C100 68 101 60 97 55C100 51 99 44 94 41C95 36 91 31 86 32C84 27 78 25 74 28C70 24 65 24 60 27Z"></path>
+                    <g class="ai-brain-folds">
+                      <path d="M60 30C58 42 58 52 60 60"></path>
+                      <path d="M44 40C38 48 40 60 46 66"></path>
+                      <path d="M76 40C82 48 80 60 74 66"></path>
+                      <path d="M32 56C36 62 42 64 48 62"></path>
+                      <path d="M88 56C84 62 78 64 72 62"></path>
+                      <path d="M40 78C48 74 54 78 60 76"></path>
+                      <path d="M80 78C72 74 66 78 60 76"></path>
                     </g>
-                    <!-- 数据流光：与底板同路径的短亮段，沿走线循环流动 -->
-                    <g class="ai-circuit-flow">
-                      <path d="M38 48H28V26H14" pathLength="100"></path>
-                      <path d="M38 60H20V44H8" pathLength="100"></path>
-                      <path d="M38 72H28V94H14" pathLength="100"></path>
-                      <path d="M82 48H92V26H106" pathLength="100"></path>
-                      <path d="M82 60H100V44H112" pathLength="100"></path>
-                      <path d="M82 72H92V94H106" pathLength="100"></path>
-                      <path d="M48 38V28H34V14" pathLength="100"></path>
-                      <path d="M72 38V28H86V14" pathLength="100"></path>
-                      <path d="M48 82V92H34V106" pathLength="100"></path>
-                      <path d="M72 82V92H86V106" pathLength="100"></path>
+                    <!-- 突触连接：静态底纹 -->
+                    <g class="ai-synapse-links">
+                      <path d="M60 30Q52 34 44 40" pathLength="100"></path>
+                      <path d="M60 30Q68 34 76 40" pathLength="100"></path>
+                      <path d="M44 40Q38 48 32 56" pathLength="100"></path>
+                      <path d="M44 40Q50 50 60 60" pathLength="100"></path>
+                      <path d="M76 40Q70 50 60 60" pathLength="100"></path>
+                      <path d="M76 40Q82 48 88 56" pathLength="100"></path>
+                      <path d="M32 56Q38 62 46 66" pathLength="100"></path>
+                      <path d="M88 56Q82 62 74 66" pathLength="100"></path>
+                      <path d="M46 66Q53 62 60 60" pathLength="100"></path>
+                      <path d="M74 66Q67 62 60 60" pathLength="100"></path>
+                      <path d="M46 66Q48 74 52 82" pathLength="100"></path>
+                      <path d="M74 66Q72 74 68 82" pathLength="100"></path>
+                      <path d="M52 82Q56 78 60 76" pathLength="100"></path>
+                      <path d="M68 82Q64 78 60 76" pathLength="100"></path>
+                      <path d="M60 60Q60 70 60 76" pathLength="100"></path>
                     </g>
-                    <!-- 走线末端焊盘：呼吸式亮灭 -->
-                    <g class="ai-circuit-pads">
-                      <circle cx="14" cy="26" r="2"></circle>
-                      <circle cx="8" cy="44" r="2"></circle>
-                      <circle cx="14" cy="94" r="2"></circle>
-                      <circle cx="106" cy="26" r="2"></circle>
-                      <circle cx="112" cy="44" r="2"></circle>
-                      <circle cx="106" cy="94" r="2"></circle>
-                      <circle cx="34" cy="14" r="2"></circle>
-                      <circle cx="86" cy="14" r="2"></circle>
-                      <circle cx="34" cy="106" r="2"></circle>
-                      <circle cx="86" cy="106" r="2"></circle>
+                    <!-- 突触脉冲：与底纹同路径的短亮段沿连接线流动 -->
+                    <g class="ai-synapse-flow">
+                      <path d="M60 30Q52 34 44 40" pathLength="100"></path>
+                      <path d="M60 30Q68 34 76 40" pathLength="100"></path>
+                      <path d="M44 40Q38 48 32 56" pathLength="100"></path>
+                      <path d="M44 40Q50 50 60 60" pathLength="100"></path>
+                      <path d="M76 40Q70 50 60 60" pathLength="100"></path>
+                      <path d="M76 40Q82 48 88 56" pathLength="100"></path>
+                      <path d="M32 56Q38 62 46 66" pathLength="100"></path>
+                      <path d="M88 56Q82 62 74 66" pathLength="100"></path>
+                      <path d="M46 66Q53 62 60 60" pathLength="100"></path>
+                      <path d="M74 66Q67 62 60 60" pathLength="100"></path>
+                      <path d="M46 66Q48 74 52 82" pathLength="100"></path>
+                      <path d="M74 66Q72 74 68 82" pathLength="100"></path>
+                      <path d="M52 82Q56 78 60 76" pathLength="100"></path>
+                      <path d="M68 82Q64 78 60 76" pathLength="100"></path>
+                      <path d="M60 60Q60 70 60 76" pathLength="100"></path>
                     </g>
-                    <!-- 芯片本体 + 内核 + 四个 Die 焊点 -->
-                    <rect class="ai-chip-body" x="38" y="38" width="44" height="44" rx="9"></rect>
-                    <rect class="ai-chip-core" x="50" y="50" width="20" height="20" rx="4"></rect>
-                    <g class="ai-chip-pins">
-                      <circle cx="56" cy="56" r="1.6"></circle>
-                      <circle cx="64" cy="56" r="1.6"></circle>
-                      <circle cx="56" cy="64" r="1.6"></circle>
-                      <circle cx="64" cy="64" r="1.6"></circle>
+                    <!-- 突触节点：错峰呼吸 + 轻微缩放 -->
+                    <g class="ai-synapse-nodes">
+                      <circle cx="60" cy="30" r="2.6"></circle>
+                      <circle cx="44" cy="40" r="2.2"></circle>
+                      <circle cx="76" cy="40" r="2.2"></circle>
+                      <circle cx="32" cy="56" r="2.2"></circle>
+                      <circle cx="88" cy="56" r="2.2"></circle>
+                      <circle cx="60" cy="60" r="3"></circle>
+                      <circle cx="46" cy="66" r="2.2"></circle>
+                      <circle cx="74" cy="66" r="2.2"></circle>
+                      <circle cx="52" cy="82" r="2.2"></circle>
+                      <circle cx="68" cy="82" r="2.2"></circle>
+                      <circle cx="60" cy="76" r="2.4"></circle>
                     </g>
                   </svg>
                 </div>
