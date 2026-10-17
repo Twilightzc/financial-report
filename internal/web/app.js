@@ -295,6 +295,21 @@ const app = createApp({
     const valLoading = ref(false);
     const valError = ref('');
 
+    // R16 估值历史记录：仅记录用户主动发起且成功的估值（manual/ai），存本机 localStorage。
+    const VAL_HISTORY_KEY = 'valuationHistory';              // 需求指定键名
+    const VAL_HISTORY_VERSION = 1;                           // 信封版本
+    const MAX_VALUATION_RECORDS = 50;                        // 最多保留条数
+    const VAL_HISTORY_HINT_KEY = 'valuationHistoryHintShown'; // 首次记录提示的本地标记（D1：清空不重置）
+    const valuationHistory = ref([]);        // 按 createdAt 倒序
+    const valHistoryOpen = ref(false);       // 抽屉开关
+    const valHistoryDrawerSize = ref('420px'); // 桌面 420px / ≤768px 全宽（D4）
+    const valHistoryEntryRef = ref(null);    // 顶栏入口 DOM，关闭抽屉后回焦
+    let pendingValuationRestore = null;      // 非响应式：一次性回填快照（点击记录 → doSearch）
+    let valRequestSeq = 0;                   // 非响应式：估值请求单调序号（竞态守卫）
+    let valuationCode = '';                  // 非响应式：当前 valuation 结果属于哪只股票
+    let valHistoryPersist = true;            // 非响应式：localStorage 是否可用（失败后仅内存）
+    let firstRecordHintShown = false;        // 非响应式：首次记录提示是否已展示
+
     // R5 AI 智能分析状态（apikey 由服务端启动参数提供，前端无需输入）
     const aiLoading = ref(false);
     const aiError = ref('');
@@ -536,14 +551,349 @@ const app = createApp({
       if (chart) chart.dispose();
     }
 
-    async function fetchValuation() {
-      if (!code.value.trim()) return;
+    // ===================== R16 估值历史记录 =====================
+    // 记录 = 用户主动发起（manual/ai）且成功返回的估值快照；搜索自动估值（auto）不记录。
+    // 全部数据仅存本机 localStorage；不可用/写入失败时静默降级为内存态，不阻断估值流程。
+
+    function isNum(v) { return typeof v === 'number' && isFinite(v); }
+    function toNum(v) { return isNum(v) ? v : null; }
+    function toInt(v) { return isNum(v) ? Math.round(v) : null; }
+
+    // 单条记录校验/修复：只丢弃 code 非法或 createdAt 非法的条目，其余字段类型不符置 null/''。
+    function normalizeValuationRecord(raw) {
+      if (!raw || typeof raw !== 'object') return null;
+      const c = String(raw.code == null ? '' : raw.code).trim();
+      if (!/^\d{6}$/.test(c)) return null;
+      const createdAt = typeof raw.createdAt === 'string' ? raw.createdAt : '';
+      if (!createdAt || isNaN(Date.parse(createdAt))) return null;
+
+      const fcfMode = typeof raw.fcfMode === 'string' ? raw.fcfMode : '';
+      let fcfModeName = typeof raw.fcfModeName === 'string' ? raw.fcfModeName : '';
+      if (!fcfModeName && fcfMode) {
+        const m = valFCFModes.find(x => x.key === fcfMode);
+        fcfModeName = m ? m.label : '';
+      }
+      return {
+        code: c,
+        name: typeof raw.name === 'string' ? raw.name : '',
+        market: (raw.market === 'sh' || raw.market === 'sz' || raw.market === 'bj')
+          ? raw.market : guessMarket(c),
+        createdAt,
+        source: raw.source === 'ai' ? 'ai' : 'manual',
+        year: toInt(raw.year),
+        model: typeof raw.model === 'string' ? raw.model : '',
+        modelName: typeof raw.modelName === 'string' ? raw.modelName : '',
+        discountRate: toNum(raw.discountRate),
+        growthRate: toNum(raw.growthRate),
+        stage1Growth: toNum(raw.stage1Growth),
+        stage1Years: toInt(raw.stage1Years),
+        stage2Growth: toNum(raw.stage2Growth),
+        stage2Years: toInt(raw.stage2Years),
+        terminalGrowth: toNum(raw.terminalGrowth),
+        fcfMode,
+        fcfModeName,
+        fcfYears: toInt(raw.fcfYears),
+        adjustRD: raw.adjustRD === true,
+        rdAdjustment: toNum(raw.rdAdjustment),
+        fcfCustomValue: toNum(raw.fcfCustomValue),
+        fcfCustomUnit: typeof raw.fcfCustomUnit === 'string' ? raw.fcfCustomUnit : null,
+        baseFCF: toNum(raw.baseFCF),
+        financialAssetValue: toNum(raw.financialAssetValue),
+        longEquityValue: toNum(raw.longEquityValue),
+        operatingAssetValue: toNum(raw.operatingAssetValue),
+        companyValue: toNum(raw.companyValue),
+        debtValue: toNum(raw.debtValue),
+        equityValue: toNum(raw.equityValue),
+        equityValuePerShare: toNum(raw.equityValuePerShare),
+      };
+    }
+
+    // 读取：版本不符/非数组 → 空；逐条 normalize 丢弃非法；createdAt 倒序 + code 去重 + 截断 50。
+    function loadValuationHistory() {
+      try {
+        const text = localStorage.getItem(VAL_HISTORY_KEY);
+        if (!text) return [];
+        const raw = JSON.parse(text);
+        if (!raw || typeof raw !== 'object' || raw.version !== VAL_HISTORY_VERSION
+            || !Array.isArray(raw.items)) return [];
+        const items = raw.items
+          .map(normalizeValuationRecord)
+          .filter(Boolean)
+          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+        const seen = new Set();
+        const out = [];
+        for (const it of items) {
+          if (seen.has(it.code)) continue; // 损坏数据里重复 code：保留最新
+          seen.add(it.code);
+          out.push(it);
+          if (out.length >= MAX_VALUATION_RECORDS) break;
+        }
+        return out;
+      } catch (e) {
+        valHistoryPersist = false; // 隐私模式/被禁用：本次会话仅内存
+        return [];
+      }
+    }
+
+    function saveValuationHistory() {
+      if (!valHistoryPersist) return false;
+      try {
+        localStorage.setItem(VAL_HISTORY_KEY, JSON.stringify({
+          version: VAL_HISTORY_VERSION,
+          items: valuationHistory.value,
+        }));
+        return true;
+      } catch (e) {
+        valHistoryPersist = false; // 静默降级：仅内存，不弹错误
+        return false;
+      }
+    }
+
+    // 接口字段 → 记录字段（金额一律元，不适用字段存 null 保证 JSON 稳定）。
+    function buildValuationRecord(cd, name, source, v) {
+      if (!v || typeof v !== 'object') return null;
+      const c = String(cd == null ? '' : cd).trim();
+      if (!/^\d{6}$/.test(c)) return null;
+      const fcfMode = typeof v.fcf_mode === 'string' ? v.fcf_mode : '';
+      let fcfModeName = typeof v.fcf_mode_name === 'string' ? v.fcf_mode_name : '';
+      if (!fcfModeName && fcfMode) {
+        const m = valFCFModes.find(x => x.key === fcfMode);
+        fcfModeName = m ? m.label : '';
+      }
+      return {
+        code: c,
+        name: name || '',
+        market: guessMarket(c),
+        createdAt: new Date().toISOString(), // 覆盖时刷新
+        source: source === 'ai' ? 'ai' : 'manual',
+        year: toInt(v.year),
+        model: typeof v.model === 'string' ? v.model : '',
+        modelName: typeof v.model_name === 'string' ? v.model_name : '',
+        discountRate: toNum(v.discount_rate),
+        growthRate: toNum(v.growth_rate),
+        stage1Growth: toNum(v.stage1_growth),
+        stage1Years: toInt(v.stage1_years),
+        stage2Growth: toNum(v.stage2_growth),
+        stage2Years: toInt(v.stage2_years),
+        terminalGrowth: toNum(v.terminal_growth),
+        fcfMode,
+        fcfModeName,
+        fcfYears: toInt(v.fcf_years),
+        adjustRD: v.adjust_rd === true,
+        rdAdjustment: toNum(v.rd_adjustment),
+        fcfCustomValue: toNum(v.fcf_custom_value), // 已换算为元，展示/回填按单位反算（20.4.2）
+        fcfCustomUnit: typeof v.fcf_custom_unit === 'string' ? v.fcf_custom_unit : null,
+        baseFCF: toNum(v.base_fcf),
+        financialAssetValue: toNum(v.financial_asset_value),
+        longEquityValue: toNum(v.long_equity_value),
+        operatingAssetValue: toNum(v.operating_asset_value),
+        companyValue: toNum(v.company_value),
+        debtValue: toNum(v.debt_value),
+        equityValue: toNum(v.equity_value),
+        equityValuePerShare: toNum(v.equity_value_per_share),
+      };
+    }
+
+    // 同 code 覆盖置顶；超限淘汰最早一条（列表始终按 createdAt 倒序）。
+    function recordValuation(cd, name, source, v) {
+      const rec = buildValuationRecord(cd, name, source, v);
+      if (!rec) return;
+      const wasEmpty = valuationHistory.value.length === 0;
+      const list = valuationHistory.value.filter(r => r.code !== rec.code);
+      list.unshift(rec);
+      if (list.length > MAX_VALUATION_RECORDS) list.length = MAX_VALUATION_RECORDS;
+      valuationHistory.value = list;
+      saveValuationHistory();
+      maybeShowFirstRecordHint(wasEmpty);
+    }
+
+    // FR-10：本机第一条记录提示一次；D1 定稿——用独立标记，清空全部后不重置。
+    function maybeShowFirstRecordHint(wasEmpty) {
+      if (!wasEmpty || firstRecordHintShown) return;
+      firstRecordHintShown = true;
+      try { localStorage.setItem(VAL_HISTORY_HINT_KEY, '1'); } catch (e) {}
+      ElementPlus.ElMessage.success('已记录本次估值，可在顶部「估值记录」查看');
+    }
+
+    function removeValuationRecord(cd) {
+      const r = valuationHistory.value.find(x => x.code === cd);
+      if (!r) return;
+      valuationHistory.value = valuationHistory.value.filter(x => x.code !== cd);
+      saveValuationHistory();
+      ElementPlus.ElMessage.success('已删除 ' + (r.name || r.code) + ' 的估值记录');
+    }
+
+    // FR-9：二次确认（含条数、危险色、默认焦点在取消）；取消不做任何修改。
+    function clearValuationHistory() {
+      const n = valuationHistory.value.length;
+      if (!n) return;
+      ElementPlus.ElMessageBox.confirm(
+        `确定清空全部 ${n} 条估值记录？此操作不可恢复。`,
+        '清空估值记录',
+        { confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning',
+          confirmButtonClass: 'el-button--danger', autofocus: false }
+      ).then(() => {
+        valuationHistory.value = [];
+        saveValuationHistory();
+      }).catch(() => {});
+      // 确认框打开后把焦点放到「取消」（DOM 顺序：取消在前）；取不到元素则静默跳过。
+      nextTick(() => requestAnimationFrame(() => {
+        const btn = document.querySelector('.el-message-box__btns .el-button');
+        if (btn) btn.focus();
+      }));
+    }
+
+    // 请求发起时快照公司名称：已加载股票 → 搜索历史 → 空串。
+    function resolveRecordName(cd) {
+      const s = data.value && data.value.stock;
+      if (s && String(s.code) === cd && s.name) return s.name;
+      const h = history.value.find(x => x.code === cd);
+      return h && h.name ? h.name : '';
+    }
+
+    // 请求身份校验：序号是最新且输入框代码未变，才允许响应落地（FR-12.3）。
+    function isCurrentValRequest(seq, reqCode) {
+      return seq === valRequestSeq && (code.value || '').trim() === reqCode;
+    }
+
+    // FR-12.2：换股时全量重置为页面默认值，并让所有在途估值请求立即过期。
+    function resetValuationState() {
+      valRequestSeq++;
+      valModel.value = 'perpetual';
+      valDiscount.value = 8;
+      valG.value = 3;
+      valG1.value = 10; valN1.value = 5;
+      valG2.value = 3;  valN2.value = 5;
+      valG3.value = 3;
+      valFCFMode.value = 'latest';
+      valFCFYears.value = 3;
+      valFCFCustomValue.value = null;
+      valFCFCustomUnit.value = 'yi';
+      valAdjustRD.value = false;
+      valuation.value = null;  // 结果表、notes、参数摘要行一并消失
+      valuationCode = '';
+      valError.value = '';
+      valLoading.value = false;
+    }
+
+    // FR-7：把记录中的参数回填到表单（记录中 null/缺省字段保留重置后的默认值）。
+    function applyValuationParams(r) {
+      if (!r) return;
+      if (r.model) valModel.value = r.model;
+      if (isNum(r.discountRate)) valDiscount.value = r.discountRate;
+      if (isNum(r.growthRate)) valG.value = r.growthRate;
+      if (isNum(r.stage1Growth)) valG1.value = r.stage1Growth;
+      if (isNum(r.stage1Years)) valN1.value = Math.round(r.stage1Years);
+      if (isNum(r.stage2Growth)) valG2.value = r.stage2Growth;
+      if (isNum(r.stage2Years)) valN2.value = Math.round(r.stage2Years);
+      if (isNum(r.terminalGrowth)) valG3.value = r.terminalGrowth;
+
+      // 后端增长率字段带 omitempty，值为 0 时不会出现在响应里（记录中为 null）。
+      // 按模型把模型实际使用的缺失增长率补 0，否则回填后会沿用重置默认值（g=0 被按 g=3 重算）。
+      // 兼容已存的旧记录；年数/选取年数后端要求 > 0，不受影响。
+      const model = r.model || valModel.value;
+      if (model === 'perpetual' && !isNum(r.growthRate)) valG.value = 0;
+      if (model === 'two_stage' || model === 'three_stage') {
+        if (!isNum(r.stage1Growth)) valG1.value = 0;
+        if (!isNum(r.stage2Growth)) valG2.value = 0;
+      }
+      if (model === 'three_stage' && !isNum(r.terminalGrowth)) valG3.value = 0;
+
+      if (r.fcfMode) valFCFMode.value = r.fcfMode;
+      if (isNum(r.fcfYears)) valFCFYears.value = Math.round(r.fcfYears);
+      if (r.fcfMode === 'custom') {
+        // 记录存的是元值，表单接收「所选单位下的数值」→ 按单位反算（20.4.2）。
+        const unit = r.fcfCustomUnit || 'yi';
+        valFCFCustomUnit.value = unit;
+        valFCFCustomValue.value = isNum(r.fcfCustomValue)
+          ? Math.round((r.fcfCustomValue / (VAL_FCF_UNIT_FACTOR[unit] || 1)) * 100) / 100
+          : null;
+      }
+      valAdjustRD.value = r.adjustRD === true;
+    }
+
+    function fmtRecordTime(iso) {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      const p = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+           + `${p(d.getHours())}:${p(d.getMinutes())}`; // 本地时间，不用相对时间
+    }
+
+    function fmtRecordPerShare(v) {
+      return (isNum(v) && v > 0) ? v.toFixed(2) + ' 元' : '—';
+    }
+
+    function recordModelName(r) {
+      if (r.modelName) return r.modelName;
+      const m = valModels.find(x => x.key === r.model);
+      return m ? m.label : '';
+    }
+
+    // FR-6 参数摘要：模型名 → 折现率 → 基期 FCF（含年数/自定义单位）→ 基期年 → 研发调整。
+    function recordParamSummary(r) {
+      const parts = [];
+      if (recordModelName(r)) parts.push(recordModelName(r));
+      if (isNum(r.discountRate)) parts.push('折现率 ' + fmtNum(r.discountRate) + '%');
+
+      let fcf;
+      if (r.fcfMode === 'custom') {
+        // fcfCustomValue 是元值，按单位反算后再拼单位标签（否则「亿」会放大 1 亿倍）。
+        const unit = r.fcfCustomUnit || 'yuan';
+        const shown = isNum(r.fcfCustomValue)
+          ? Math.round((r.fcfCustomValue / (VAL_FCF_UNIT_FACTOR[unit] || 1)) * 100) / 100 : null;
+        fcf = '基期FCF 自定义 ' + (shown == null ? '—' : fmtNum(shown)) + fcfUnitLabel(unit);
+      } else {
+        fcf = '基期FCF ' + (r.fcfModeName || '—')
+            + (r.fcfYears ? '（' + r.fcfYears + '年）' : '');
+      }
+      parts.push(fcf);
+
+      if (isNum(r.year)) parts.push('基期 ' + r.year + ' 年报');
+      if (r.adjustRD) parts.push('研发调整');
+      return parts.join(' · ');
+    }
+
+    function openValuationHistory() {
+      syncValHistoryDrawerSize();
+      valHistoryOpen.value = true;
+    }
+
+    // FR-7：关抽屉 → 设一次性回填 → 改搜索框 → doSearch（重置 → 回填 → 自动计算）。
+    function openValuationRecord(record) {
+      if (!record || !/^\d{6}$/.test(record.code)) return;
+      valHistoryOpen.value = false;
+      pendingValuationRestore = record;
+      code.value = record.code;
+      doSearch();
+    }
+
+    function focusValHistoryEntry() {
+      nextTick(() => { if (valHistoryEntryRef.value) valHistoryEntryRef.value.focus(); });
+    }
+
+    // D4：抽屉尺寸用响应式 ref（≤768px 全屏），不依赖 el-drawer 的 class 落点。
+    function syncValHistoryDrawerSize() {
+      valHistoryDrawerSize.value = window.innerWidth <= 768 ? '100%' : '420px';
+    }
+
+    // 唯一估值请求入口。source：manual（用户点「计算估值」）/ ai（AI 套用）/ auto（搜索自动，不记录）。
+    // 竞态守卫：每次请求携带单调序号 + 发起时股票代码；旧请求的成功/失败/异常一律整体丢弃。
+    async function fetchValuation(source = 'auto') {
+      const reqCode = (code.value || '').trim();
+      if (!reqCode) return;
+      // 归一化来源，防止原生事件对象/脏值被当作 source 传入。
+      const src = (source === 'manual' || source === 'ai') ? source : 'auto';
+      const seq = ++valRequestSeq;                // 任何新请求都使旧请求过期
+      const reqName = resolveRecordName(reqCode); // 发起时快照名称（FR-1）
       // R12：自定义模式先本地校验，非法只提示、不发起请求。
       if (valFCFMode.value === 'custom') {
         const msg = validateCustomFCF(valFCFCustomValue.value, valFCFCustomUnit.value);
         if (msg) {
           valError.value = msg;
           valuation.value = null;
+          valuationCode = '';
+          valLoading.value = false;
           return;
         }
       }
@@ -568,19 +918,27 @@ const app = createApp({
           q.set('fcf_years', valFCFYears.value);
         }
         q.set('adjust_rd', valAdjustRD.value ? 'true' : 'false');
-        const res = await fetch(`/api/stock/${code.value.trim()}/valuation?${q.toString()}`);
+        const res = await fetch(`/api/stock/${reqCode}/valuation?${q.toString()}`);
         const json = await readJSON(res);
+        if (!isCurrentValRequest(seq, reqCode)) return; // 旧请求：成功/业务失败一律丢弃
         if (json.code !== 0) {
           valError.value = json.message || '估值失败';
           valuation.value = null;
+          valuationCode = '';
           return;
         }
-        valuation.value = json.data;
+        valuation.value = json.data || null;
+        valuationCode = json.data ? reqCode : ''; // 记录当前结果归属
+        // 卡片写入后落记录（仅用户主动发起的成功估值，FR-1）。
+        if (src !== 'auto' && json.data) recordValuation(reqCode, reqName, src, json.data);
       } catch (e) {
+        if (!isCurrentValRequest(seq, reqCode)) return; // 旧请求的异常静默丢弃
         valError.value = '请求失败：' + e.message;
         valuation.value = null;
+        valuationCode = '';
       } finally {
-        valLoading.value = false;
+        // 仅最新序号可关 loading（不看 code：只改输入未搜索时也能正常结束）
+        if (seq === valRequestSeq) valLoading.value = false;
       }
     }
 
@@ -591,7 +949,10 @@ const app = createApp({
     async function doSearch() {
       const raw = (code.value || '').trim();
       if (!raw) return; // 空输入不请求、不报错（FR-5 异常）
-      if (searchBusy) return;
+      if (searchBusy) return; // pendingValuationRestore 保留，交由后续调用消费
+      // R16 FR-7：一次性回填快照（点击估值记录 → 本次 doSearch 消费）
+      const restore = pendingValuationRestore;
+      pendingValuationRestore = null;
       searchBusy = true;
       try {
         searchHint.value = '';
@@ -613,6 +974,16 @@ const app = createApp({
           // FR-1「代码匹配忽略输入中的空格」：回写归一化值，使判定口径与后续拼 URL 的取值一致
           code.value = norm;
         }
+
+        // R16 FR-12：换股时在请求发起当下重置估值卡片（重置 → 回填 → 自动计算，顺序不可颠倒）。
+        const nextCode = code.value.trim();
+        const loadedCode = data.value && data.value.stock ? String(data.value.stock.code) : '';
+        // valuationCode 覆盖「旧估值已返回、新股票数据尚未落地」的窗口。
+        const changed = (!!loadedCode && loadedCode !== nextCode)
+                     || (!!valuationCode && valuationCode !== nextCode);
+        if (changed) resetValuationState();
+        if (restore && restore.code === nextCode) applyValuationParams(restore);
+
         // 切换股票时清空上一支股票的 AI 分析结果，避免残留
         aiResult.value = null;
         aiError.value = '';
@@ -770,7 +1141,7 @@ const app = createApp({
           if (v.fcf_custom_unit) valFCFCustomUnit.value = v.fcf_custom_unit;
         }
       }
-      fetchValuation();
+      fetchValuation('ai'); // R16 FR-1：AI 套用为主动动作，记录来源标记 ai
       ElementPlus.ElMessage.success('已套用 AI 推荐的估值参数并计算');
     }
 
@@ -971,10 +1342,15 @@ const app = createApp({
     }
 
     loadHistory();
+    // R16：初始化读取一次记录到内存（加载时不回写）；首次提示标记按 D1 每浏览器只提示一次。
+    valuationHistory.value = loadValuationHistory();
+    try { firstRecordHintShown = localStorage.getItem(VAL_HISTORY_HINT_KEY) === '1'; } catch (e) {}
+    syncValHistoryDrawerSize();
 
     // 单页应用，监听器与页面同生命周期，无需解绑（FR-5：窗口 resize / 横竖屏切换重排）。
     window.addEventListener('resize', handleChartResize);
     window.addEventListener('resize', handleRadarResize);
+    window.addEventListener('resize', syncValHistoryDrawerSize);
 
     return {
       code, loading, error, data, fetchData,
@@ -995,6 +1371,10 @@ const app = createApp({
       scoreColor, fmtNum, applyAIValuation,
       history, querySearch, handleSelect, clearHistory,
       searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
+      // R16 估值历史记录（抽屉、记录操作与展示格式化）
+      valuationHistory, valHistoryOpen, valHistoryDrawerSize, valHistoryEntryRef,
+      openValuationHistory, openValuationRecord, removeValuationRecord, clearValuationHistory,
+      fmtRecordTime, fmtRecordPerShare, recordParamSummary, recordModelName, resetValuationState,
     };
   },
   template: `
@@ -1036,6 +1416,16 @@ const app = createApp({
               </svg>
             </button>
           </div>
+          <button ref="valHistoryEntryRef" type="button" class="val-hist-entry"
+                  title="估值记录" aria-label="估值记录" @click="openValuationHistory">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <polyline points="12 7 12 12 15 14"></polyline>
+            </svg>
+            <span class="vh-entry-text">估值记录</span>
+            <span v-if="valuationHistory.length" class="vh-entry-badge">{{ valuationHistory.length }}</span>
+          </button>
         </div>
         <div v-if="error" class="topbar-alert">
           <el-alert :title="error" type="error" :closable="false" />
@@ -1373,7 +1763,7 @@ const app = createApp({
                 </div>
 
                 <div class="val-actions">
-                  <el-button type="primary" :loading="valLoading" @click="fetchValuation">计算估值</el-button>
+                  <el-button type="primary" :loading="valLoading" @click="fetchValuation('manual')">计算估值</el-button>
                 </div>
               </div>
               <el-alert v-if="valError" :title="valError" type="warning" :closable="false" style="margin-top:12px" />
@@ -1531,6 +1921,63 @@ const app = createApp({
           </section>
         </template>
       </main>
+
+      <!-- R16 估值记录抽屉：全局数据，欢迎页/结果页均可打开；teleport 到 body，不受 sticky 顶栏影响 -->
+      <el-drawer v-model="valHistoryOpen" direction="rtl" :size="valHistoryDrawerSize"
+                 class="val-history-drawer" :with-header="false" @closed="focusValHistoryEntry">
+        <div class="vh-drawer">
+          <div class="vh-head">
+            <div class="vh-title">估值记录
+              <span v-if="valuationHistory.length" class="vh-count">{{ valuationHistory.length }}</span>
+            </div>
+            <el-button v-if="valuationHistory.length" text type="danger" size="small"
+                       @click="clearValuationHistory">清空全部</el-button>
+          </div>
+
+          <div v-if="valuationHistory.length" class="vh-list">
+            <div v-for="r in valuationHistory" :key="r.code" class="vh-item"
+                 role="button" tabindex="0" :aria-label="'查看 ' + (r.name || r.code) + ' 的估值记录'"
+                 @click="openValuationRecord(r)"
+                 @keydown.enter.prevent="openValuationRecord(r)"
+                 @keydown.space.prevent="openValuationRecord(r)">
+              <div class="vh-item-head">
+                <span class="vh-name">{{ r.name || '—' }}</span>
+                <span class="vh-code">{{ r.code }}</span>
+                <span class="vh-market">{{ marketLabelOf(r.market) }}</span>
+                <span v-if="r.source === 'ai'" class="vh-source">AI 推荐</span>
+              </div>
+              <div class="vh-main">
+                <span v-if="r.equityValuePerShare > 0" class="vh-per-share">
+                  每股 {{ fmtRecordPerShare(r.equityValuePerShare) }}
+                </span>
+                <span class="vh-equity" :class="{ 'vh-primary': !(r.equityValuePerShare > 0) }">
+                  股权价值 {{ fmtYi(r.equityValue) }}
+                </span>
+              </div>
+              <div class="vh-meta">{{ recordParamSummary(r) }}</div>
+              <div class="vh-meta">记录于 {{ fmtRecordTime(r.createdAt) }}</div>
+              <button type="button" class="vh-del" title="删除记录" aria-label="删除记录"
+                      @click.stop="removeValuationRecord(r.code)">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                  <path d="M10 11v6M14 11v6"></path>
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div v-else class="vh-empty">
+            <el-empty description="还没有估值记录">
+              <p class="vh-empty-tip">在「公司估值」卡片点击「计算估值」后会自动记录在这里。</p>
+            </el-empty>
+          </div>
+
+          <div class="vh-foot">记录为计算时的快照，点击后将按当时参数重新计算。</div>
+        </div>
+      </el-drawer>
     </div>
   `,
 });
