@@ -1380,6 +1380,22 @@ const app = createApp({
       ElementPlus.ElMessage.success('已套用 AI 推荐的估值参数并计算');
     }
 
+    // R18：从 AI 估值 params 中取参数值（不存在返回 null，供模板守卫）。
+    function paramValue(v, key) {
+      const p = (v.params || []).find(x => x.key === key);
+      return p ? p.value : null;
+    }
+
+    // R18：一致预期可靠度枚举 → 中文（未知值返回空串，旧响应不报错）。
+    function reliabilityLabel(v) {
+      return { high: '高可靠', medium: '中可靠', unavailable: '不可用' }[v] || '';
+    }
+
+    // R18：留存率口径 → 中文。
+    function retentionBasisLabel(v) {
+      return { payout: '分红口径', equity_growth: '权益增长近似', unavailable: '不可用' }[v] || '';
+    }
+
     function changeRange() {
       if (startYear.value && endYear.value && startYear.value > endYear.value) {
         [startYear.value, endYear.value] = [endYear.value, startYear.value];
@@ -2252,8 +2268,22 @@ const app = createApp({
                     <div>
                       <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">增长假设</div>
                       <div class="ai-v" v-if="aiResult.valuation.base_growth != null">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%<template v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null">（营收 {{ fmtNum(aiResult.valuation.growth_revenue) }}%<template v-if="aiResult.valuation.growth_profit != null"> / 净利润 {{ fmtNum(aiResult.valuation.growth_profit) }}%</template><template v-if="!aiResult.valuation.growth_fcf_excluded && aiResult.valuation.growth_fcf != null"> / FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}%</template>，按可用项等权）</template><template v-if="aiResult.valuation.growth_fcf_excluded">；FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}% 未计入：{{ aiResult.valuation.growth_fcf_exclude_reason }}</template></div>
-                      <div class="ai-v" v-if="aiResult.valuation.model_score || aiResult.valuation.sgr"><template v-if="aiResult.valuation.model_score">模型得分 {{ fmtNum(aiResult.valuation.model_score) }}<template v-if="aiResult.valuation.growth_downside_dispersion > 0">（稳定性按下行波动 {{ fmtNum(aiResult.valuation.growth_downside_dispersion) }} pp 计）</template></template><template v-if="aiResult.valuation.model_score && aiResult.valuation.sgr"> · </template><template v-if="aiResult.valuation.sgr">SGR 上限 {{ fmtNum(aiResult.valuation.sgr) }}%<template v-if="aiResult.valuation.retention_rate != null">（留存率 {{ fmtNum(aiResult.valuation.retention_rate * 100) }}%）</template></template></div>
+                      <div class="ai-v" v-if="aiResult.valuation.growth_composite != null">
+                        三层锚：历史 {{ fmtNum(aiResult.valuation.growth_history) }}%<template v-if="aiResult.valuation.growth_cycle_adjust">（周期修正 {{ fmtNum(aiResult.valuation.growth_cycle_adjust) }}pp → 生效 {{ fmtNum((aiResult.valuation.growth_history || 0) + (aiResult.valuation.growth_cycle_adjust || 0)) }}%）</template> · 前瞻 <template v-if="aiResult.valuation.growth_forward != null">{{ fmtNum(aiResult.valuation.growth_forward) }}%（{{ aiResult.valuation.consensus_institutions }} 家机构，{{ reliabilityLabel(aiResult.valuation.consensus_reliability) }}，截至 {{ aiResult.valuation.consensus_as_of }}）</template><template v-else>不可用</template> · 宏观 {{ fmtNum(aiResult.valuation.growth_macro) }}%<template v-if="aiResult.valuation.growth_macro_basis === 'dynamic_gdp'">（动态 GDP，截至 {{ aiResult.valuation.gdp_as_of }}）</template><template v-else>（回退常量）</template> → 复合锚 {{ fmtNum(aiResult.valuation.growth_composite) }}%
+                      </div>
+                      <div class="ai-v" v-if="aiResult.valuation.cycle_position != null && aiResult.valuation.cycle_position !== 0">
+                        周期位置 {{ aiResult.valuation.cycle_position_label }} {{ fmtNum(aiResult.valuation.cycle_position) }} → 历史锚修正 {{ fmtNum(aiResult.valuation.growth_cycle_adjust) }}pp（{{ aiResult.valuation.cycle_basis }}）
+                      </div>
+                      <div class="ai-v" v-if="aiResult.valuation.negative_growth_type === 'structural' || aiResult.valuation.negative_growth_type === 'cyclical'">
+                        负增长归因：<template v-if="aiResult.valuation.negative_growth_type === 'structural'">结构性负增长，按零增长处理</template><template v-else>周期性负增长，按低永续处理（g={{ fmtNum(paramValue(aiResult.valuation, 'g')) }}%）</template>；正常化 A={{ fmtNum(aiResult.valuation.growth_normalized) }}%（{{ aiResult.valuation.negative_growth_basis }}）
+                      </div>
+                      <div class="ai-v" v-if="aiResult.valuation.model_score || aiResult.valuation.sgr"><template v-if="aiResult.valuation.model_score">模型得分 {{ fmtNum(aiResult.valuation.model_score) }}<template v-if="aiResult.valuation.growth_downside_dispersion > 0">（稳定性按下行波动 {{ fmtNum(aiResult.valuation.growth_downside_dispersion) }} pp 计）</template></template><template v-if="aiResult.valuation.model_score && aiResult.valuation.sgr"> · </template><template v-if="aiResult.valuation.sgr">长期内生增速参考 {{ fmtNum(aiResult.valuation.sgr) }}%<template v-if="aiResult.valuation.retention_rate != null">（留存率 {{ fmtNum(aiResult.valuation.retention_rate * 100) }}%<template v-if="aiResult.valuation.retention_basis">，{{ retentionBasisLabel(aiResult.valuation.retention_basis) }}</template>）</template></template></div>
                       <div class="ai-v" v-if="aiResult.valuation.params && aiResult.valuation.params.length"><span>模型参数</span><span v-for="p in aiResult.valuation.params" :key="p.key" style="margin-left:10px">{{ p.label }} {{ fmtNum(p.value) }}</span></div>
+                      <div class="ai-v" v-if="aiResult.valuation.params && aiResult.valuation.params.length">
+                        最终路径：<template v-if="aiResult.valuation.model === 'perpetual'">永续 g {{ fmtNum(paramValue(aiResult.valuation, 'g')) }}%</template><template v-else-if="aiResult.valuation.model === 'two_stage'">g1 {{ fmtNum(paramValue(aiResult.valuation, 'g1')) }}%（回归 {{ aiResult.valuation.growth_fade_years || paramValue(aiResult.valuation, 'n1') }} 年）→ g∞ {{ fmtNum(paramValue(aiResult.valuation, 'g2')) }}%</template><template v-else-if="aiResult.valuation.model === 'three_stage'">g1 {{ fmtNum(paramValue(aiResult.valuation, 'g1')) }}%（{{ paramValue(aiResult.valuation, 'n1') }} 年）→ g2 {{ fmtNum(paramValue(aiResult.valuation, 'g2')) }}%（{{ paramValue(aiResult.valuation, 'n2') }} 年）→ g∞ {{ fmtNum(paramValue(aiResult.valuation, 'g3')) }}%</template><template v-else>零增长</template>
+                        <template v-if="aiResult.valuation.growth_fade_years"> · 回归年限 {{ aiResult.valuation.growth_fade_years }} 年</template>
+                      </div>
+                      <p class="ai-text" v-if="aiResult.valuation.growth_adjustment">增长调整：{{ aiResult.valuation.growth_adjustment }}</p>
                       <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
                     </div>
                     <!-- 组四：基期现金流（方式/年数/自定义值/周期判定 + 口径说明） -->
@@ -2270,7 +2300,7 @@ const app = createApp({
                       <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">说明</div>
                       <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，且研发投入同比扩张{{ fmtNum((aiResult.valuation.rd_expansion || 0) / 1e8) }} 亿元，建议开启研发调整。</p>
                       <p class="ai-text" v-else-if="aiResult.valuation.rd_ratio > 5">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，但研发投入同比未扩张（或上年数据缺失），不建议开启研发调整。</p>
-                      <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动较大：高增长期增长率已按营收/净利润增速全幅离散度折减（最多 40%）；模型稳定性分只按下行波动计算。</p>
+                      <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动较大：高增长期增长率按离散度折减（最多 5pp，且不突破复合锚 A−5pp 包络）；模型稳定性分只按下行波动计算。</p>
                       <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" style="margin:6px 0" />
                       <p class="ai-text" v-if="aiResult.valuation.base_year">基期年 {{ aiResult.valuation.base_year }}<template v-if="aiResult.valuation.capex_coverage"> · Capex 覆盖率 {{ fmtNum(aiResult.valuation.capex_coverage) }}</template><template v-if="aiResult.valuation.fcf_profit_ratio"> · FCF/净利润 {{ fmtNum(aiResult.valuation.fcf_profit_ratio) }}</template></p>
                       <p class="ai-text">{{ aiResult.valuation.rationale }}</p>

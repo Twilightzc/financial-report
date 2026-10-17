@@ -159,7 +159,8 @@ func TestVerifyRecommendModelBandsEndToEnd(t *testing.T) {
 		})
 	}
 
-	// 剧烈波动且高增长（营收同比极差 45pp）：g1 = clamp(round(X×(1−18%)), -5, 30)，g2=gk+1、g3=gk。
+	// 剧烈波动且高增长（营收同比极差 45pp）：A 收口 30 → 离散度折减 5pp（25）
+	// → 仅历史+宏观（宏观回退不计锚）包络 A−3pp → g1=27。
 	t.Run("剧烈波动且三阶段", func(t *testing.T) {
 		income := vfyRevFixture(map[int]float64{2021: 100, 2022: 105, 2023: 157.5, 2024: 236.25},
 			[]int{2021, 2022, 2023, 2024})
@@ -173,9 +174,9 @@ func TestVerifyRecommendModelBandsEndToEnd(t *testing.T) {
 		if rec.Model != valModelThreeStage {
 			t.Fatalf("X=%.2f%% 应为 three_stage，实际 %s", rec.BaseGrowth, rec.Model)
 		}
-		// X=50 → 50×(1−0.18)=41 → clamp 上限 30。
-		if got := vfyValue(t, rec.Params, "g1"); got != 30 {
-			t.Errorf("剧烈波动时 g1 = %v，期望 clamp(round(50×0.82), -5, 30)=30", got)
+		// A=clamp(round(0.85×50+0.15×4.5), -5, 30)=30；折减 5pp=25；A−3pp 包络=27。
+		if got := vfyValue(t, rec.Params, "g1"); got != 27 {
+			t.Errorf("剧烈波动时 g1 = %v，期望 A−3pp 包络=27", got)
 		}
 		g1, g2, g3 := vfyValue(t, rec.Params, "g1"), vfyValue(t, rec.Params, "g2"), vfyValue(t, rec.Params, "g3")
 		if !(g1 > g2 && g2 > g3) {
@@ -239,43 +240,53 @@ func TestVerifyRecommendOutputGridCompliance(t *testing.T) {
 			if rec.ModelName != valuationModelNames[rec.Model] {
 				t.Errorf("模型中文名 = %q，期望 %q", rec.ModelName, valuationModelNames[rec.Model])
 			}
-			// 参数逐个校验网格（终值网格放宽为 [0,4]；三阶段 g2=gk+1 不是终值）。
+			// 参数逐个校验 0.5pp 网格（R18：所有 g 参数统一 0.5pp；n 为整数年）。
 			gk := prGk(t, rec)
 			for _, p := range rec.Params {
 				switch p.Key {
+				case "g", "g1", "g2", "g3":
+					if math.Abs(p.Value*2-math.Round(p.Value*2)) > 1e-9 {
+						t.Errorf("%s=%v 不在 0.5pp 网格", p.Key, p.Value)
+					}
+				}
+				switch p.Key {
 				case "g":
-					if p.Value < 0 || p.Value > gk || p.Value != math.Trunc(p.Value) {
-						t.Errorf("g=%v 应为 [0,%v] 内整数", p.Value, gk)
+					if p.Value < 0 || p.Value > gk {
+						t.Errorf("g=%v 应为 [0,%v]", p.Value, gk)
 					}
 					if p.Value >= rec.DiscountRate {
 						t.Errorf("g=%v 应小于折现率 %v（R4 校验）", p.Value, rec.DiscountRate)
 					}
 				case "g2":
-					want := gk
 					if rec.Model == valModelThreeStage {
-						want = gk + 1
-					}
-					if p.Value != want {
-						t.Errorf("g2=%v，期望 %v", p.Value, want)
+						if !(p.Value > gk && p.Value < vfyValue(t, rec.Params, "g1")) {
+							t.Errorf("三阶段 g2=%v 应在 (g∞=%v, g1) 之间", p.Value, gk)
+						}
+					} else if p.Value != gk {
+						t.Errorf("两阶段 g2=%v，期望 g∞=%v", p.Value, gk)
 					}
 				case "g3":
 					if p.Value != gk {
-						t.Errorf("g3=%v，期望 gk=%v", p.Value, gk)
+						t.Errorf("g3=%v，期望 g∞=%v", p.Value, gk)
 					}
 					if p.Value >= rec.DiscountRate {
 						t.Errorf("g3=%v 应小于折现率 %v（R4 校验）", p.Value, rec.DiscountRate)
 					}
 				case "g1":
-					if p.Value < -5 || p.Value > 30 || p.Value != math.Trunc(p.Value) {
-						t.Errorf("g1=%v 应为 [-5,30] 内整数", p.Value)
+					if p.Value < -5 || p.Value > 30 {
+						t.Errorf("g1=%v 应为 [-5,30]", p.Value)
 					}
 				case "n1":
-					if p.Value < 5 || p.Value > 10 || p.Value != math.Trunc(p.Value) {
-						t.Errorf("n1=%v 应为 [5,10] 内整数", p.Value)
+					lo, hi := 3, 10
+					if rec.Model == valModelThreeStage {
+						lo, hi = 2, 5
+					}
+					if p.Value < float64(lo) || p.Value > float64(hi) || p.Value != math.Trunc(p.Value) {
+						t.Errorf("n1=%v 应为 [%d,%d] 内整数", p.Value, lo, hi)
 					}
 				case "n2":
-					if p.Value < 3 || p.Value > 5 || p.Value != math.Trunc(p.Value) {
-						t.Errorf("n2=%v 应为 [3,5] 内整数", p.Value)
+					if p.Value < 1 || p.Value > 5 || p.Value != math.Trunc(p.Value) {
+						t.Errorf("n2=%v 应为 [1,5] 内整数", p.Value)
 					}
 				default:
 					t.Errorf("出现网格外的参数 key：%q", p.Key)
@@ -288,10 +299,10 @@ func TestVerifyRecommendOutputGridCompliance(t *testing.T) {
 					t.Errorf("三阶段参数应严格递减：g1=%v g2=%v g3=%v", g1, g2, g3)
 				}
 			}
-			// C4：g1 不超过 floor(SGR)（SGR 不可用时不设上限）。
+			// C4a：终值 g∞ 不高于 SGR（SGR 可用时）；C4b 允许 g1 > SGR（只告警）。
 			if rec.SGR > 0 {
-				if g1 := vfyValue(t, rec.Params, "g1"); g1 > math.Floor(rec.SGR) {
-					t.Errorf("g1=%v 超过 floor(SGR)=%v（C4 违反）", g1, math.Floor(rec.SGR))
+				if gk > rec.SGR+1e-9 {
+					t.Errorf("g∞=%v 超过 SGR=%v（C4a 违反）", gk, rec.SGR)
 				}
 			}
 			// 基准增速样本不足 → 模型必为 zero（唯一例外）；分项样本不足的说明不在此列。
@@ -399,7 +410,7 @@ func TestVerifyPromptOnlyExplains(t *testing.T) {
 	if !strings.Contains(system, "不得") {
 		t.Errorf("系统提示词应明确禁止大模型改数：%s", system)
 	}
-	for _, want := range []string{"基准增速 X：0.00%", "零增长模型", "zero", "10.0%", "提示：w"} {
+	for _, want := range []string{"复合增长锚 A：0.00%", "零增长模型", "zero", "10.0%", "提示：w", "长期内生增速参考"} {
 		if !strings.Contains(user, want) {
 			t.Errorf("用户消息缺少「%s」：%s", want, user)
 		}
@@ -418,7 +429,7 @@ func vfyKeys(params []model.AIValuationParam) []string {
 	return keys
 }
 
-// prGk 从推荐结果反推本次推导使用的永续增长率 gk（zero 模型无参数时按折现率重算）。
+// prGk 从推荐结果反推本次推导使用的终值 g∞（zero 模型无参数时按同一口径重算）。
 func prGk(t *testing.T, rec model.ValuationRecommendation) float64 {
 	t.Helper()
 	switch rec.Model {
@@ -429,7 +440,8 @@ func prGk(t *testing.T, rec model.ValuationRecommendation) float64 {
 	case valModelPerpetual:
 		return vfyValue(t, rec.Params, "g")
 	default:
-		return math.Min(valLongTermGDP, perpetualGrowthRaw(rec.DiscountRate))
+		gInf, _ := terminalGrowth(r18GDPFallbackPP, rec.DiscountRate, 0, false)
+		return gInf
 	}
 }
 

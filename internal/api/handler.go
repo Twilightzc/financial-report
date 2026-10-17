@@ -24,6 +24,8 @@ type Handler struct {
 	aiBaseURL string
 	// aiCache AI 分析结果内存缓存（技术设计 §19.15），生命周期与 Handler 一致。
 	aiCache *aiResultCache
+	// growth R18 外部增长快照（一致预期/GDP/分红）24h 缓存，生命周期与 Handler 一致。
+	growth *growthSnapshotCache
 	// history 估值历史记录文件存储（可为 nil，handler 需防御）。
 	history *store.ValuationHistoryStore
 }
@@ -44,6 +46,7 @@ func NewHandler(c *client.Client, aiAPIKey, aiModel, aiBaseURL string,
 		aiModel:   aiModel,
 		aiBaseURL: aiBaseURL,
 		aiCache:   newAIResultCache(),
+		growth:    newGrowthSnapshotCache(),
 		history:   history,
 	}
 }

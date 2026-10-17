@@ -69,6 +69,32 @@ func sampleRecommendation() model.ValuationRecommendation {
 		CapexCoverage:            1.5,
 		DeltaNWCRatio:            0.4,
 		FCFProfitRatio:           1.2,
+		// R18：三层锚 / 周期位置 / 负增长归因 / 一致预期 / 路径与调整（只读展示字段）。
+		GrowthHistory:         12.5,
+		GrowthForward:         14.0,
+		GrowthForwardOK:       true,
+		GrowthMacro:           4.5,
+		GrowthMacroBasis:      "dynamic_gdp",
+		GDPAsOf:               "2026-06-30",
+		GrowthComposite:       12.5,
+		GrowthNormalized:      12.5,
+		GrowthCycleAdjust:     -3.2,
+		CyclePosition:         0.32,
+		CyclePositionLabel:    "高位",
+		CycleBasis:            "窗口 2022、2023、2024；GMpos=0.32、NMpos=0.32；毛利率极差 10.00pp、净利率极差 5.00pp",
+		NegativeGrowthType:    "none",
+		NegativeGrowthBasis:   "A≥0，无需负增长归因",
+		ConsensusFetched:      true,
+		ConsensusAsOf:         "2026-09-21",
+		ConsensusInstitutions: 30,
+		ConsensusYears:        3,
+		ConsensusReliability:  "high",
+		GrowthFadeYears:       6,
+		GrowthTerminal:        3,
+		GrowthCap:             18,
+		SGRRole:               "long_run_reference",
+		RetentionBasis:        "payout",
+		GrowthAdjustment:      "无向下调整",
 	}
 }
 
@@ -114,59 +140,44 @@ func paramKeys(params []model.AIValuationParam) []string {
 	return keys
 }
 
-// TestClassifyModelScore 多信号评分落档：§19.6.4 六个算例 + 硬闸门 + 缺失信号归一化。
-func TestClassifyModelScore(t *testing.T) {
+// TestClassifyGrowthModel R18：评分只算分，落档按 A/gap/score/负增长归因。
+func TestClassifyGrowthModel(t *testing.T) {
 	cases := []struct {
-		name       string
-		x          float64
-		dispersion float64
-		stability  bool
-		roe        []float64
-		insuff     bool
-		wantModel  string
-		wantScore  float64
-		wantSG     float64 // 增速分 sg
-		wantST     float64 // 稳定性分 st（不可用时为 0）
-		wantSR     float64 // ROE 分 sr（不可用时为 0）
-		wantHasST  bool
-		wantHasROE bool
+		name          string
+		A, gap, score float64
+		insufficient  bool
+		negType       string
+		want          string
 	}{
-		{"三阶段算例", 20, 0, true, []float64{20, 20, 20}, false, valModelThreeStage, 80.0, 70, 100, 90, true, true},
-		{"两阶段算例(波动)", 20, 50, true, []float64{10, 10}, false, valModelTwoStage, 52.0, 70, 0, 50, true, true},
-		{"两阶段算例(X12)", 12, 20, true, []float64{18, 18}, false, valModelTwoStage, 58.4, 50, 60, 82, true, true},
-		{"永续算例(X5硬闸门)", 5, 10, true, []float64{15, 15}, false, valModelPerpetual, 49.5, 32.5, 80, 70, true, true},
-		{"X2硬规则归零", 2, 0, true, []float64{30, 30}, false, valModelZero, 55.0, 25, 100, 100, true, true},
-		{"三阶段算例(X25)", 25, 20, true, []float64{22, 22}, false, valModelThreeStage, 81.1, 82.5, 60, 98, true, true},
-		// 缺 ROE → 权重按 0.8 归一化（不是把 ROE 当 0 分）：(0.6×70 + 0.2×100)/0.8 = 77.5。
-		{"缺ROE归一化", 20, 0, true, nil, false, valModelThreeStage, 77.5, 70, 100, 0, true, false},
-		// 缺稳定性信号 → 同样按剩余权重归一化：(0.6×70 + 0.2×90)/0.8 = 75。
-		{"缺稳定性归一化", 20, 0, false, []float64{20, 20}, false, valModelThreeStage, 75.0, 70, 0, 90, false, true},
-		// 增速不足样本 → 直接零增长（无论得分）。
-		{"样本不足", 20, 0, true, []float64{20, 20}, true, valModelZero, 80.0, 70, 100, 90, true, true},
-		// 得分 <25 且 X≥3 → zero。
-		{"得分过低", 4, 60, true, []float64{0, 0}, false, valModelZero, 18.0, 30, 0, 0, true, true},
+		{"样本不足", 20, 10, 90, true, "none", valModelZero},
+		{"结构性负增长", -2, -6, 30, false, "structural", valModelZero},
+		{"周期性负增长", -2, -6, 30, false, "cyclical", valModelPerpetual},
+		{"三阶段", 20, 10, 80, false, "none", valModelThreeStage},
+		{"gap 不足→两阶段", 20, 3, 80, false, "none", valModelTwoStage},
+		{"A=10→两阶段", 10, 5, 60, false, "none", valModelTwoStage},
+		{"A=5→两阶段(得分够)", 5, 5, 60, false, "none", valModelTwoStage},
+		{"A=1→永续", 1, 3, 60, false, "none", valModelPerpetual},
+		{"gap<1.5→永续", 20, 1, 90, false, "none", valModelPerpetual},
+		{"得分低→永续", 8, 4, 30, false, "none", valModelPerpetual},
+		{"A=0→永续", 0, 4, 80, false, "none", valModelPerpetual},
 	}
 	for _, c := range cases {
-		res := classifyModelScore(c.x, c.dispersion, c.stability, c.roe, c.insuff)
-		if res.Model != c.wantModel {
-			t.Errorf("%s：model = %s，期望 %s（score=%v）", c.name, res.Model, c.wantModel, res.Score)
+		if got, _, _ := classifyGrowthModel(c.A, c.gap, c.score, c.insufficient, c.negType); got != c.want {
+			t.Errorf("%s：model = %s，期望 %s", c.name, got, c.want)
 		}
-		if math.Abs(res.Score-c.wantScore) > 1e-9 {
-			t.Errorf("%s：score = %v，期望 %v", c.name, res.Score, c.wantScore)
-		}
-		if math.Abs(res.ScoreGrowth-c.wantSG) > 1e-9 {
-			t.Errorf("%s：增速分 sg = %v，期望 %v", c.name, res.ScoreGrowth, c.wantSG)
-		}
-		if math.Abs(res.ScoreStability-c.wantST) > 1e-9 {
-			t.Errorf("%s：稳定性分 st = %v，期望 %v", c.name, res.ScoreStability, c.wantST)
-		}
-		if math.Abs(res.ScoreROE-c.wantSR) > 1e-9 {
-			t.Errorf("%s：ROE 分 sr = %v，期望 %v", c.name, res.ScoreROE, c.wantSR)
-		}
-		if res.HasStability != c.wantHasST || res.HasROE != c.wantHasROE {
-			t.Errorf("%s：可用性 = (st:%v, roe:%v)，期望 (%v,%v)",
-				c.name, res.HasStability, res.HasROE, c.wantHasST, c.wantHasROE)
-		}
+	}
+
+	// 评分分项：增速分 = clamp(20+2.5A)，稳定性分只按下行波动，缺失信号按剩余权重归一化。
+	res := scoreSignals(20, 0, true, []float64{20, 20, 20})
+	if !approxEq(res.Score, 80, 1e-9) || !approxEq(res.ScoreGrowth, 70, 1e-9) ||
+		!approxEq(res.ScoreStability, 100, 1e-9) || !approxEq(res.ScoreROE, 90, 1e-9) {
+		t.Errorf("scoreSignals = %+v，期望 score=80/sg=70/st=100/sr=90", res)
+	}
+	if res := scoreSignals(20, 0, false, []float64{20, 20}); !approxEq(res.Score, 75, 1e-9) || res.HasStability {
+		t.Errorf("缺稳定性应归一化为 75：score=%v hasSt=%v", res.Score, res.HasStability)
+	}
+	if res := scoreSignals(20, 0, true, nil); !approxEq(res.Score, 77.5, 1e-9) || res.HasROE {
+		t.Errorf("缺 ROE 应归一化为 77.5：score=%v hasROE=%v", res.Score, res.HasROE)
 	}
 }
 
@@ -311,61 +322,95 @@ func TestRecommendValuationInsufficientData(t *testing.T) {
 	}
 }
 
-// TestRecommendParamsThreeStage G7：三阶段 g2=gk+1、严格递减与降级链。
-func TestRecommendParamsThreeStage(t *testing.T) {
-	// gk=4、X=20、SGR 不可用 → g1=20、g2=5、g3=4（修复旧 min(4,gk+1) 的 g2=g3 退化）。
-	pr := recommendParams(valModelThreeStage, 20, 0, 4, nil)
-	if pr.Model != valModelThreeStage || pr.Degraded || pr.Warning != "" {
-		t.Errorf("三阶段主路径：model=%s degraded=%v warning=%q，期望 three_stage/无降级", pr.Model, pr.Degraded, pr.Warning)
+// TestConstructGrowthPath R18：0.5pp 网格、均值回归年限拆分与降级链。
+func TestConstructGrowthPath(t *testing.T) {
+	// A=20、g∞=4、gap=8 → nTotal=clamp(round(8/1.5),3,10)=5，n1=3、n2=2；
+	// g2=min(roundHalf(4+8/2), 8−0.5)=min(8,7.5)=7.5，严格递减 20 > 7.5 > 4。
+	p := constructGrowthPath(valModelThreeStage, 20, 4, 8, 20, 8)
+	if p.Model != valModelThreeStage || p.Degraded || p.Warning != "" {
+		t.Errorf("三阶段主路径：model=%s degraded=%v warning=%q，期望 three_stage/无降级", p.Model, p.Degraded, p.Warning)
 	}
-	if pr.G1 != 20 || pr.G2 != 5 || pr.G3 != 4 {
-		t.Errorf("三阶段参数 = (%v,%v,%v)，期望 (20,5,4)", pr.G1, pr.G2, pr.G3)
+	if p.G1 != 20 || p.G2 != 7.5 || p.GInf != 4 || p.N1 != 3 || p.N2 != 2 || p.NTotal != 5 {
+		t.Errorf("三阶段路径 = %+v，期望 g1=20/g2=7.5/g∞=4/n1=3/n2=2/nTotal=5", p)
 	}
-	if !(pr.G1 > pr.G2 && pr.G2 > pr.G3) {
-		t.Errorf("三阶段应严格递减：%v > %v > %v", pr.G1, pr.G2, pr.G3)
-	}
-	if got := paramKeys(pr.Params); !reflect.DeepEqual(got, []string{"g1", "n1", "g2", "n2", "g3"}) {
-		t.Errorf("三阶段 key = %v", got)
+	if !(p.G1 > p.G2 && p.G2 > p.GInf) {
+		t.Errorf("三阶段应严格递减：%v > %v > %v", p.G1, p.G2, p.GInf)
 	}
 
-	// SGR 把 g1 压到 5（=g2）→ 无法严格递减 → 降为两阶段（g1=5 > g2=4）。
-	sgr := 5.0
-	pr = recommendParams(valModelThreeStage, 20, 0, 4, &sgr)
-	if pr.Model != valModelTwoStage || !pr.Degraded || pr.Warning == "" {
-		t.Errorf("SGR 压低 g1 后应降为两阶段：model=%s degraded=%v warning=%q", pr.Model, pr.Degraded, pr.Warning)
+	// g1 不高于平滑解 g2 → 三阶段无解 → 降为两阶段（5 > 4）。
+	p = constructGrowthPath(valModelThreeStage, 20, 4, 4.5, 5, 8)
+	if p.Model != valModelTwoStage || !p.Degraded || p.Warning == "" {
+		t.Errorf("三阶段无严格递减解应降为两阶段：model=%s degraded=%v warning=%q", p.Model, p.Degraded, p.Warning)
 	}
-	if pr.G1 != 5 || pr.G2 != 4 {
-		t.Errorf("降级两阶段参数 = (%v,%v)，期望 (5,4)", pr.G1, pr.G2)
-	}
-
-	// X=3、gk=4：三阶段 → 两阶段都不满足严格递减 → 降为永续（g=round(g1)=3）。
-	pr = recommendParams(valModelThreeStage, 3, 0, 4, nil)
-	if pr.Model != valModelPerpetual || !pr.Degraded || pr.Warning == "" {
-		t.Errorf("X=3/gk=4 应降为永续：model=%s degraded=%v warning=%q", pr.Model, pr.Degraded, pr.Warning)
-	}
-	if got := paramValue(t, pr.Params, "g"); got != 3 {
-		t.Errorf("降级永续 g = %v，期望 clamp(round(3),0,4)=3", got)
+	if p.G1 != 5 || p.G2 != 4 || p.N1 != fadeYears(4.5) {
+		t.Errorf("降级两阶段路径 = %+v，期望 g1=5/g2=4/n1=%d", p, fadeYears(4.5))
 	}
 
-	// 负增速直接零增长。
-	pr = recommendParams(valModelTwoStage, -2, 0, 4, nil)
-	if pr.Model != valModelZero || !pr.Degraded || len(pr.Params) != 0 {
-		t.Errorf("负增速应降为零增长：%+v", pr)
+	// 两阶段 g1 不高出终值 → 降为永续，g=clamp(roundHalf(A),0,g∞)。
+	p = constructGrowthPath(valModelTwoStage, 4, 4, 4, 4, 8)
+	if p.Model != valModelPerpetual || !p.Degraded || p.Warning == "" {
+		t.Errorf("两阶段无严格递减解应降为永续：model=%s degraded=%v warning=%q", p.Model, p.Degraded, p.Warning)
+	}
+	if p.G2 != 4 {
+		t.Errorf("降级永续 g = %v，期望 clamp(roundHalf(4),0,4)=4", p.G2)
 	}
 
-	// 连续折减：D=40pp → g1 = round(20×0.84) = 17；D≥100 → 折减封顶 40%。
-	if pr := recommendParams(valModelThreeStage, 20, 40, 4, nil); pr.G1 != 17 {
-		t.Errorf("D=40 时 g1 = %v，期望 17", pr.G1)
+	// 永续：g=clamp(roundHalf(A),0,g∞)；A=3.26 → 3.5。
+	if p := constructGrowthPath(valModelPerpetual, 3.26, 4, 0.74, 3.26, 8); p.G2 != 3.5 {
+		t.Errorf("永续 g = %v，期望 roundHalf(3.26)=3.5", p.G2)
 	}
-	if pr := recommendParams(valModelThreeStage, 20, 200, 4, nil); pr.G1 != 12 {
-		t.Errorf("D=200 时 g1 = %v，期望 12（折减封顶 40%%）", pr.G1)
+	// 周期性负增长 A<0 → 低永续 g=0，模型仍为 perpetual。
+	if p := constructGrowthPath(valModelPerpetual, -2, 4, -6, -2, 8); p.Model != valModelPerpetual || p.G2 != 0 {
+		t.Errorf("周期性负增长应走低永续 g=0，实际 %+v", p)
 	}
+	// zero 无参数。
+	if p := constructGrowthPath(valModelZero, 0, 4, -4, 0, 8); p.Model != valModelZero || p.NTotal != 0 {
+		t.Errorf("zero 路径 = %+v", p)
+	}
+}
 
-	// SGR 上限：floor(8.7)=8 → g1 由 20 下调到 8，并给出提示。
-	sgr = 8.7
-	pr = recommendParams(valModelThreeStage, 20, 0, 2, &sgr)
-	if pr.G1 != 8 || !strings.Contains(pr.Warning, "可持续增长率") {
-		t.Errorf("SGR=8.7 时 g1=%v warning=%q，期望 8 且提示 SGR 约束", pr.G1, pr.Warning)
+// TestApplyDownwardAdjustments M2：离散度折减（≤5pp、周期高点减半）、软上限、M1 包络。
+func TestApplyDownwardAdjustments(t *testing.T) {
+	noFwd := forwardAnchor{}
+	type c struct {
+		name       string
+		A, gap     float64
+		dispersion float64
+		delta      float64
+		fwd        forwardAnchor
+		sgr        float64
+		sgrOK      bool
+		envelope   float64
+		wantG1     float64
+		wantCap    float64
+		wantWords  string
+	}
+	cases := []c{
+		{"无调整", 10, 6, 0, 0, noFwd, 0, false, 5, 10, 15, "SGR/前瞻软上限 15.0% 未触发"},
+		{"离散度折减", 20, 16, 40, 0, noFwd, 0, false, 5, 17, 25, "折减 3.2pp"},
+		{"离散度折减封顶5pp", 20, 16, 100, 0, noFwd, 0, false, 5, 15, 25, "折减 5.0pp"},
+		{"周期高点折减减半", 20, 16, 40, 3, noFwd, 0, false, 5, 18.5, 25, "折减减半至 1.6pp"},
+		{"包络下限(仅3pp)", 20, 16, 100, 0, noFwd, 0, false, 3, 17, 25, "包络下限"},
+		{"软上限与包络冲突", 20, 16, 0, 0, forwardAnchor{Available: true, Value: 5}, 0, false, 5, 15, 10, "唯一主导原因"},
+		{"软上限生效", 12, 8, 0, 0, forwardAnchor{Available: true, Value: 5}, 6, true, 5, 11, 11, "g1 由 12.0% 收口至 11.0%"},
+	}
+	for _, x := range cases {
+		g1, cap, msg := applyDownwardAdjustments(x.A, x.gap, x.dispersion, x.delta, x.fwd, x.sgr, x.sgrOK, x.envelope)
+		if !approxEq(g1, x.wantG1, 1e-9) {
+			t.Errorf("%s：g1 = %v，期望 %v", x.name, g1, x.wantG1)
+		}
+		if !approxEq(cap, x.wantCap, 1e-9) {
+			t.Errorf("%s：cap = %v，期望 %v", x.name, cap, x.wantCap)
+		}
+		if !strings.Contains(msg, x.wantWords) {
+			t.Errorf("%s：调整说明 %q 应含 %q", x.name, msg, x.wantWords)
+		}
+		if math.Abs(g1*2-math.Round(g1*2)) > 1e-9 {
+			t.Errorf("%s：g1=%v 不在 0.5pp 网格", x.name, g1)
+		}
+		if g1 < x.A-x.envelope-1e-9 {
+			t.Errorf("%s：g1=%v 低于 M1 包络下限 %v", x.name, g1, x.A-x.envelope)
+		}
 	}
 }
 
@@ -406,52 +451,69 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 	}
 	discounts := []float64{8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0}
 	for _, d := range discounts {
-		gk := math.Min(valLongTermGDP, perpetualGrowthRaw(d))
-		if gk != 2 && gk != 3 && gk != 4 {
-			t.Fatalf("永续增长率 %v 不在网格 {2,3,4}", gk)
+		// 零快照 → 宏观锚回退 4.5% → g∞=4.5；所有档位必须使用同一个 g∞。
+		gInf, _ := terminalGrowth(r18GDPFallbackPP, d, 0, false)
+		if gInf != 4.5 {
+			t.Fatalf("回退宏观锚下 g∞ = %v，期望 4.5", gInf)
 		}
-		for _, x := range []float64{0, 3, 8, 12, 19.9, 20, 30, 40} {
-			mdl := classifyModelScore(x, 0, false, nil, false).Model
-			pr := recommendParams(mdl, x, 0, gk, nil)
+		for _, x := range []float64{0, 3, 8, 12, 19.9, 20, 30} {
+			sc := scoreSignals(x, 0, false, nil).Score
+			gap := x - gInf
+			negType := "none"
+			if x < 0 {
+				negType = "structural"
+			}
+			mdl, _, _ := classifyGrowthModel(x, gap, sc, false, negType)
+			g1, _, _ := applyDownwardAdjustments(x, gap, 0, 0, forwardAnchor{}, 0, false, r18EnvelopePP)
+			path := constructGrowthPath(mdl, x, gInf, gap, g1, d)
+			pr := paramsFromPath(path)
 			if got := paramKeys(pr.Params); !reflect.DeepEqual(got, wantKeys[pr.Model]) {
 				t.Fatalf("x=%v 分类 %s 生效 %s 的参数 key = %v，期望 %v", x, mdl, pr.Model, got, wantKeys[pr.Model])
 			}
 			for _, p := range pr.Params {
 				switch p.Key {
-				case "g": // 降级永续：终值网格放宽为 [0, gk] 整数
-					if p.Value < 0 || p.Value > gk || p.Value != math.Trunc(p.Value) {
-						t.Errorf("x=%v g=%v 应为 [0,%v] 内的整数", x, p.Value, gk)
+				case "g", "g1", "g2", "g3":
+					if math.Abs(p.Value*2-math.Round(p.Value*2)) > 1e-9 {
+						t.Errorf("x=%v %s=%v 不在 0.5pp 网格", x, p.Key, p.Value)
 					}
-					if p.Value >= d {
-						t.Errorf("x=%v g=%v 应小于折现率 %v（R4 校验）", x, p.Value, d)
-					}
-				case "g2": // 两阶段 g2=gk；三阶段 g2=gk+1（非终值，不受长期 GDP 上限约束）
-					want := gk
-					if pr.Model == valModelThreeStage {
-						want = gk + 1
-					}
-					if p.Value != want {
-						t.Errorf("x=%v 模型 %s 的 g2=%v，期望 %v", x, pr.Model, p.Value, want)
-					}
-					if p.Value >= d {
-						t.Errorf("x=%v g2=%v 应小于折现率 %v（R4 终值校验基于 g3，此处防误配）", x, p.Value, d)
-					}
-				case "g3":
-					if p.Value != gk || p.Value >= d {
-						t.Errorf("x=%v g3=%v，期望 gk=%v 且 < 折现率 %v", x, p.Value, gk, d)
+				}
+				switch p.Key {
+				case "g": // 永续：g ∈ [0, g∞]，且必然 < 折现率
+					if p.Value < 0 || p.Value > gInf {
+						t.Errorf("x=%v g=%v 应为 [0,%v]", x, p.Value, gInf)
 					}
 				case "g1":
-					if p.Value < valGrowthMin || p.Value > valGrowthMax || p.Value != math.Trunc(p.Value) {
-						t.Errorf("x=%v g1=%v 应为 [-5,30] 内的整数", x, p.Value)
+					if p.Value < valGrowthMin-1e-9 || p.Value > valGrowthMax+1e-9 {
+						t.Errorf("x=%v g1=%v 应在 [%v,%v]", x, p.Value, valGrowthMin, valGrowthMax)
+					}
+				case "g2":
+					if p.Value >= d {
+						t.Errorf("x=%v g2=%v 应小于折现率 %v", x, p.Value, d)
+					}
+					if pr.Model == valModelTwoStage && p.Value != gInf {
+						t.Errorf("x=%v 两阶段 g2=%v，期望 g∞=%v", x, p.Value, gInf)
+					}
+					if pr.Model == valModelThreeStage && !(p.Value > gInf && p.Value < pr.G1) {
+						t.Errorf("x=%v 三阶段应 g1>%v>g∞：g1=%v", x, p.Value, pr.G1)
+					}
+				case "g3":
+					if p.Value != gInf || p.Value >= d {
+						t.Errorf("x=%v g3=%v，期望 g∞=%v 且 < 折现率 %v", x, p.Value, gInf, d)
 					}
 				case "n1":
-					if p.Value < 5 || p.Value > 10 || p.Value != math.Trunc(p.Value) {
-						t.Errorf("x=%v n1=%v 应为 [5,10] 内的整数", x, p.Value)
+					if p.Value < 1 || p.Value != math.Trunc(p.Value) {
+						t.Errorf("x=%v n1=%v 应为正整数", x, p.Value)
 					}
 				case "n2":
-					if p.Value < 3 || p.Value > 5 || p.Value != math.Trunc(p.Value) {
-						t.Errorf("x=%v n2=%v 应为 [3,5] 内的整数", x, p.Value)
+					if p.Value < 1 || p.Value != math.Trunc(p.Value) {
+						t.Errorf("x=%v n2=%v 应为正整数", x, p.Value)
 					}
+				}
+			}
+			if pr.Model == valModelTwoStage || pr.Model == valModelThreeStage {
+				n := pr.N1 + pr.N2
+				if n < r18FadeMinYears || n > r18FadeMaxYears {
+					t.Errorf("x=%v 回归年限 %d 应在 [%d,%d]", x, n, r18FadeMinYears, r18FadeMaxYears)
 				}
 			}
 		}
@@ -675,13 +737,14 @@ func TestRecommendDiscountRate(t *testing.T) {
 		}
 	})
 
-	t.Run("恒有Rate>gk", func(t *testing.T) {
+	t.Run("恒有Rate>终值", func(t *testing.T) {
 		for _, in := range []string{"", "cyclical", "general", "utility"} {
 			for _, rp := range []int{0, 1, 2, 3} {
 				dr := recommendDiscountRate(debtFreeBalance(1000), empty, 2024, false, in, rp, true)
-				gk := math.Min(valLongTermGDP, perpetualGrowthRaw(dr.Rate))
-				if dr.Rate <= gk {
-					t.Errorf("行业 %q 风险点 %d：Rate %v 应 > gk %v", in, rp, dr.Rate, gk)
+				// 宏观锚取上限 10% 时，终值仍被折现率−1pp 压制（R4 要求 g < r）。
+				gInf, _ := terminalGrowth(r18GDPCeil, dr.Rate, 0, false)
+				if dr.Rate <= gInf {
+					t.Errorf("行业 %q 风险点 %d：Rate %v 应 > 终值 %v", in, rp, dr.Rate, gInf)
 				}
 			}
 		}
@@ -984,10 +1047,18 @@ func TestRecommendValuationParamsPassR4Validation(t *testing.T) {
 	rec := RecommendValuation(balance, cashflow, income)
 	// P4：Warning 可能包含 C5/C6/SGR 等正常口径说明，不再断言为空；
 	// 改为断言「参数本身」满足 R4 校验（§19.8.9 #9）。
-	if rec.SGR > 0 {
-		if g1 := paramValue(t, rec.Params, "g1"); g1 > math.Floor(rec.SGR) {
-			t.Errorf("g1=%v 超过 floor(SGR)=%v（C4 违反）", g1, math.Floor(rec.SGR))
-		}
+	// R18 C4a 只约束终值 g∞ ≤ SGR；高增长期 g1 仅软约束（C4b 告警不降级）。
+	var gInf float64
+	switch rec.Model {
+	case valModelThreeStage:
+		gInf = paramValue(t, rec.Params, "g3")
+	case valModelTwoStage:
+		gInf = paramValue(t, rec.Params, "g2")
+	case valModelPerpetual:
+		gInf = paramValue(t, rec.Params, "g")
+	}
+	if rec.SGR > 0 && gInf > rec.SGR+1e-9 {
+		t.Errorf("终值 g∞=%v 超过 SGR=%v（C4a 违反）", gInf, rec.SGR)
 	}
 	if _, err := ComputeValuation(balance, cashflow, income, valuationParamsFromRec(rec), 0); err != nil {
 		t.Fatalf("推荐参数喂回 ComputeValuation 应成功，实际报错：%v", err)
@@ -1024,17 +1095,24 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 			t.Errorf("系统提示词缺少行业类型要求「%s」：%s", w, system)
 		}
 	}
-	wants := []string{"基准增速 X：12.50%", rec.BaseGrowthNote, "两阶段模型", "two_stage", "9.0%", "g1=13", "n1=6", "g2=3"}
+	wants := []string{
+		"复合增长锚 A：12.50%", "历史锚 A_hist：12.50%", "前瞻锚 A_fwd：14.00%",
+		"宏观锚 A_macro：4.50%（动态 GDP", rec.BaseGrowthNote,
+		"两阶段模型", "two_stage", "9.0%", "g1=13", "n1=6", "g2=3",
+	}
 	// R13：用户消息须包含基期自由现金流的确定性推荐（方式名 + 口径说明）。
 	wants = append(wants, "基期自由现金流", rec.FCFModeName, rec.FCFRationale)
 	// R15：用户消息须包含行业类型判定要求与折现率构成（预推导口径）。
 	wants = append(wants, "行业类型：请判定并在 industry_type 输出", "折现率构成", "WACC 基线 8.00%", "β 1.00（一般行业）")
 	// R15/P2~P4：基准增速构成、模型分档、SGR、周期、研发双条件与一致性校验各一行。
 	wants = append(wants,
-		"基准增速构成：营收 12.50% / 净利润 12.00% / FCF 10.00%",
-		"（按 3 项等权）；盈利增速极差 20.00 pp；下行波动 5.00 pp（稳定性分按此计算）",
+		"历史锚构成：营收 12.50% / 净利润 12.00% / FCF 10.00%（按 3 项等权）",
+		"盈利波动：全幅极差 20.00 pp；下行波动 5.00 pp（稳定性分按此计算）",
+		"周期位置：高位（+0.32）；历史锚修正 Δ_cycle -3.2pp",
+		"负增长归因：none（A≥0，无需负增长归因）；正常化 A_norm = 12.50%",
 		"模型分档：得分 80.00（增速分 70.00 / 稳定性分 100.00 / ROE 分 90.00）→ 两阶段模型",
-		"可持续增长率：15.00%（留存率 50.0%）",
+		"长期内生增速参考：SGR 15.00%（留存率 50.0%，口径 payout）",
+		"终值 g∞：3.00%；回归年限 n_total：6；增长调整：无向下调整",
 		"周期性：FCF 变异系数 0.20（符号翻转 0 次）→ 原始判据非强周期；成长性豁免未命中（营收 CAGR 12.00%、最小同比 10.00%、强增长年 2/3、毛利率极差 1.00pp）→ 生效判据非强周期；基期 FCF 判定窗口 3 年、方式 近几年中位数",
 		"研发：费用率 6.00%，同比扩张 1.00 亿元 → 建议开启研发调整",
 		"一致性：基期年 2024（利润表 ∩ 现金流量表）",
@@ -1055,7 +1133,7 @@ func TestBuildAIPromptWithRecommendation(t *testing.T) {
 	if strings.Contains(block, "FCF 0.00%") {
 		t.Errorf("FCF 不可用时不得写成 0%%：%s", block)
 	}
-	for _, w := range []string{"FCF 不可用", "盈利增速极差 不可用", "稳定性分 不可用"} {
+	for _, w := range []string{"FCF 不可用", "全幅极差 不可用", "稳定性分 不可用"} {
 		if !strings.Contains(block, w) {
 			t.Errorf("提示词应标注「%s」：%s", w, block)
 		}
@@ -1385,34 +1463,49 @@ func TestBaseGrowthEqualWeight(t *testing.T) {
 	}
 }
 
-// TestGrowthDamping g1 连续折减：D=0/40/100/200 各档 + SGR 上限（floor）告警。
+// TestGrowthDamping R18 M2：离散度折减封顶 5pp（0.5pp 网格），SGR 只走软上限。
 func TestGrowthDamping(t *testing.T) {
 	cases := []struct {
-		damping float64
-		wantG1  float64
+		damping  float64
+		wantCand float64
+		wantG1   float64
+		wantD    float64
 	}{
-		{0, 20},
-		{40, 17},  // 20 × (1 − 0.16) = 16.8 → round 17
-		{100, 12}, // 20 × (1 − 0.40) = 12
-		{200, 12}, // clamp 上限 40%
+		{0, 20, 20, 0},
+		{40, 16.8, 17, 3.2}, // 20 × 0.16 = 3.2pp → 16.8 → 17
+		{100, 15, 15, 5},    // 折减绝对幅度封顶 5pp
+		{200, 15, 15, 5},    // factor 封顶 0.40 → 仍受 5pp 限制
 	}
 	for _, c := range cases {
-		pr := recommendParams(valModelThreeStage, 20, c.damping, 4, nil)
-		if pr.G1 != c.wantG1 {
-			t.Errorf("D=%v：g1 = %v，期望 %v", c.damping, pr.G1, c.wantG1)
+		cand, d := dampedCandidate(20, c.damping, 0)
+		if !approxEq(cand, c.wantCand, 1e-9) || !approxEq(d, c.wantD, 1e-9) {
+			t.Errorf("D=%v：candidate=%v d=%v，期望 %v/%v", c.damping, cand, d, c.wantCand, c.wantD)
+		}
+		g1, _, _ := applyDownwardAdjustments(20, 16, c.damping, 0, forwardAnchor{}, 0, false, r18EnvelopePP)
+		if !approxEq(g1, c.wantG1, 1e-9) {
+			t.Errorf("D=%v：g1 = %v，期望 %v", c.damping, g1, c.wantG1)
 		}
 	}
 
-	sgr := 12.0
-	pr := recommendParams(valModelThreeStage, 20, 0, 4, &sgr)
-	if pr.G1 != 12 || !strings.Contains(pr.Warning, "可持续增长率") {
-		t.Errorf("SGR=12 时 g1=%v warning=%q，期望 12 且含 SGR 约束", pr.G1, pr.Warning)
+	// SGR=12 只通过软上限生效：base=A=20、sgr=12 → cap=max(20,12)+5=25 不触发。
+	if g1, cap, msg := applyDownwardAdjustments(20, 16, 0, 0, forwardAnchor{}, 12, true, r18EnvelopePP); g1 != 20 || cap != 25 ||
+		!strings.Contains(msg, "未触发") || strings.Contains(msg, "生效") {
+		t.Errorf("SGR 高于 A 时不应硬压 g1：g1=%v cap=%v msg=%q", g1, cap, msg)
 	}
-	if !strings.Contains(pr.Warning, "上限按向下取整") {
-		t.Errorf("SGR 告警应说明「上限按向下取整」：%q", pr.Warning)
+	// 前瞻锚更低时 cap 由 max(前瞻, SGR)+5 决定（5/6 → 11）。
+	g1, cap, msg := applyDownwardAdjustments(12, 8, 0, 0,
+		forwardAnchor{Available: true, Value: 5}, 6, true, r18EnvelopePP)
+	if g1 != 11 || cap != 11 || !strings.Contains(msg, "收口至 11.0%") {
+		t.Errorf("前瞻+SGR 软上限：g1=%v cap=%v msg=%q，期望 11/11/软上限告警", g1, cap, msg)
 	}
-	if pr := recommendParams(valModelThreeStage, 20, 0, 4, nil); pr.G1 != 20 {
-		t.Errorf("SGR 不可用时不应设上限，g1 = %v", pr.G1)
+	// 软上限低于 M1 包络下限时包络优先（唯一主导原因）。
+	if g1, _, msg := applyDownwardAdjustments(20, 16, 0, 0,
+		forwardAnchor{Available: true, Value: 5}, 6, true, r18EnvelopePP); g1 != 15 || !strings.Contains(msg, "唯一主导原因") {
+		t.Errorf("软上限低于包络下限应以包络收口：g1=%v msg=%q", g1, msg)
+	}
+	// SGR 不可用时仍用 base+5 软上限。
+	if _, cap, _ := applyDownwardAdjustments(20, 16, 0, 0, forwardAnchor{}, 0, false, r18EnvelopePP); cap != 25 {
+		t.Errorf("SGR 不可用 cap = %v，期望 A+5=25", cap)
 	}
 }
 

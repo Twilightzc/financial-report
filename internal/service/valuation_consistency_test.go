@@ -145,36 +145,41 @@ func TestFCFToProfitMedian(t *testing.T) {
 }
 
 func TestVerifyC4(t *testing.T) {
-	// 出口违反（g1=20 > floor(12)）→ 返回纠偏上限，并用它重建参数（不能只告警不修）。
-	params := []model.AIValuationParam{{Key: "g1", Label: "高增长期增长率", Value: 20}}
-	cap, violated := verifyC4(params, 12, true)
-	if !violated || cap != 12 {
-		t.Fatalf("verifyC4 = (%v,%v)，期望 (12,true)", cap, violated)
+	// C4a 硬约束：g∞ ≤ SGR 且 g∞ < 折现率。
+	if ok, w := verifyC4a(4.5, 8, 6.83, true); !ok || w != "" {
+		t.Errorf("g∞=4.5 ≤ SGR=6.83 且 < r=8 应通过，实际 ok=%v w=%q", ok, w)
 	}
-	pr := rebuildWithG1Cap(valModelThreeStage, 20, 4, cap)
-	if g1 := paramValue(t, pr.Params, "g1"); g1 != 12 {
-		t.Errorf("纠偏后 g1 = %v，期望 12", g1)
+	if ok, w := verifyC4a(5, 8, 4.2, true); ok || w == "" {
+		t.Errorf("g∞=5 > SGR=4.2 应违反并给出 Warning，实际 ok=%v w=%q", ok, w)
 	}
-	if pr.Model != valModelThreeStage || !(pr.G1 > pr.G2 && pr.G2 > pr.G3) {
-		t.Errorf("纠偏后应保持三阶段严格递减：model=%s g1=%v g2=%v g3=%v", pr.Model, pr.G1, pr.G2, pr.G3)
+	if ok, _ := verifyC4a(8, 8, 0, false); ok {
+		t.Error("g∞ 不低于折现率应违反")
 	}
-
-	// 上限压到与 g2 相等 → 触发降级链（三阶段 → 两阶段）。
-	pr = rebuildWithG1Cap(valModelThreeStage, 20, 4, 5)
-	if pr.Model != valModelTwoStage || !pr.Degraded {
-		t.Errorf("g1cap=5/gk=4 应降为两阶段：model=%s degraded=%v", pr.Model, pr.Degraded)
-	}
-	if g1 := paramValue(t, pr.Params, "g1"); g1 != 5 {
-		t.Errorf("降级后 g1 = %v，期望 5", g1)
+	// SGR 不可用/非正时不施加 SGR 约束（sgr<=0 由 terminalGrowth 收到 0）。
+	if ok, _ := verifyC4a(7, 8, 0, false); !ok {
+		t.Error("SGR 不可用且 g∞<r 应通过")
 	}
 
-	// 合规 → 不纠偏。
-	if cap, violated := verifyC4(params, 25, true); violated || cap != 25 {
-		t.Errorf("g1=20 ≤ SGR=25 不应纠偏，实际 (%v,%v)", cap, violated)
+	// C4b 软约束：只告警、不降级。
+	if w := verifyC4b(12, 6.83, true); w == "" {
+		t.Error("g1=12 > SGR=6.83 应返回只告警 Warning")
 	}
-	// SGR 不可用 → 不设上限。
-	if _, violated := verifyC4(params, 12, false); violated {
-		t.Error("SGR 不可用时不设上限，不应返回违反")
+	if w := verifyC4b(5, 6.83, true); w != "" {
+		t.Errorf("g1 ≤ SGR 不应告警，实际 %q", w)
+	}
+	if w := verifyC4b(12, 0, false); w != "" {
+		t.Error("SGR 不可用不应告警")
+	}
+
+	// C4c 防御复核 + 冲突豁免。
+	if !verifyC4c(10, 8, 5) {
+		t.Error("g1=10 > cap=8 且 cap ≥ A−5 应触发复核")
+	}
+	if verifyC4c(10, 3, 5) {
+		t.Error("cap < A−envelope 时应豁免（M1 包络优先）")
+	}
+	if verifyC4c(8, 8, 5) {
+		t.Error("g1 ≤ cap 不应触发复核")
 	}
 }
 

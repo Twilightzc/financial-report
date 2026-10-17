@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -82,6 +83,13 @@ func (h *Handler) computeAIAnalysis(
 	startYear, endYear int,
 	rangeOK bool,
 ) (*model.AIAnalysisResult, error) {
+	// ★R18：外部增长快照尽早并发启动（3 路 + 24h 缓存），用行情/F10/LLM 的耗时覆盖。
+	// 缓冲 1：提前 return 时 goroutine 也能写入后退出，不泄漏。
+	growthCh := make(chan model.GrowthSnapshot, 1)
+	go func() {
+		growthCh <- h.fetchGrowthSnapshot(code)
+	}()
+
 	quote, err := h.c.FetchQuote(code)
 	if err != nil {
 		return nil, err
@@ -135,7 +143,9 @@ func (h *Handler) computeAIAnalysis(
 
 	// 估值参数由后端按财报数据确定性推导（R7）：与年份范围、分析模式无关，保证多次分析结果一致。
 	// ① 预推导（industryType=""）：β 走波动兜底，用于组装 prompt。
-	rec := service.RecommendValuation(balance, cashflow, income)
+	// 预推导与终态重算共用同一份增长快照，保证两次结果可归因。
+	snap := <-growthCh
+	rec := service.RecommendValuationWithSnapshot(balance, cashflow, income, "", snap)
 
 	// 主营构成（业务板块及营收占比）用于喂给大模型做业务板块分析；拉取失败不影响主流程。
 	segments, _ := h.c.FetchSegmentIncome(code)
@@ -152,9 +162,9 @@ func (h *Handler) computeAIAnalysis(
 	if err != nil {
 		return nil, err
 	}
-	// ② 终态重算：先取出 AI 的行业分类原始串（Apply 会覆盖该字段），据此重解析 β 并重算 r / gk / Params。
+	// ② 终态重算：先取出 AI 的行业分类原始串（Apply 会覆盖该字段），据此重解析 β 并重算 r / g∞ / Params。
 	industryRaw := result.Valuation.IndustryType
-	rec = service.RecommendValuationWithIndustry(balance, cashflow, income, industryRaw)
+	rec = service.RecommendValuationWithSnapshot(balance, cashflow, income, industryRaw, snap)
 
 	// ③ 用确定性参数覆盖大模型返回的估值字段（含把 IndustryType 归一化回填），仅保留其 rationale。
 	service.ApplyValuationRecommendation(&result, rec)
@@ -165,6 +175,16 @@ func (h *Handler) computeAIAnalysis(
 		rec.FCFCyclical, rec.FCFCV, rec.FCFSignChanges, rec.FCFWindowYears,
 		rec.RiskPoints, rec.AdjustRD, rec.RDRatio, rec.RDExpansion/1e8,
 		rec.BaseYear, rec.CapexCoverage, rec.DeltaNWCRatio, rec.FCFProfitRatio)
+	forwardLog := "不可用"
+	if rec.GrowthForwardOK {
+		forwardLog = fmt.Sprintf("%.2f%%", rec.GrowthForward)
+	}
+	log.Printf("AI 增长锚: code=%s 复合锚=%.2f%%（历史=%.2f%% 前瞻=%s 宏观=%.2f%%/%s） 终值=%.2f%% 软上限=%.2f%% 回归年数=%d 周期=%s(%+.2f,Δ=%+.1f,pp) 负增长=%s 一致预期=%v(%d家/%d年/%s) 留存口径=%s 调整=%s",
+		code, rec.GrowthComposite, rec.GrowthHistory, forwardLog, rec.GrowthMacro, rec.GrowthMacroBasis,
+		rec.GrowthTerminal, rec.GrowthCap, rec.GrowthFadeYears,
+		rec.CyclePositionLabel, rec.CyclePosition, rec.GrowthCycleAdjust, rec.NegativeGrowthType,
+		rec.ConsensusFetched, rec.ConsensusInstitutions, rec.ConsensusYears, rec.ConsensusReliability,
+		rec.RetentionBasis, rec.GrowthAdjustment)
 
 	// ★R17：汇合（正常情况下 LLM 耗时已覆盖两个 2s 请求，此处近零等待）。
 	board := <-leaderCh

@@ -134,7 +134,14 @@ func buildUserMessage(a model.FinancialAnalysis, q model.Quote, segments []model
 func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	var b strings.Builder
 	b.WriteString("估值参数（系统按实际财报数据确定性推导，请据实解释、不得改动）：\n")
-	b.WriteString(fmt.Sprintf("- 基准增速 X：%.2f%%（%s）\n", rec.BaseGrowth, rec.BaseGrowthNote))
+	b.WriteString(fmt.Sprintf("- 复合增长锚 A：%.2f%%；历史锚 A_hist：%.2f%%；前瞻锚 A_fwd：%s；宏观锚 A_macro：%.2f%%（%s）。\n",
+		rec.GrowthComposite, rec.GrowthHistory, forwardPromptValue(rec),
+		rec.GrowthMacro, macroBasisPromptText(rec)))
+	b.WriteString(fmt.Sprintf("- 历史锚构成：营收 %s / 净利润 %s / FCF %s（%s）；%s\n",
+		growthPromptValue(rec.GrowthRevenue, rec.GrowthRevenueOK),
+		growthPromptValue(rec.GrowthProfit, rec.GrowthProfitOK),
+		growthPromptValue(rec.GrowthFCF, rec.GrowthFCFOK),
+		baseGrowthWeightText(rec), rec.BaseGrowthNote))
 	b.WriteString(fmt.Sprintf("- 模型：%s（%s）；折现率：%.1f%%\n", rec.ModelName, rec.Model, rec.DiscountRate))
 	// R15/P1：行业类型判定要求（恒输出，与 hasBalance 无关——行业判定不吃财务数据）。
 	b.WriteString("- 行业类型：请判定并在 industry_type 输出（cyclical 周期性行业 / general 一般行业 / utility 公用事业，三选一，不确定取 general）。\n")
@@ -159,41 +166,31 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	if rec.FCFRationale != "" {
 		b.WriteString("- 基期自由现金流：" + baseFCFPromptText(rec) + "\n")
 	}
-	// R15/P2：基准增速构成、多信号分档与 SGR（只解释口径，不得改写数字）。
+	// R18：三层锚、周期位置、负增长归因与模型分档（只解释口径，不得改写数字）。
 	// 缺失分项标记「不可用」而不是写成 0%，避免向大模型编造数据点（A3）。
-	// R15/P5：FCF 不稳定时单独标注「未计入」，不得写成「三项等权」或「样本不足」。
-	terms := 0
-	for _, ok := range []bool{rec.GrowthRevenueOK, rec.GrowthProfitOK, rec.GrowthFCFOK && rec.GrowthFCFIncluded} {
-		if ok {
-			terms++
-		}
-	}
-	weightText := fmt.Sprintf("按 %d 项等权", terms)
-	if terms == 0 {
-		weightText = "无可用分项，基准增速按 0 计"
-	}
-	fcfExcluded := ""
-	if rec.GrowthFCFOK && !rec.GrowthFCFIncluded {
-		fcfExcluded = "；FCF 未计入：" + rec.GrowthFCFExcludeReason
-	}
 	downsideText := "不可用"
 	if rec.HasStabilityScore {
 		downsideText = fmt.Sprintf("%.2f pp（稳定性分按此计算）", rec.GrowthDownsideDispersion)
 	}
-	b.WriteString(fmt.Sprintf("- 基准增速构成：营收 %s / 净利润 %s / FCF %s（%s%s）；盈利增速极差 %s；下行波动 %s。\n",
-		growthPromptValue(rec.GrowthRevenue, rec.GrowthRevenueOK),
-		growthPromptValue(rec.GrowthProfit, rec.GrowthProfitOK),
-		growthPromptValue(rec.GrowthFCF, rec.GrowthFCFOK),
-		weightText, fcfExcluded,
+	b.WriteString(fmt.Sprintf("- 盈利波动：全幅极差 %s；下行波动 %s。\n",
 		dispersionPromptValue(rec.GrowthDispersion, rec.HasStabilityScore), downsideText))
-	b.WriteString(fmt.Sprintf("- 模型分档：得分 %.2f（%s）→ %s（权重 增速 0.6 / 稳定性 0.2 / ROE 0.2，阈值 70/45/25；X<3%% 直接零增长）。\n",
+	if rec.CycleBasis != "" {
+		b.WriteString(fmt.Sprintf("- 周期位置：%s（%+.2f）；历史锚修正 Δ_cycle %+.1fpp，已内含于 A（只作用于历史锚）；%s。\n",
+			rec.CyclePositionLabel, rec.CyclePosition, rec.GrowthCycleAdjust, rec.CycleBasis))
+	}
+	b.WriteString(fmt.Sprintf("- 负增长归因：%s（%s）；正常化 A_norm = %.2f%%。\n",
+		rec.NegativeGrowthType, rec.NegativeGrowthBasis, rec.GrowthNormalized))
+	b.WriteString(fmt.Sprintf("- 模型分档：得分 %.2f（%s）→ %s（权重 增速 0.6 / 稳定性 0.2 / ROE 0.2，阈值 70/45；A<0 时结构性→零增长、周期性→低永续；不得再把 A<3%% 说成零增长）。\n",
 		rec.ModelScore, modelScoreParts(rec), rec.ModelName))
 	if rec.SGR > 0 {
-		b.WriteString(fmt.Sprintf("- 可持续增长率：%.2f%%（留存率 %.1f%%）；高增长期增长率的上限（向下取整）已受其约束。\n",
-			rec.SGR, rec.RetentionRate*100))
+		b.WriteString(fmt.Sprintf("- 长期内生增速参考：SGR %.2f%%（留存率 %.1f%%，口径 %s）；仅作终值与软上限参考，不硬压 g1；g1 超过 SGR 只告警、不降级。\n",
+			rec.SGR, rec.RetentionRate*100, rec.RetentionBasis))
 	} else {
-		b.WriteString("- 可持续增长率：不可用（留存率/ROE 数据不足），高增长期增长率未施加上限。\n")
+		b.WriteString("- 长期内生增速参考：SGR 不可用（留存率/ROE 数据不足），终值未施加 SGR 约束。\n")
 	}
+	b.WriteString(fmt.Sprintf("- 终值 g∞：%.2f%%；回归年限 n_total：%d；增长调整：%s。\n",
+		rec.GrowthTerminal, rec.GrowthFadeYears, rec.GrowthAdjustment))
+	b.WriteString("- 参数已由服务端确定性计算并回填到输出，你只能在 rationale 中解释上述结果，不得给出不同的增长率、模型或归因；最终参数会按你判定的 industry_type 重算，不要复述预推导的具体数字。\n")
 	// R15/P3：FCF 周期与研发双条件；R15/P5：同时给出原始判据、成长性豁免与生效判据。
 	if rec.FCFWindowYears > 0 {
 		vetoBasis := rec.GrowthVetoBasis
@@ -242,6 +239,48 @@ func growthPromptValue(v float64, ok bool) string {
 		return "不可用"
 	}
 	return fmt.Sprintf("%.2f%%", v)
+}
+
+// forwardPromptValue 前瞻锚的提示词文本：不可用时显式标注，附机构数/日期/可靠度。
+func forwardPromptValue(rec model.ValuationRecommendation) string {
+	if !rec.GrowthForwardOK {
+		return "不可用"
+	}
+	text := fmt.Sprintf("%.2f%%", rec.GrowthForward)
+	if rec.ConsensusFetched {
+		text += fmt.Sprintf("（%d 家机构，截至 %s，可靠度 %s）",
+			rec.ConsensusInstitutions, rec.ConsensusAsOf, rec.ConsensusReliability)
+	}
+	return text
+}
+
+// macroBasisPromptText 宏观锚口径文案（动态 GDP / 回退常量）。
+func macroBasisPromptText(rec model.ValuationRecommendation) string {
+	if rec.GrowthMacroBasis == "dynamic_gdp" {
+		if rec.GDPAsOf != "" {
+			return "动态 GDP TTM 同比，截至 " + rec.GDPAsOf
+		}
+		return "动态 GDP TTM 同比"
+	}
+	return "回退常量 4.5%"
+}
+
+// baseGrowthWeightText 历史锚构成权重文案（缺失分项不补 0）。
+func baseGrowthWeightText(rec model.ValuationRecommendation) string {
+	terms := 0
+	for _, ok := range []bool{rec.GrowthRevenueOK, rec.GrowthProfitOK, rec.GrowthFCFOK && rec.GrowthFCFIncluded} {
+		if ok {
+			terms++
+		}
+	}
+	if terms == 0 {
+		return "无可用分项，基准增速按 0 计"
+	}
+	text := fmt.Sprintf("按 %d 项等权", terms)
+	if rec.GrowthFCFOK && !rec.GrowthFCFIncluded {
+		text += "；FCF 未计入：" + rec.GrowthFCFExcludeReason
+	}
+	return text
 }
 
 // dispersionPromptValue 盈利增速极差的提示词文本（稳定性信号不可用时标注）。
@@ -735,6 +774,40 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	r.Valuation.FCFCyclicalRaw = rec.FCFRawCyclical
 	r.Valuation.FCFGrowthVeto = rec.FCFGrowthVeto
 	r.Valuation.GrowthVetoBasis = rec.GrowthVetoBasis
+	// R18：三层锚 / 周期位置 / 负增长归因 / 一致预期快照（确定性回填，不接受大模型返回值）。
+	r.Valuation.GrowthHistory = rec.GrowthHistory
+	// growth_forward 只在可用时输出（不可用时 omitempty 省略，与「0%」区分）。
+	r.Valuation.GrowthForward = 0
+	if rec.GrowthForwardOK {
+		r.Valuation.GrowthForward = rec.GrowthForward
+	}
+	r.Valuation.GrowthMacro = rec.GrowthMacro
+	r.Valuation.GrowthMacroBasis = rec.GrowthMacroBasis
+	r.Valuation.GDPAsOf = rec.GDPAsOf
+	r.Valuation.GrowthComposite = rec.GrowthComposite
+	r.Valuation.GrowthNormalized = rec.GrowthNormalized
+	r.Valuation.GrowthCycleAdjust = rec.GrowthCycleAdjust
+	r.Valuation.CyclePosition = rec.CyclePosition
+	r.Valuation.CyclePositionLabel = rec.CyclePositionLabel
+	r.Valuation.CycleBasis = rec.CycleBasis
+	r.Valuation.NegativeGrowthType = rec.NegativeGrowthType
+	r.Valuation.NegativeGrowthBasis = rec.NegativeGrowthBasis
+	r.Valuation.GrowthFadeYears = rec.GrowthFadeYears
+	r.Valuation.SGRRole = rec.SGRRole
+	r.Valuation.RetentionBasis = rec.RetentionBasis
+	r.Valuation.GrowthAdjustment = rec.GrowthAdjustment
+	// 一致预期未取到/不可用时清空快照字段，避免旧缓存或大模型脏值透传。
+	if rec.ConsensusFetched {
+		r.Valuation.ConsensusAsOf = rec.ConsensusAsOf
+		r.Valuation.ConsensusInstitutions = rec.ConsensusInstitutions
+		r.Valuation.ConsensusYears = rec.ConsensusYears
+		r.Valuation.ConsensusReliability = rec.ConsensusReliability
+	} else {
+		r.Valuation.ConsensusAsOf = ""
+		r.Valuation.ConsensusInstitutions = 0
+		r.Valuation.ConsensusYears = 0
+		r.Valuation.ConsensusReliability = ""
+	}
 	// Rationale 保持大模型返回值，不覆盖
 }
 

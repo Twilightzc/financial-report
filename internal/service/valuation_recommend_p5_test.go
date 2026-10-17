@@ -294,7 +294,7 @@ func TestBaseGrowthWeighting(t *testing.T) {
 }
 
 // U6：稳定性分下行口径（全幅极差大但无下行 → 不扣分）。
-func TestClassifyModelScoreDownside(t *testing.T) {
+func TestScoreSignalsDownside(t *testing.T) {
 	cases := []struct {
 		name      string
 		downside  float64
@@ -306,14 +306,14 @@ func TestClassifyModelScoreDownside(t *testing.T) {
 		{"下行 50pp", 50, 0, true},
 	}
 	for _, c := range cases {
-		res := classifyModelScore(20, c.downside, c.available, []float64{20, 20, 20}, false)
+		res := scoreSignals(20, c.downside, c.available, []float64{20, 20, 20})
 		if !approxEq(res.ScoreStability, c.wantSt, 1e-9) {
 			t.Errorf("%s：Sst = %v，期望 %v", c.name, res.ScoreStability, c.wantSt)
 		}
 	}
 
 	// 缺稳定性信号 → 权重按剩余归一化，行为不变。
-	res := classifyModelScore(20, 0, false, []float64{20, 20}, false)
+	res := scoreSignals(20, 0, false, []float64{20, 20})
 	if res.HasStability || !approxEq(res.Score, 75, 1e-9) {
 		t.Errorf("缺稳定性应归一化：score=%v hasSt=%v", res.Score, res.HasStability)
 	}

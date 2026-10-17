@@ -141,7 +141,7 @@ func TestR15P1IndepInapplicable(t *testing.T) {
 	for _, x := range cases {
 		rec := recommendValuation(nil,
 			[]model.ReportRow{rowAt("2024-12-31", x.cf)},
-			[]model.ReportRow{rowAt("2024-12-31", x.income)}, "")
+			[]model.ReportRow{rowAt("2024-12-31", x.income)}, "", model.GrowthSnapshot{})
 		if rec.Applicable {
 			t.Errorf("%s：applicable 应为 false", x.name)
 		}

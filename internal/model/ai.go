@@ -115,6 +115,29 @@ type AIValuation struct {
 	FCFCyclicalRaw           bool    `json:"fcf_cyclical_raw,omitempty"`           // 原始周期判据（被成长性否决时为 true）
 	FCFGrowthVeto            bool    `json:"fcf_growth_veto,omitempty"`            // 成长性豁免标记
 	GrowthVetoBasis          string  `json:"growth_veto_basis,omitempty"`          // 成长性判定依据
+
+	// R18 新增：复合增长锚、周期位置、负增长归因、一致预期快照（只读，服务端确定性回填）。
+	GrowthHistory         float64 `json:"growth_history,omitempty"`         // 历史锚 A_hist（周期修正前，%）
+	GrowthForward         float64 `json:"growth_forward,omitempty"`         // 前瞻锚 A_fwd（%），不可用省略
+	GrowthMacro           float64 `json:"growth_macro,omitempty"`           // 宏观锚 A_macro（%）
+	GrowthMacroBasis      string  `json:"growth_macro_basis,omitempty"`     // dynamic_gdp / fallback_constant
+	GDPAsOf               string  `json:"gdp_as_of,omitempty"`              // 动态 GDP 快照季末；回退常量时省略
+	GrowthComposite       float64 `json:"growth_composite,omitempty"`       // 复合锚 A（%）
+	GrowthNormalized      float64 `json:"growth_normalized,omitempty"`      // A_norm（=A，%）
+	GrowthCycleAdjust     float64 `json:"growth_cycle_adjust,omitempty"`    // Δ_cycle（pp），0 省略
+	CyclePosition         float64 `json:"cycle_position,omitempty"`         // [-0.5,0.5]
+	CyclePositionLabel    string  `json:"cycle_position_label,omitempty"`   // 高位/中位/低位
+	CycleBasis            string  `json:"cycle_basis,omitempty"`            // 周期判定与位置口径
+	NegativeGrowthType    string  `json:"negative_growth_type,omitempty"`   // none/structural/cyclical
+	NegativeGrowthBasis   string  `json:"negative_growth_basis,omitempty"`  // 归因判据
+	ConsensusAsOf         string  `json:"consensus_as_of,omitempty"`        // 一致预期快照日期
+	ConsensusInstitutions int     `json:"consensus_institutions,omitempty"` // 覆盖机构数
+	ConsensusYears        int     `json:"consensus_years,omitempty"`        // 预测年数
+	ConsensusReliability  string  `json:"consensus_reliability,omitempty"`  // high/medium/unavailable
+	GrowthFadeYears       int     `json:"growth_fade_years,omitempty"`      // n_total（回归年限）
+	SGRRole               string  `json:"sgr_role,omitempty"`               // long_run_reference
+	RetentionBasis        string  `json:"retention_basis,omitempty"`        // payout/equity_growth/unavailable
+	GrowthAdjustment      string  `json:"growth_adjustment,omitempty"`      // 实际生效的调整及原因
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -196,6 +219,33 @@ type ValuationRecommendation struct {
 	FCFRawCyclical           bool    // FCF 原始周期判据（CV/符号翻转）
 	FCFGrowthVeto            bool    // 成长性否决是否命中
 	GrowthVetoBasis          string  // 成长性判定口径说明
+
+	// R18：复合增长锚与可观测字段（供 Apply / prompt / 日志使用；无 JSON tag）。
+	GrowthHistory         float64
+	GrowthForward         float64
+	GrowthForwardOK       bool
+	GrowthMacro           float64
+	GrowthMacroBasis      string
+	GDPAsOf               string
+	GrowthComposite       float64
+	GrowthNormalized      float64
+	GrowthCycleAdjust     float64
+	CyclePosition         float64
+	CyclePositionLabel    string
+	CycleBasis            string
+	NegativeGrowthType    string
+	NegativeGrowthBasis   string
+	ConsensusFetched      bool
+	ConsensusAsOf         string
+	ConsensusInstitutions int
+	ConsensusYears        int
+	ConsensusReliability  string
+	GrowthFadeYears       int
+	SGRRole               string
+	RetentionBasis        string
+	GrowthAdjustment      string
+	GrowthTerminal        float64 // g∞，仅内部/prompt 使用
+	GrowthCap             float64 // g1_cap，仅内部/prompt/日志使用
 }
 
 // LeaderCompany 行业龙头（R17：后端确定性回填，非 AI 输出）。

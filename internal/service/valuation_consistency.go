@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"financial-report/internal/model"
@@ -107,9 +106,9 @@ func fcfToProfitMedian(fcfByYear map[int]float64, incomeByYear map[int]model.Rep
 
 // c5Warning 返回 C5 提示（无提示返回 ""）：高增长模型 + 明显扩张性资本支出 / 营运资本占用。
 // 只告警、不修改参数（方法论 §3.4 允许「扣扩张 Capex」或「降增速」二选一，本项目选后者由用户操作）。
-func c5Warning(mdl string, g1, gk float64, cf, income model.ReportRow, balanceByYear map[int]model.ReportRow,
+func c5Warning(mdl string, g1, gInf float64, cf, income model.ReportRow, balanceByYear map[int]model.ReportRow,
 	baseYear int, baseFCF float64) string {
-	highGrowth := (mdl == valModelTwoStage || mdl == valModelThreeStage) && g1 > gk
+	highGrowth := (mdl == valModelTwoStage || mdl == valModelThreeStage) && g1 > gInf
 	if !highGrowth {
 		return "" // 永续/零增长不涉及扩张 Capex 假设
 	}
@@ -128,22 +127,6 @@ func c5Warning(mdl string, g1, gk float64, cf, income model.ReportRow, balanceBy
 		}
 	}
 	return strings.Join(warns, "；")
-}
-
-// verifyC4 校验输出参数中的 g1 是否 ≤ floor(SGR)；违反时返回纠偏上限 cap 与 violated=true，
-// 由调用方用 cap 重建参数（不能只告警不修，§19.8.3）。
-// sgrOK=false 或无 sgr → (0,false)（无上限即无违反）。
-func verifyC4(params []model.AIValuationParam, sgr float64, sgrOK bool) (cap float64, violated bool) {
-	if !sgrOK || sgr <= 0 {
-		return 0, false
-	}
-	cap = math.Floor(sgr)
-	for _, p := range params {
-		if p.Key == "g1" && p.Value > cap {
-			return cap, true
-		}
-	}
-	return cap, false
 }
 
 // appendWarnOnce 追加非空且未出现过的提示（保持首次出现顺序）。

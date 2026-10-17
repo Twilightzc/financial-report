@@ -163,7 +163,6 @@ type paramResult struct {
 
 // modelScoreResult 多信号评分结果：总分用于落档，分项得分用于提示词解释。
 type modelScoreResult struct {
-	Model          string
 	Score          float64 // 归一化加权总分
 	ScoreGrowth    float64 // 增速分 sg
 	HasStability   bool    // 稳定性信号是否可用（不可用时权重归一化、分项无意义）
@@ -219,21 +218,32 @@ type fcfGrowthTerm struct {
 //  5. 折现率由 WACC 基线 + 公司风险溢价收口到 [8,15] 的 0.5 网格；
 //  6. 基期年统一为利润表 ∩ 现金流量表的最新共同年（C7）。
 //
-// 签名与语义保持 R7 现状不变（industryType 取空），供 prompt 组装与既有调用方/测试使用。
+// 签名与语义保持 R7 现状不变（industryType 取空、外部快照为零值），供 prompt 组装与既有调用方/测试使用。
+// 零值快照 → 宏观锚回退 4.5%、无前瞻锚、留存率回落权益增长，结果仍然完全确定。
 func RecommendValuation(balance, cashflow, income []model.ReportRow) model.ValuationRecommendation {
-	return recommendValuation(balance, cashflow, income, "")
+	return recommendValuation(balance, cashflow, income, "", model.GrowthSnapshot{})
 }
 
 // RecommendValuationWithIndustry 终态推导：以 AI 输出的行业分类（原始串）重解析 β 并重算全部受 β
-// 影响的字段（β 系列 / Re / WACC 基线 / 折现率 / gk / Params），其余字段与预推导逐位相同（§19.12.4）。
+// 影响的字段（β 系列 / Re / WACC 基线 / 折现率 / g∞ / Params），其余字段与预推导逐位相同（§19.12.4）。
 // api 层须在 ParseAIResult 之后、ApplyValuationRecommendation 之前调用（后者会覆盖 IndustryType）。
+// 外部快照为零值，行为与 R15 调用方兼容。
 func RecommendValuationWithIndustry(balance, cashflow, income []model.ReportRow, industryType string) model.ValuationRecommendation {
-	return recommendValuation(balance, cashflow, income, industryType)
+	return recommendValuation(balance, cashflow, income, industryType, model.GrowthSnapshot{})
+}
+
+// RecommendValuationWithSnapshot R18 终态推导：注入本次请求的外部增长快照（GDP / 一致预期 / 分红）。
+// 同一份财报 + 同一份快照 → 逐位相同的结果；快照缺失时各锚按确定性降级链回落。
+func RecommendValuationWithSnapshot(balance, cashflow, income []model.ReportRow,
+	industryType string, snapshot model.GrowthSnapshot) model.ValuationRecommendation {
+	return recommendValuation(balance, cashflow, income, industryType, snapshot)
 }
 
 // recommendValuation 内部唯一实现：全部 P1~P4 推导链（含 industryType → β 的解析，见 §19.12.4）。
 // industryType 为大模型返回的行业分类原始串（预推导阶段传 ""）；脏值/缺失一律走确定性兜底，不报错。
-func recommendValuation(balance, cashflow, income []model.ReportRow, industryType string) model.ValuationRecommendation {
+// snapshot 为 R18 外部增长快照；零值即旧行为。
+func recommendValuation(balance, cashflow, income []model.ReportRow,
+	industryType string, snapshot model.GrowthSnapshot) model.ValuationRecommendation {
 	incomeByYear, incomeYears := annualRows(income)
 	cfByYear, cfYears := annualRows(cashflow)
 	balanceByYear, balanceYears := annualRows(balance)
@@ -301,9 +311,43 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 	riskPoints, hasBalance := valuationRiskPoints(balanceByYear[latest], inc)
 	dr := recommendDiscountRate(balanceByYear, incomeByYear, latest, fallbackCyclical, industryType, riskPoints, hasBalance)
 	discount := dr.Rate
-	gk := math.Min(valLongTermGDP, perpetualGrowthRaw(discount))
 
-	// —— G5：ROE 信号（窗口内权益 > 0 的年度）与模型落档 ——
+	// —— R18 ①：周期识别与位置（盈利周期只服务增长锚识别，不进入 β）——
+	cycleWindow := yearWindow(incomeYears, latest, r18CycleMaxWindowYears)
+	profitCycle, profitCycleBasis := detectProfitCycle(incomeByYear, cycleWindow, gp)
+	isCyclical, cycBasis := detectCyclical(industryType, cycle, gp, profitCycle)
+	pos, posLabel, posBasis, posWarn := 0.0, "中位", "", ""
+	if r18CyclePositionEnabled {
+		pos, posLabel, posBasis, posWarn = computeCyclePosition(incomeByYear, cycleWindow, isCyclical, gp)
+	} else {
+		posBasis = "周期位置灰度未启用，历史锚不做周期修正"
+	}
+	cycleBasis := joinWarns([]string{cycBasis, profitCycleBasis, posBasis})
+	delta := 0.0
+	if r18CyclePositionEnabled && isCyclical && !gp.Veto {
+		delta = cycleAdjustment(pos) // Δ_cycle 只修正历史锚
+	}
+
+	// —— R18 ②：三层锚合成复合锚 A（历史 + 前瞻 + 动态宏观）——
+	macro := resolveMacroAnchor(snapshot.GDP)
+	fwd := resolveConsensus(snapshot.Consensus, latest,
+		netProfitReconstructed(incomeByYear[latest]), snapshot.RequestDate)
+	comp := composeGrowthAnchor(x, k > 0, delta, fwd, macro)
+	A, insufficientA, envelope := comp.A, comp.Insufficient, comp.Envelope
+
+	// —— R18 ③：SGR（payout 主口径）与动态终值 g∞ ——
+	sgr, retention, retentionBasis, sgrOK, sgrWarn :=
+		sustainableGrowthR18(balanceByYear, incomeByYear, latest, snapshot.Dividends)
+	gInf, gInfWarn := terminalGrowth(macro.Value, discount, sgr, sgrOK)
+
+	// —— R18 ④：负增长归因（结构性 → 零增长；周期性 → 低永续）——
+	sm := structuralMetrics{}
+	if A < 0 {
+		sm = computeStructuralMetrics(incomeByYear, cycleWindow)
+	}
+	negType, negBasis, negWarn := attributeNegativeGrowth(A, isCyclical, pos, delta, fwd, sm)
+
+	// —— G5：ROE 信号（窗口内权益 > 0 的年度）与评分 ——
 	roeVals := make([]float64, 0, len(incomeWindow))
 	for _, y := range incomeWindow {
 		b, okB := balanceByYear[y]
@@ -315,31 +359,47 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 			roeVals = append(roeVals, *v)
 		}
 	}
-	ms := classifyModelScore(x, downsideDispersion, stabilityAvailable, roeVals, insufficient)
-	mdl, score := ms.Model, ms.Score
+	ms := scoreSignals(A, downsideDispersion, stabilityAvailable, roeVals)
+	score := ms.Score
 
-	// —— G4：留存率与 SGR（不可用时不设上限，不编造留存率）——
-	sgr, retention, sgrOK := sustainableGrowth(balanceByYear, incomeByYear, latest)
-	var sgrPtr *float64
-	if sgrOK && sgr > 0 {
-		sgrPtr = &sgr
+	// —— R18 ⑤：gap / 模型分档 / 向下调整 / 路径构造 ——
+	gap := A - gInf
+	mdl, _, _ := classifyGrowthModel(A, gap, score, insufficientA, negType)
+	g1, cap, adjust := applyDownwardAdjustments(A, gap, dispersion, delta, fwd, sgr, sgrOK, envelope)
+	path := constructGrowthPath(mdl, A, gInf, gap, g1, discount)
+	warns := make([]string, 0, 16)
+	warns = appendWarnOnce(warns, macro.Warning)
+	warns = appendWarnOnce(warns, comp.Warning)
+	warns = appendWarnOnce(warns, fwd.Warning)
+	warns = appendWarnOnce(warns, posWarn)
+	warns = appendWarnOnce(warns, sgrWarn)
+	warns = appendWarnOnce(warns, gInfWarn)
+	warns = appendWarnOnce(warns, negWarn)
+
+	// C4a 硬约束：构造上由 terminalGrowth 保证；异常时只改写 g∞ 及依赖项并重建路径。
+	if ok, w := verifyC4a(gInf, discount, sgr, sgrOK); !ok {
+		warns = appendWarnOnce(warns, w)
+		if sgrOK && sgr > 0 && gInf > sgr {
+			gInf = math.Max(0, floorHalf(sgr))
+		} else if gInf >= discount {
+			gInf = math.Max(0, floorHalf(discount-1))
+		}
+		gap = A - gInf
+		path = constructGrowthPath(mdl, A, gInf, gap, g1, discount)
 	}
-
-	// —— G7：参数构造（连续折减 + SGR 上限 + 严格递减 + 可能降级）——
-	pr := recommendParams(mdl, x, dispersion, gk, sgrPtr)
-	warns := make([]string, 0, 10)
+	pr := paramsFromPath(path)
+	// C4c 防御复核：仅当软上限不低于 M1 包络下限时才二次收口（冲突豁免）。
+	if verifyC4c(pr.G1, cap, A-envelope) {
+		path = constructGrowthPath(mdl, A, gInf, gap, floorHalf(cap), discount)
+		g1 = path.G1
+		pr = paramsFromPath(path)
+		warns = appendWarnOnce(warns, fmt.Sprintf(
+			"参数出口复核发现 g1 超过软上限，已按 %.2f%% 重新收口。", cap))
+	}
 	warns = appendWarnOnce(warns, dr.Warning)
 	warns = appendWarnOnce(warns, pr.Warning)
-	// C4 防御性复核：理论上 recommendParams 已按 floor(SGR) 收口；若出口仍违反（未来改动引入的回归），
-	// 用显式上限重建参数并重做严格递减/降级（不能只告警不修，§19.8.3）。
-	if cap, violated := verifyC4(pr.Params, sgr, sgrOK); violated {
-		pr = rebuildWithG1Cap(mdl, x, gk, cap)
-		warns = appendWarnOnce(warns, fmt.Sprintf(
-			"参数出口复核发现 g1 超过可持续增长率，已按 SGR 上限 %.0f%% 重新收口。", cap))
-	}
-	if !sgrOK || sgr <= 0 {
-		warns = appendWarnOnce(warns, "可持续增长率不可用（留存率/ROE 数据不足），高增长期增长率未施加上限。")
-	}
+	// C4b 软约束：g1 > SGR 只告警，不降级、不重算参数。
+	warns = appendWarnOnce(warns, verifyC4b(pr.G1, sgr, sgrOK))
 
 	// —— R13：基期自由现金流推荐（解耦：只吃 FCF 自身序列 + 周期状态）——
 	fcfRec := RecommendBaseFCF(fcfByYear, fcfYears, cycle)
@@ -378,7 +438,7 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 	}
 
 	// —— P4 一致性校验（C1~C3 构造保证；C4 已在上方复核；C5/C6/C7 只告警）——
-	if discount <= gk {
+	if discount <= gInf {
 		warns = appendWarnOnce(warns, "折现率不高于永续增长率，现金流贴现法参数不自洽。")
 	}
 	if pr.Model == valModelThreeStage && !(pr.G1 > pr.G2 && pr.G2 > pr.G3) {
@@ -408,7 +468,7 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		fcfProfitRatio, fcfProfitSamples = v, n
 	}
 
-	warns = appendWarnOnce(warns, c5Warning(pr.Model, pr.G1, gk, cf, inc, balanceByYear, latest, baseFCF))
+	warns = appendWarnOnce(warns, c5Warning(pr.Model, pr.G1, gInf, cf, inc, balanceByYear, latest, baseFCF))
 	if fcfProfitRatio > valFCFProfitHigh {
 		warns = appendWarnOnce(warns, fmt.Sprintf(
 			"近 %d 年经营自由现金流中位数为净利润的 %.2f 倍，长期显著高于净利润，请关注折旧摊销、减值与营运资本变动带来的会计现金含量差异。",
@@ -441,6 +501,31 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		if w := fcfWindowYears(cycle); w < fcfWindow {
 			fcfWindow = w
 		}
+	}
+
+	// R18：growth_adjustment 按「周期 → 离散度/软上限/包络 → 终值 → 模型」顺序拼接。
+	adjustParts := make([]string, 0, 4)
+	if delta != 0 {
+		adjustParts = append(adjustParts, fmt.Sprintf(
+			"周期位置 %+.2f（%s）→ 历史锚修正 %+.1fpp，已内含于复合锚", pos, posLabel, delta))
+	}
+	if adjust != "无向下调整" {
+		adjustParts = append(adjustParts, adjust)
+	}
+	if gInfWarn != "" {
+		adjustParts = append(adjustParts, gInfWarn)
+	}
+	if path.Degraded && path.Warning != "" {
+		adjustParts = append(adjustParts, path.Warning)
+	}
+	growthAdjustment := joinWarns(adjustParts)
+	if growthAdjustment == "" {
+		growthAdjustment = "无向下调整"
+	}
+
+	growthForward := 0.0
+	if fwd.Available {
+		growthForward = math.Round(fwd.Value*100) / 100 // 展示口径 2 位小数
 	}
 
 	return model.ValuationRecommendation{
@@ -508,6 +593,32 @@ func recommendValuation(balance, cashflow, income []model.ReportRow, industryTyp
 		CapexCoverage:  capexRatio,
 		DeltaNWCRatio:  deltaRatio,
 		FCFProfitRatio: fcfProfitRatio,
+		// R18：三层锚 / 周期位置 / 负增长归因 / 一致预期快照（只读、确定性回填）。
+		GrowthHistory:         x,
+		GrowthForward:         growthForward,
+		GrowthForwardOK:       fwd.Available,
+		GrowthMacro:           macro.Value,
+		GrowthMacroBasis:      macro.Basis,
+		GDPAsOf:               macro.AsOf,
+		GrowthComposite:       A,
+		GrowthNormalized:      A,
+		GrowthCycleAdjust:     math.Round(delta*10) / 10, // 展示口径 1 位小数
+		CyclePosition:         math.Round(pos*100) / 100, // 展示口径 2 位小数
+		CyclePositionLabel:    posLabel,
+		CycleBasis:            cycleBasis,
+		NegativeGrowthType:    negType,
+		NegativeGrowthBasis:   negBasis,
+		ConsensusFetched:      fwd.Fetched,
+		ConsensusAsOf:         fwd.AsOf,
+		ConsensusInstitutions: fwd.Institutions,
+		ConsensusYears:        fwd.Years,
+		ConsensusReliability:  fwd.Reliability,
+		GrowthFadeYears:       path.NTotal,
+		SGRRole:               "long_run_reference",
+		RetentionBasis:        retentionBasis,
+		GrowthAdjustment:      growthAdjustment,
+		GrowthTerminal:        gInf,
+		GrowthCap:             cap,
 	}
 }
 
@@ -742,52 +853,6 @@ func commonYears(a, b []int) []int {
 		}
 	}
 	return out
-}
-
-// classifyModelScore 多信号评分 → 模型档位（返回总分与 sg/st/sr 分项，用于解释为何分类）。
-//
-// 三信号：增速 Sg（0.6）、稳定性 Sst（0.2）、ROE Sroe（0.2）；缺失信号按剩余权重归一化，
-// 不把缺失信号当 0 分。Sst 的输入为「下行离散度」pp（R15/P5：只惩罚下行波动，正向大波动不扣分）。
-// 落档按序命中：X<3/样本不足 → zero；score≥70 且 X≥12 → three；
-// score≥45 且 X≥6 → two；score≥25 → perpetual；否则 zero。
-func classifyModelScore(x, downsideDispersion float64, stabilityAvailable bool, roeVals []float64, insufficient bool) modelScoreResult {
-	res := modelScoreResult{
-		ScoreGrowth:  clampFloat(valGrowthScoreOffset+valGrowthScoreSlope*x, 0, 100),
-		HasStability: stabilityAvailable,
-		HasROE:       len(roeVals) > 0,
-	}
-	total := valModelWeightGrowth
-	weighted := valModelWeightGrowth * res.ScoreGrowth
-
-	if stabilityAvailable {
-		res.ScoreStability = clampFloat(100-valStabilityPenalty*downsideDispersion, 0, 100)
-		total += valModelWeightStability
-		weighted += valModelWeightStability * res.ScoreStability
-	}
-	if res.HasROE {
-		sroe := medianOf(roeVals) / valROEScoreDivisor * 100
-		if len(roeVals) >= 2 && allPositive(roeVals) && spread(roeVals) <= valROEStableSpread {
-			sroe += valROEStableBonus
-		}
-		res.ScoreROE = clampFloat(sroe, 0, 100)
-		total += valModelWeightROE
-		weighted += valModelWeightROE * res.ScoreROE
-	}
-	res.Score = math.Round(weighted/total*100) / 100
-
-	switch {
-	case insufficient || x < valModelZeroMaxX:
-		res.Model = valModelZero
-	case res.Score >= valModelScoreThree && x >= valModelThreeMinX:
-		res.Model = valModelThreeStage
-	case res.Score >= valModelScoreTwo && x >= valModelTwoMinX:
-		res.Model = valModelTwoStage
-	case res.Score >= valModelScorePerpetual:
-		res.Model = valModelPerpetual
-	default:
-		res.Model = valModelZero
-	}
-	return res
 }
 
 // retentionRate 留存率近似 = (期末股东权益 − 期初股东权益) ÷ 当期净利润，clamp[0,1]。
@@ -1321,33 +1386,6 @@ func clampFloat(v, lo, hi float64) float64 {
 	return v
 }
 
-// perpetualGrowthRaw 永续增长率 gk 的原始映射（贴近长期 GDP 增速）：折现率越低（公司越稳）假设越高。
-// 上限不在此处施加：调用方取 gk = min(valLongTermGDP, perpetualGrowthRaw(r))（G6 常量显式化）。
-func perpetualGrowthRaw(discount float64) float64 {
-	switch {
-	case discount <= 9.0:
-		return 4
-	case discount <= 11.0:
-		return 3
-	default:
-		return 2
-	}
-}
-
-// stageYears 基准增速 X% → 高增长期年数 n1 与第二阶段年数 n2（单调分档，取网格下限起）。
-func stageYears(x float64) (n1, n2 int) {
-	switch {
-	case x < 12:
-		return 5, 3
-	case x < 20:
-		return 6, 3
-	case x < 30:
-		return 8, 4
-	default:
-		return 10, 5
-	}
-}
-
 // discountResult 折现率推导结果（unexported，service 包内可单测）。
 type discountResult struct {
 	Rate             float64 // 收口后 r %
@@ -1486,119 +1524,39 @@ func valuationRiskPoints(balance, income model.ReportRow) (int, bool) {
 	return risk, true
 }
 
-// recommendParams 按模型产出参数（可能因严格递减约束降级）：
-//   - g1 = clamp(round(X × (1 − min(离散度×0.004, 0.40))), -5, 30)，再受 floor(SGR) 上限约束；
-//   - zero：无参数；
-//   - perpetual：g（永续增长率 = gk）；
-//   - two_stage：g1、n1、g2（= gk），要求 g1 > g2，否则降为永续；
-//   - three_stage：g1、n1、g2（= gk+1）、n2、g3（= gk），要求 g1 > g2 > g3，否则按两阶段规则继续降级。
-//
-// sgr 为 nil（不可用/非正）时不施加 SGR 上限，且不会编造留存率。
-func recommendParams(mdl string, x, dispersion, gk float64, sgr *float64) paramResult {
-	damping := clampFloat(dispersion*valGrowthDampingPerPP, 0, valGrowthDampingMax)
-	g1 := clampFloat(math.Round(x*(1-damping)), valGrowthMin, valGrowthMax)
-
-	warns := make([]string, 0, 2)
-	if sgr != nil && *sgr > 0 {
-		g1cap := math.Floor(*sgr)
-		if g1 > g1cap {
-			warns = append(warns, fmt.Sprintf(
-				"高增长期增长率受可持续增长率 %.2f%% 约束（折减后为 %.2f%%，上限按向下取整为 %d%%）。", *sgr, g1, int(g1cap)))
-			g1 = clampFloat(g1cap, valGrowthMin, valGrowthMax)
-		}
+// paramsFromPath 把 growthPath 转成模型参数（纯构造；严格递减与降级已由 constructGrowthPath 完成）。
+func paramsFromPath(p growthPath) paramResult {
+	pr := paramResult{
+		Model:    p.Model,
+		N1:       p.N1,
+		N2:       p.N2,
+		Degraded: p.Degraded,
+		Warning:  p.Warning,
+		Params:   []model.AIValuationParam{},
 	}
-	return buildParams(mdl, g1, x, gk, joinWarns(warns))
-}
-
-// rebuildWithG1Cap C4 出口纠偏：用显式上限重建参数，并重新执行严格递减/降级链。
-func rebuildWithG1Cap(mdl string, x, gk, cap float64) paramResult {
-	return buildParams(mdl, clampFloat(cap, valGrowthMin, valGrowthMax), x, gk, "")
-}
-
-// buildParams 由已收口的 g1 构造各模型参数与降级链（纯构造，不做 SGR 判断）。
-func buildParams(mdl string, g1, x, gk float64, warning string) paramResult {
-	n1, n2 := stageYears(x)
-	pr := paramResult{Model: mdl, G1: g1, N1: n1, N2: n2, Warning: warning}
-	if mdl == valModelZero {
-		pr.G1 = 0
-		pr.Params = []model.AIValuationParam{}
-		return pr
-	}
-	// 0) 负增长/零增长直接零增长（高增长模型不适用于萎缩公司）。
-	if g1 <= 0 {
-		pr.Model = valModelZero
-		pr.G1 = 0
-		pr.Degraded = mdl != valModelZero
-		pr.Params = []model.AIValuationParam{}
-		pr.Warning = joinWarn(pr.Warning, "增速/可持续增长率非正，降为零增长模型。")
-		return pr
-	}
-
-	switch mdl {
+	switch p.Model {
 	case valModelPerpetual:
-		pr.G1 = 0
-		pr.G3 = gk
-		pr.Params = []model.AIValuationParam{{Key: "g", Label: "永续增长率", Value: gk}}
-		return pr
-
+		pr.G2 = p.G2
+		pr.G3 = p.G2
+		pr.Params = []model.AIValuationParam{{Key: "g", Label: "永续增长率", Value: p.G2}}
 	case valModelTwoStage:
-		return twoStageParams(pr, g1, n1, n2, gk)
-
-	case valModelThreeStage:
-		g2 := gk + 1 // 修复：不再 min(4, gk+1)；g2 是第二阶段增速、非终值，不受长期 GDP 上限约束
-		g3 := gk
-		if g1 > g2 { // 构造上严格 g1 > g2 > g3
-			pr.G2, pr.G3 = g2, g3
-			pr.Params = []model.AIValuationParam{
-				{Key: "g1", Label: "第一阶段增长率", Value: g1},
-				{Key: "n1", Label: "第一阶段年数", Value: float64(n1)},
-				{Key: "g2", Label: "第二阶段增长率", Value: g2},
-				{Key: "n2", Label: "第二阶段年数", Value: float64(n2)},
-				{Key: "g3", Label: "永续增长率", Value: g3},
-			}
-			return pr
-		}
-		// 无法满足 g1 > g2 > g3 → 降为两阶段（再按两阶段规则继续降级）。
-		pr.Degraded = true
-		pr.Warning = joinWarn(pr.Warning, fmt.Sprintf(
-			"三阶段参数无严格递减解（g1=%.2f, g2=%.2f），降为两阶段。", g1, g2))
-		return twoStageParams(pr, g1, n1, n2, gk)
-
-	default:
-		pr.Model = valModelZero
-		pr.G1 = 0
-		pr.Params = []model.AIValuationParam{}
-		return pr
-	}
-}
-
-// twoStageParams 构造两阶段参数；g1 ≤ gk 时降为永续（g = clamp(g1, 0, gk)）。
-func twoStageParams(pr paramResult, g1 float64, n1, n2 int, gk float64) paramResult {
-	if g1 > gk {
-		pr.Model = valModelTwoStage
-		pr.G1 = g1
-		pr.G2, pr.G3 = gk, 0
+		pr.G1, pr.G2 = p.G1, p.GInf
 		pr.Params = []model.AIValuationParam{
-			{Key: "g1", Label: "高增长期增长率", Value: g1},
-			{Key: "n1", Label: "高增长期年数", Value: float64(n1)},
-			{Key: "g2", Label: "永续增长率", Value: gk},
+			{Key: "g1", Label: "高增长期增长率", Value: p.G1},
+			{Key: "n1", Label: "高增长期年数", Value: float64(p.N1)},
+			{Key: "g2", Label: "永续增长率", Value: p.GInf},
 		}
-		return pr
+	case valModelThreeStage:
+		pr.G1, pr.G2, pr.G3 = p.G1, p.G2, p.GInf
+		pr.Params = []model.AIValuationParam{
+			{Key: "g1", Label: "第一阶段增长率", Value: p.G1},
+			{Key: "n1", Label: "第一阶段年数", Value: float64(p.N1)},
+			{Key: "g2", Label: "第二阶段增长率", Value: p.G2},
+			{Key: "n2", Label: "第二阶段年数", Value: float64(p.N2)},
+			{Key: "g3", Label: "永续增长率", Value: p.GInf},
+		}
 	}
-	g := clampFloat(math.Round(g1), 0, gk)
-	pr.Model = valModelPerpetual
-	pr.G1 = 0
-	pr.G2, pr.G3 = 0, g
-	pr.Degraded = true
-	pr.Params = []model.AIValuationParam{{Key: "g", Label: "永续增长率", Value: g}}
-	pr.Warning = joinWarn(pr.Warning, fmt.Sprintf(
-		"两阶段参数无严格递减解（g1=%.2f, gk=%.2f），降为永续增长。", g1, gk))
 	return pr
-}
-
-// joinWarn 用「；」连接非空提示（前一条已以句末标点结尾时直接拼接，避免「。；」）。
-func joinWarn(a, b string) string {
-	return joinWarns([]string{a, b})
 }
 
 // joinWarns 按序连接多条提示：默认以「；」分隔；若前文已以句末标点结尾则直接拼接。
