@@ -2098,43 +2098,53 @@ const app = createApp({
               <div v-if="aiLoading" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
                 <div class="ai-think-visual" aria-hidden="true">
                   <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
-                    <g class="ai-net-edges">
-                      <line x1="18" y1="32" x2="60" y2="22"></line>
-                      <line x1="18" y1="32" x2="60" y2="48"></line>
-                      <line x1="18" y1="32" x2="60" y2="72"></line>
-                      <line x1="18" y1="32" x2="60" y2="98"></line>
-                      <line x1="18" y1="60" x2="60" y2="22"></line>
-                      <line x1="18" y1="60" x2="60" y2="48"></line>
-                      <line x1="18" y1="60" x2="60" y2="72"></line>
-                      <line x1="18" y1="60" x2="60" y2="98"></line>
-                      <line x1="18" y1="88" x2="60" y2="22"></line>
-                      <line x1="18" y1="88" x2="60" y2="48"></line>
-                      <line x1="18" y1="88" x2="60" y2="72"></line>
-                      <line x1="18" y1="88" x2="60" y2="98"></line>
-                      <line x1="60" y1="22" x2="102" y2="32"></line>
-                      <line x1="60" y1="22" x2="102" y2="60"></line>
-                      <line x1="60" y1="22" x2="102" y2="88"></line>
-                      <line x1="60" y1="48" x2="102" y2="32"></line>
-                      <line x1="60" y1="48" x2="102" y2="60"></line>
-                      <line x1="60" y1="48" x2="102" y2="88"></line>
-                      <line x1="60" y1="72" x2="102" y2="32"></line>
-                      <line x1="60" y1="72" x2="102" y2="60"></line>
-                      <line x1="60" y1="72" x2="102" y2="88"></line>
-                      <line x1="60" y1="98" x2="102" y2="32"></line>
-                      <line x1="60" y1="98" x2="102" y2="60"></line>
-                      <line x1="60" y1="98" x2="102" y2="88"></line>
+                    <!-- 电路底板：芯片四周的走线，静态细线 -->
+                    <g class="ai-circuit-base">
+                      <path d="M38 48H28V26H14" pathLength="100"></path>
+                      <path d="M38 60H20V44H8" pathLength="100"></path>
+                      <path d="M38 72H28V94H14" pathLength="100"></path>
+                      <path d="M82 48H92V26H106" pathLength="100"></path>
+                      <path d="M82 60H100V44H112" pathLength="100"></path>
+                      <path d="M82 72H92V94H106" pathLength="100"></path>
+                      <path d="M48 38V28H34V14" pathLength="100"></path>
+                      <path d="M72 38V28H86V14" pathLength="100"></path>
+                      <path d="M48 82V92H34V106" pathLength="100"></path>
+                      <path d="M72 82V92H86V106" pathLength="100"></path>
                     </g>
-                    <g class="ai-net-nodes">
-                      <circle cx="18" cy="32" r="4"></circle>
-                      <circle cx="18" cy="60" r="4"></circle>
-                      <circle cx="18" cy="88" r="4"></circle>
-                      <circle cx="60" cy="22" r="4"></circle>
-                      <circle cx="60" cy="48" r="4"></circle>
-                      <circle cx="60" cy="72" r="4"></circle>
-                      <circle cx="60" cy="98" r="4"></circle>
-                      <circle cx="102" cy="32" r="4"></circle>
-                      <circle cx="102" cy="60" r="4"></circle>
-                      <circle cx="102" cy="88" r="4"></circle>
+                    <!-- 数据流光：与底板同路径的短亮段，沿走线循环流动 -->
+                    <g class="ai-circuit-flow">
+                      <path d="M38 48H28V26H14" pathLength="100"></path>
+                      <path d="M38 60H20V44H8" pathLength="100"></path>
+                      <path d="M38 72H28V94H14" pathLength="100"></path>
+                      <path d="M82 48H92V26H106" pathLength="100"></path>
+                      <path d="M82 60H100V44H112" pathLength="100"></path>
+                      <path d="M82 72H92V94H106" pathLength="100"></path>
+                      <path d="M48 38V28H34V14" pathLength="100"></path>
+                      <path d="M72 38V28H86V14" pathLength="100"></path>
+                      <path d="M48 82V92H34V106" pathLength="100"></path>
+                      <path d="M72 82V92H86V106" pathLength="100"></path>
+                    </g>
+                    <!-- 走线末端焊盘：呼吸式亮灭 -->
+                    <g class="ai-circuit-pads">
+                      <circle cx="14" cy="26" r="2"></circle>
+                      <circle cx="8" cy="44" r="2"></circle>
+                      <circle cx="14" cy="94" r="2"></circle>
+                      <circle cx="106" cy="26" r="2"></circle>
+                      <circle cx="112" cy="44" r="2"></circle>
+                      <circle cx="106" cy="94" r="2"></circle>
+                      <circle cx="34" cy="14" r="2"></circle>
+                      <circle cx="86" cy="14" r="2"></circle>
+                      <circle cx="34" cy="106" r="2"></circle>
+                      <circle cx="86" cy="106" r="2"></circle>
+                    </g>
+                    <!-- 芯片本体 + 内核 + 四个 Die 焊点 -->
+                    <rect class="ai-chip-body" x="38" y="38" width="44" height="44" rx="9"></rect>
+                    <rect class="ai-chip-core" x="50" y="50" width="20" height="20" rx="4"></rect>
+                    <g class="ai-chip-pins">
+                      <circle cx="56" cy="56" r="1.6"></circle>
+                      <circle cx="64" cy="56" r="1.6"></circle>
+                      <circle cx="56" cy="64" r="1.6"></circle>
+                      <circle cx="64" cy="64" r="1.6"></circle>
                     </g>
                   </svg>
                 </div>
