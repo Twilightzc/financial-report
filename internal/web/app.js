@@ -868,8 +868,12 @@ const app = createApp({
       doSearch();
     }
 
+    // 抽屉关闭后回焦入口（键盘可达性）；移动端 focus 不会拉起软键盘，取不到元素时静默跳过。
     function focusValHistoryEntry() {
-      nextTick(() => { if (valHistoryEntryRef.value) valHistoryEntryRef.value.focus(); });
+      nextTick(() => {
+        const el = valHistoryEntryRef.value;
+        if (el && typeof el.focus === 'function') el.focus();
+      });
     }
 
     // D4：抽屉尺寸用响应式 ref（≤768px 全屏），不依赖 el-drawer 的 class 落点。
@@ -1938,10 +1942,10 @@ const app = createApp({
             <div v-for="r in valuationHistory" :key="r.code" class="vh-item"
                  role="button" tabindex="0" :aria-label="'查看 ' + (r.name || r.code) + ' 的估值记录'"
                  @click="openValuationRecord(r)"
-                 @keydown.enter.prevent="openValuationRecord(r)"
-                 @keydown.space.prevent="openValuationRecord(r)">
+                 @keydown.enter.self.prevent="openValuationRecord(r)"
+                 @keydown.space.self.prevent="openValuationRecord(r)">
               <div class="vh-item-head">
-                <span class="vh-name">{{ r.name || '—' }}</span>
+                <span class="vh-name" :title="r.name || '—'">{{ r.name || '—' }}</span>
                 <span class="vh-code">{{ r.code }}</span>
                 <span class="vh-market">{{ marketLabelOf(r.market) }}</span>
                 <span v-if="r.source === 'ai'" class="vh-source">AI 推荐</span>

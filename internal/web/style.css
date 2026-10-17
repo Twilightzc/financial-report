@@ -645,56 +645,68 @@ td.num, .val, .yoy {
 /* 顶栏常驻入口：桌面在搜索区右侧；≤768px 搜索栏独占一行（order:3），入口留在品牌行右侧 */
 .val-hist-entry {
   display: inline-flex; align-items: center; gap: 6px;
-  height: 34px; padding: 0 12px;
+  height: 34px; padding: 0 12px; min-width: 34px; /* ≤480px 仅图标+徽标时不塌陷 */
   border: 1px solid var(--line); border-radius: 8px;
   background: #fff; color: var(--ink-2);
   font: inherit; font-size: 13px; cursor: pointer; flex-shrink: 0;
   white-space: nowrap;
   transition: color .15s, border-color .15s, background .15s;
 }
+/* 图标与徽标均为不可压缩项：极窄屏下徽标不会挤压/遮住图标 */
+.val-hist-entry svg { display: block; flex: 0 0 auto; }
 .val-hist-entry:hover { color: var(--brand); border-color: var(--brand); background: var(--brand-soft); }
 .vh-entry-badge {
   min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
   background: var(--brand); color: #fff; font-size: 11px; line-height: 18px;
-  text-align: center; font-variant-numeric: tabular-nums;
+  text-align: center; font-variant-numeric: tabular-nums; flex: 0 0 auto;
 }
 
 /* 抽屉内部：固定头/滚动列表/固定脚注。class 落在 el-drawer 或其 overlay 祖先上均可命中 */
 .val-history-drawer .el-drawer__body { padding: 0; overflow: hidden; }
-.vh-drawer { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+/* 320px 移动端兜底：抽屉内容本身绝不横向滚动（各子项内部换行/省略） */
+.vh-drawer { display: flex; flex-direction: column; height: 100%; min-height: 0;
+  min-width: 0; max-width: 100%; overflow-x: hidden; }
 .vh-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 14px 20px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
-.vh-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+  flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+.vh-title { font-size: 16px; font-weight: 700; color: var(--ink); min-width: 0; }
+.vh-head .el-button { flex: 0 0 auto; }
 .vh-count { margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
-.vh-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px;
-  display: flex; flex-direction: column; gap: 10px; }
-.vh-item { position: relative; padding: 12px 42px 12px 14px;
+.vh-list { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
+  padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+/* 卡片：右侧 42px 内边距为 32×32 删除按钮预留空间；overflow:hidden 兜住任何子项溢出 */
+.vh-item { position: relative; min-width: 0; overflow: hidden; padding: 12px 42px 12px 14px;
   border: 1px solid var(--line); border-radius: 8px; background: #fff;
   cursor: pointer; outline: none; transition: border-color .15s, background .15s; }
 .vh-item:hover, .vh-item:focus-visible { border-color: var(--brand); background: #fffafa; }
-.vh-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.vh-name { font-weight: 700; color: var(--ink); font-size: 14px; }
-.vh-code { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.vh-market { font-size: 11px; line-height: 1; padding: 3px 5px;
+/* 名称行单行不换行：名称可收缩并省略，代码/市场/来源标签保持完整，删除按钮绝对定位不受挤压 */
+.vh-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; min-width: 0; }
+.vh-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 700; color: var(--ink); font-size: 14px; }
+.vh-code { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.vh-market { font-size: 11px; line-height: 1; padding: 3px 5px; flex: 0 0 auto;
   border: 1px solid var(--line); border-radius: 4px; color: var(--muted); }
-.vh-source { margin-left: auto; font-size: 11px; line-height: 1; padding: 3px 6px;
+.vh-source { margin-left: auto; font-size: 11px; line-height: 1; padding: 3px 6px; flex: 0 0 auto;
   border: 1px solid var(--brand); border-radius: 4px; color: var(--brand); background: var(--brand-soft); }
-.vh-main { margin-top: 6px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.vh-per-share { font-size: 15px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
-.vh-equity { font-size: 12px; color: var(--ink-2); }
+.vh-main { margin-top: 6px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  min-width: 0; overflow-wrap: anywhere; }
+.vh-per-share { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere;
+  font-size: 15px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.vh-equity { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: var(--ink-2); }
 .vh-equity.vh-primary { font-size: 15px; font-weight: 700; color: var(--ink); }
-.vh-meta { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.6;
+.vh-meta { margin-top: 4px; min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.6;
   overflow-wrap: anywhere; }
-.vh-del { position: absolute; top: 8px; right: 8px;
-  width: 32px; height: 32px; padding: 0; border: 0; border-radius: 6px;
+.vh-del { position: absolute; top: 8px; right: 8px; z-index: 1;
+  flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 6px;
   display: inline-flex; align-items: center; justify-content: center;
   background: transparent; color: var(--muted); cursor: pointer;
   transition: color .15s, background .15s; }
+.vh-del svg { display: block; flex: 0 0 auto; }
 .vh-del:hover { color: var(--bad); background: var(--brand-soft); }
-.vh-empty { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
-.vh-empty-tip { margin: 0; color: var(--muted); font-size: 12px; text-align: center; }
+.vh-empty { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  display: flex; align-items: center; justify-content: center; padding: 12px; }
+.vh-empty-tip { margin: 0; color: var(--muted); font-size: 12px; text-align: center; overflow-wrap: anywhere; }
 .vh-foot { flex: 0 0 auto; padding: 12px 20px; border-top: 1px solid var(--line);
-  color: var(--muted); font-size: 12px; }
+  color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 
 @media (max-width: 768px) {
   .val-hist-entry { margin-left: auto; }
