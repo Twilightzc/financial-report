@@ -865,7 +865,8 @@ const app = createApp({
         `确定清空全部 ${n} 条估值记录？此操作不可恢复。`,
         '清空估值记录',
         { confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning',
-          confirmButtonClass: 'el-button--danger', autofocus: false }
+          confirmButtonClass: 'el-button--danger', autofocus: false,
+          customClass: 'vh-clear-confirm' }
       ).then(async () => {
         valHistoryClearing.value = true;
         const seq = ++valHistorySeq;
@@ -2077,7 +2078,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card" v-loading="aiLoading">
+          <section class="card">
             <div class="card-head"><h2 class="card-title">AI 智能分析</h2></div>
             <div class="card-body">
               <div class="ai-form">
@@ -2093,7 +2094,54 @@ const app = createApp({
                 <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
-              <template v-if="aiResult">
+              <!-- 等待态：神经网络脉冲动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩 -->
+              <div v-if="aiLoading" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
+                <div class="ai-think-visual" aria-hidden="true">
+                  <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
+                    <g class="ai-net-edges">
+                      <line x1="18" y1="32" x2="60" y2="22"></line>
+                      <line x1="18" y1="32" x2="60" y2="48"></line>
+                      <line x1="18" y1="32" x2="60" y2="72"></line>
+                      <line x1="18" y1="32" x2="60" y2="98"></line>
+                      <line x1="18" y1="60" x2="60" y2="22"></line>
+                      <line x1="18" y1="60" x2="60" y2="48"></line>
+                      <line x1="18" y1="60" x2="60" y2="72"></line>
+                      <line x1="18" y1="60" x2="60" y2="98"></line>
+                      <line x1="18" y1="88" x2="60" y2="22"></line>
+                      <line x1="18" y1="88" x2="60" y2="48"></line>
+                      <line x1="18" y1="88" x2="60" y2="72"></line>
+                      <line x1="18" y1="88" x2="60" y2="98"></line>
+                      <line x1="60" y1="22" x2="102" y2="32"></line>
+                      <line x1="60" y1="22" x2="102" y2="60"></line>
+                      <line x1="60" y1="22" x2="102" y2="88"></line>
+                      <line x1="60" y1="48" x2="102" y2="32"></line>
+                      <line x1="60" y1="48" x2="102" y2="60"></line>
+                      <line x1="60" y1="48" x2="102" y2="88"></line>
+                      <line x1="60" y1="72" x2="102" y2="32"></line>
+                      <line x1="60" y1="72" x2="102" y2="60"></line>
+                      <line x1="60" y1="72" x2="102" y2="88"></line>
+                      <line x1="60" y1="98" x2="102" y2="32"></line>
+                      <line x1="60" y1="98" x2="102" y2="60"></line>
+                      <line x1="60" y1="98" x2="102" y2="88"></line>
+                    </g>
+                    <g class="ai-net-nodes">
+                      <circle cx="18" cy="32" r="4"></circle>
+                      <circle cx="18" cy="60" r="4"></circle>
+                      <circle cx="18" cy="88" r="4"></circle>
+                      <circle cx="60" cy="22" r="4"></circle>
+                      <circle cx="60" cy="48" r="4"></circle>
+                      <circle cx="60" cy="72" r="4"></circle>
+                      <circle cx="60" cy="98" r="4"></circle>
+                      <circle cx="102" cy="32" r="4"></circle>
+                      <circle cx="102" cy="60" r="4"></circle>
+                      <circle cx="102" cy="88" r="4"></circle>
+                    </g>
+                  </svg>
+                </div>
+                <p class="ai-think-text">分析中请稍等<span class="ai-think-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
+                <p class="ai-think-tip">AI 正在研读财务报表与行业信息</p>
+              </div>
+              <template v-else-if="aiResult">
                 <div class="ai-radar"><div ref="aiRadarRef" class="ai-radar-box"></div></div>
                 <div class="ai-scores">
                   <div v-for="s in aiResult.scores" :key="s.dimension" class="ai-score-row">
@@ -2326,9 +2374,11 @@ const app = createApp({
               <span v-if="valuationHistory.length" class="vh-count">{{ valuationHistory.length }}</span>
             </div>
             <div class="vh-head-actions">
-              <el-button v-if="valuationHistory.length" text type="danger" size="small"
+              <el-button v-if="valuationHistory.length" class="vh-clear-btn" text type="danger" size="small"
                          :loading="valHistoryClearing" :disabled="valHistoryClearing"
                          @click="clearValuationHistory">清空全部</el-button>
+              <!-- 破坏性操作与关闭之间加视觉分隔，并拉大间距，避免误点（至少 36px 触控区） -->
+              <span v-if="valuationHistory.length" class="vh-head-sep" aria-hidden="true"></span>
               <!-- 显式关闭入口：手机端抽屉全宽会盖住遮罩、也没有 Esc，必须始终可见 -->
               <button type="button" class="vh-close" title="关闭" aria-label="关闭估值记录"
                       @click="valHistoryOpen = false">

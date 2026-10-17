@@ -669,12 +669,15 @@ td.num, .val, .yoy {
 .vh-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .vh-title { font-size: 16px; font-weight: 700; color: var(--ink); min-width: 0; }
-/* 头部操作区：清空（危险文字按钮）+ 关闭（中性描边图标按钮），两者语义与视觉区分 */
-.vh-head-actions { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+/* 头部操作区：清空（危险文字按钮）+ 关闭（中性描边图标按钮），两者语义与视觉区分。
+   二者之间留 16px 间距并加分隔线，避免破坏性操作被误点；触控目标 ≥36px（移动端 44px）。 */
+.vh-head-actions { display: inline-flex; align-items: center; gap: 16px; flex: 0 0 auto; margin-left: auto; }
 .vh-head .el-button { flex: 0 0 auto; }
+.vh-head .vh-clear-btn { min-height: 36px; padding: 0 12px; }
+.vh-head-sep { flex: 0 0 auto; width: 1px; height: 22px; background: var(--line); }
 .vh-close {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 32px; height: 32px; padding: 0; flex: 0 0 auto;
+  width: 36px; height: 36px; padding: 0; flex: 0 0 auto;
   border: 1px solid var(--line); border-radius: 8px;
   background: #fff; color: var(--muted); cursor: pointer;
   transition: color .15s, border-color .15s, background .15s;
@@ -751,6 +754,20 @@ td.num, .val, .yoy {
   .vh-list { padding: 10px; }
   .vh-head, .vh-foot { padding-left: 14px; padding-right: 14px; }
 }
+/* 触屏设备（含横屏手机/平板）或窄屏：触控目标 ≥44px；清空与关闭之间保持 16px 间距 + 分隔线 */
+@media (max-width: 768px), (pointer: coarse) {
+  .vh-head-actions { gap: 16px; }
+  .vh-head .vh-clear-btn { min-height: 44px; min-width: 72px; padding: 0 14px; }
+  .vh-head-sep { height: 26px; }
+  .vh-close { width: 44px; height: 44px; border-radius: 10px; }
+  .vh-close svg { width: 18px; height: 18px; }
+  /* 二次确认弹窗：窄屏不贴边、按钮 ≥44px 且按钮间留足间距，避免误触 */
+  .vh-clear-confirm { width: calc(100% - 32px); max-width: 360px; }
+  .vh-clear-confirm .el-message-box__btns { display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap; }
+  .vh-clear-confirm .el-message-box__btns .el-button {
+    min-height: 44px; min-width: 88px; margin: 0; padding: 0 18px;
+  }
+}
 @media (max-width: 480px) {
   .vh-entry-text { display: none; }
   .val-hist-entry { padding: 0 10px; }
@@ -795,9 +812,79 @@ td.num, .val, .yoy {
 .ai-disclaimer { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
 .ai-company-hint { color: var(--brand); font-size: 12px; line-height: 1.6; margin: 10px 0 0; }
 
+/* AI 分析等待态：纯 CSS/SVG 神经网络脉冲（无图片、无外部资源，离线可用）。
+   动画仅改 opacity/transform/stroke-dashoffset，避免 layout 抖动；桌面与移动端自适应居中。 */
+.ai-think {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 26px 12px 30px; text-align: center;
+}
+.ai-think-visual {
+  position: relative; width: 132px; height: 132px; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+}
+/* 背景光晕：呼吸式缩放，给图案一点纵深 */
+.ai-think-visual::before {
+  content: ""; position: absolute; inset: 6px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(214, 64, 64, .16), rgba(214, 64, 64, 0) 70%);
+  animation: aiThinkHalo 3s ease-in-out infinite;
+}
+.ai-think-net { position: relative; width: 120px; height: 120px; overflow: visible; }
+/* 连线：虚线沿左→右流动，模拟信号在神经网络中传播 */
+.ai-net-edges line {
+  stroke: rgba(214, 64, 64, .3); stroke-width: 1.1; stroke-linecap: round;
+  stroke-dasharray: 5 7;
+  animation: aiNetFlow 2.8s linear infinite;
+}
+.ai-net-edges line:nth-child(4n+1) { animation-delay: -0.1s; }
+.ai-net-edges line:nth-child(4n+2) { animation-delay: -0.8s; }
+.ai-net-edges line:nth-child(4n+3) { animation-delay: -1.5s; }
+.ai-net-edges line:nth-child(4n+4) { animation-delay: -2.2s; }
+@keyframes aiNetFlow { to { stroke-dashoffset: -24; } }
+/* 节点：错峰脉冲，三层感知机的“放电”感 */
+.ai-net-nodes circle {
+  fill: var(--brand); transform-box: fill-box; transform-origin: center;
+  animation: aiNetNode 2.4s ease-in-out infinite;
+}
+.ai-net-nodes circle:nth-child(3n+1) { animation-delay: 0s; }
+.ai-net-nodes circle:nth-child(3n+2) { animation-delay: -0.8s; }
+.ai-net-nodes circle:nth-child(3n) { animation-delay: -1.6s; }
+@keyframes aiNetNode {
+  0%, 100% { opacity: .35; transform: scale(.8); }
+  50% { opacity: 1; transform: scale(1.25); }
+}
+.ai-think-text {
+  margin: 2px 0 0; font-size: 14px; font-weight: 700; color: var(--ink); letter-spacing: .5px;
+}
+.ai-think-dots { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: 1px; }
+.ai-think-dots i {
+  width: 4px; height: 4px; border-radius: 50%; background: var(--brand);
+  animation: aiThinkDot 1.2s ease-in-out infinite;
+}
+.ai-think-dots i:nth-child(2) { animation-delay: .2s; }
+.ai-think-dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes aiThinkDot {
+  0%, 60%, 100% { opacity: .25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+.ai-think-tip { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+@keyframes aiThinkHalo {
+  0%, 100% { opacity: .55; transform: scale(.92); }
+  50% { opacity: 1; transform: scale(1.06); }
+}
+/* 尊重系统“减少动态效果”：停掉动画但保留静态图案与文案 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-think-visual::before, .ai-net-edges line, .ai-net-nodes circle, .ai-think-dots i { animation: none; }
+  .ai-net-nodes circle { opacity: .85; }
+  .ai-think-dots i { opacity: .7; }
+}
+
 @media (max-width: 768px) {
   .ai-related-cols { grid-template-columns: 1fr; } /* 窄屏上下堆叠，不横向滚动 */
   .ai-chip { min-height: 32px; }                   /* 触控目标 ≥ 28px */
+  .ai-think { padding: 20px 8px 24px; }
+  .ai-think-visual { width: 120px; height: 120px; }
+  .ai-think-net { width: 108px; height: 108px; }
+  .ai-think-text { font-size: 13px; }
 }
 
 /* D8/D10：业务板块龙头与相关公司（复用既有 chip 体系） */
