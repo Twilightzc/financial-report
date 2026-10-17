@@ -27,7 +27,7 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
   ],
   "conclusion": "总体结论（{conclusion}，分段分点、用换行分隔，覆盖：①公司质地与商业模式，②核心竞争优势/护城河，③财务健康与盈利质量（结合盈利能力/偿债能力/现金获取能力三个维度），④主要风险与隐忧，⑤综合评级与是否值得关注）",
   "industry": {"name": "行业名称", "prospect": "前景(1-2句)", "competition": "竞争格局(1-2句)", "application": "应用方向/需求(1-2句)"},
-  "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)", "related": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "与该板块的关系", "note": "一句话说明"}]}],
+  "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)", "leaders": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "该细分行业的头部公司/行业地位", "note": "一句话说明"}], "related": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "与该板块的关系", "note": "一句话说明"}]}],
   "chain": {
     "upstream": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "上游角色", "note": "一句话说明"}],
     "downstream": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "下游角色", "note": "一句话说明"}]
@@ -66,26 +66,29 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - 依据主营构成数据（各板块营收占比、利润占比、毛利率）与行业知识，列出公司主要业务板块（2-4 个）。
 - 每个板块：name（板块名）、stage（所处阶段：起步/成长/成熟/衰退）、contribution（贡献占比，同时看营收占比与利润占比，如「营收占 87%、利润占 89%」；若利润占比明显低于营收占比，说明该板块盈利质量偏弱，要在前景/风险里点出）、prospect（前景 1 句）、risk（主要风险 1 句）。
 - 占比必须贴近主营构成数据给出的实际数值，不要凭空编造；结合毛利率判断该板块是否真正赚钱。
-- 每个板块可输出 related（0–3 家）：只列与该板块强相关的客户/供应商/渠道/合作方，
-  relation 写该板块内的角色（如「包材供应」「经销渠道」），note 写与该板块的关系。
-- 禁止把公司级行业龙头名单、chain/partners 整段复制到每个板块；不同板块允许出现同一家公司，
-  不做跨列表去重；同一板块内不得重复、不得包含当前公司自身。
-- 无把握时输出空数组 []；name/relation/note 的长度与证券简称要求同「相关公司规则」。
-- businesses 内仅允许新增 related，name/stage/contribution/prospect/risk 保持既有要求。
+- 每个板块可输出 leaders（0–3 家）：只列该板块所属细分行业的头部/龙头公司（同行竞争者），
+  以证券简称为主；不得把公司级全局行业龙头榜单复制到每个板块；不同板块允许同一家公司，
+  不做跨列表去重；同一板块内不重复、不得包含当前公司自身；无把握输出空数组 []。
+- 每个板块可输出 related（0–3 家）：只列与该板块强相关的客户/供应商/渠道/合作方；
+  不得把全局行业龙头、businesses[].leaders 或 chain/partners 整段复制到各板块；
+  不同板块允许同一家公司，不做跨列表去重；同一板块内不重复、不含当前公司自身；无把握输出空数组 []。
+- leaders 与 related 语义不同、分别输出，禁止互相替代、合并或去重；
+  businesses 内仅允许新增 leaders / related，name/stage/contribution/prospect/risk 保持既有要求。
 
 ## 相关公司规则（产业链上下游 / 合作公司）
-- 行业龙头与主要竞争对手由系统确定性获取，**不要输出 leaders / competitors 字段**；即使输出也会被忽略。
+- 全局行业龙头由系统确定性获取，不要输出顶层 leaders / competitors 字段；
+  businesses[].leaders 是细分业务板块龙头，按业务板块规则输出，不在此禁止范围内。
 - 必须输出 chain.upstream、chain.downstream、partners 三组字段；无内容时输出空数组 []。
 - 产业链上下游围绕公司营收占比最大的主营板块展开；上游=原材料/零部件/设备/能源等供应商侧，
-  下游=客户/渠道/终端应用等需求侧。竞争对手不得放入上游或下游。
+  下游=客户/渠道/终端应用等需求侧。同业公司不得放入上游或下游。
 - 公司统一使用证券简称（如「贵州茅台」「宁德时代」），不得使用「XX股份有限公司」等法定全称；优先 A 股上市公司。
 - 上游、下游、合作公司各最多 3 家；不得包含当前公司自身；同一列表内不得重复。
 - code 为可选项，只在确信时填写 6 位数字；不确定就留空，不得猜测或编造。
 - 合作关系只列公开可查、较高把握的内容；不确定时输出空数组，不得编造合作方。
 - relation ≤ 20 字，note ≤ 30 字；只描述产业链角色或合作内容，不写买卖建议、评级、目标价。
 - 不得改动既有 scores / conclusion / industry / valuation 的任何内容；
-  businesses 中除新增 related 外，name/stage/contribution/prospect/risk 保持既有要求，
-  不得因 related 改写成公司级龙头名单。
+  businesses 中除新增 leaders / related 外，name/stage/contribution/prospect/risk 保持既有要求，
+  不得因 leaders / related 改写成公司级龙头名单。
 `
 
 // aiScoreDimensions 五个评分维度的固定顺序与名称。
@@ -475,8 +478,8 @@ const (
 )
 
 // parseBusinesses 逐条宽松解析业务板块；顶层不是数组 → nil；单条异常只丢该条。
-// 每条 related 复用 parseCompanyRefs + sanitizeCompanyRefs：
-// 先排除自身、再去重、再截断到 3 家；不同板块的 seen 互相独立（不跨板块去重）。
+// 每条 leaders / related 各自复用 parseCompanyRefs + sanitizeCompanyRefs：
+// 先排除自身、再去重、再截断到 3 家；两个字段互相独立，不同板块之间也不去重。
 func parseBusinesses(raw json.RawMessage, selfName string) []model.AIBusiness {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
@@ -493,6 +496,7 @@ func parseBusinesses(raw json.RawMessage, selfName string) []model.AIBusiness {
 			Contribution string          `json:"contribution"`
 			Prospect     string          `json:"prospect"`
 			Risk         string          `json:"risk"`
+			Leaders      json.RawMessage `json:"leaders"` // D10：类型异常只影响本板块 leaders
 			Related      json.RawMessage `json:"related"` // D8：类型异常只影响本板块 related
 		}
 		if err := json.Unmarshal(item, &b); err != nil {
@@ -501,7 +505,11 @@ func parseBusinesses(raw json.RawMessage, selfName string) []model.AIBusiness {
 		if strings.TrimSpace(b.Name) == "" {
 			continue // null / 空对象 / 缺板块名：无法展示，直接丢弃
 		}
+		leaders := sanitizeCompanyRefs(parseCompanyRefs(b.Leaders), selfName)
 		related := sanitizeCompanyRefs(parseCompanyRefs(b.Related), selfName)
+		if len(leaders) == 0 {
+			leaders = nil // omitempty：无细分业务龙头不输出空数组
+		}
 		if len(related) == 0 {
 			related = nil // omitempty：无相关公司不输出空数组
 		}
@@ -511,6 +519,7 @@ func parseBusinesses(raw json.RawMessage, selfName string) []model.AIBusiness {
 			Contribution: b.Contribution,
 			Prospect:     b.Prospect,
 			Risk:         b.Risk,
+			Leaders:      leaders,
 			Related:      related,
 		})
 	}

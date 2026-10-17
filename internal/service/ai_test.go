@@ -247,16 +247,19 @@ func TestParseAIResultWrongTypes(t *testing.T) {
 }
 
 func TestParseAIResultIgnoresLeaders(t *testing.T) {
-	// AI 返回的 leaders 不在解析结构中，应被忽略且不影响其余字段。
-	r, err := ParseAIResult(aiRawWith(`,"chain":{"upstream":[{"name":"甲"}]},"leaders":{"companies":[{"name":"伪造"}]}`))
+	// 顶层 leaders / competitors 不在解析结构中，应被忽略；businesses[].leaders 仍解析。
+	r, err := ParseAIResult(aiRawWith(`,"chain":{"upstream":[{"name":"甲"}]},"leaders":{"companies":[{"name":"伪造"}]},"competitors":{"companies":[{"name":"伪造2"}]},"businesses":[{"name":"板块","leaders":[{"name":"细分龙头"}]}]`))
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
 	if r.Leaders != nil {
-		t.Fatalf("AI 返回的 leaders 不应生效: %+v", r.Leaders)
+		t.Fatalf("AI 返回的顶层 leaders 不应生效: %+v", r.Leaders)
 	}
 	if r.Chain == nil || len(r.Chain.Upstream) != 1 {
 		t.Fatalf("其余字段应正常解析: %+v", r.Chain)
+	}
+	if len(r.Businesses) != 1 || len(r.Businesses[0].Leaders) != 1 || r.Businesses[0].Leaders[0].Name != "细分龙头" {
+		t.Fatalf("businesses[].leaders 应正常解析: %+v", r.Businesses)
 	}
 }
 
@@ -512,9 +515,159 @@ func TestBuildAIPromptBusinessRelated(t *testing.T) {
 	for _, want := range []string{
 		`"related"`,
 		"每个板块可输出 related（0–3 家）",
-		"禁止把公司级行业龙头名单、chain/partners 整段复制到每个板块",
-		"businesses 内仅允许新增 related",
+		"不得把全局行业龙头、businesses[].leaders 或 chain/partners 整段复制到各板块",
+		"businesses 内仅允许新增 leaders / related",
 		"name/stage/contribution/prospect/risk 保持既有要求",
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("系统提示词缺少约束 %q", want)
+		}
+	}
+}
+
+// ===================== R17/D10 细分业务龙头 =====================
+
+func TestParseBusinessesLeaders(t *testing.T) {
+	raw := aiRawWith(`,"businesses":[{"name":"茅台酒","stage":"成熟","contribution":"营收占 87%","prospect":"稳健","risk":"需求波动","leaders":[{"name":" 五粮液 ","code":"000858","market":"","relation":"浓香型白酒龙头","note":"同属高端白酒"},{"name":"泸州老窖","market":"非A股"}]}]`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(r.Businesses) != 1 {
+		t.Fatalf("板块数量不符: %d", len(r.Businesses))
+	}
+	b := r.Businesses[0]
+	if b.Name != "茅台酒" || b.Risk != "需求波动" {
+		t.Fatalf("既有字段不应受 leaders 影响: %+v", b)
+	}
+	if len(b.Leaders) != 2 {
+		t.Fatalf("leaders 数量不符: %d", len(b.Leaders))
+	}
+	first := b.Leaders[0]
+	if first.Name != "五粮液" || first.Code != "000858" || first.Market != "A股" || first.Relation != "浓香型白酒龙头" || first.Note != "同属高端白酒" {
+		t.Fatalf("leaders 字段清洗不符: %+v", first)
+	}
+	if b.Leaders[1].Market != "非A股" {
+		t.Fatalf("非A股应保留: %+v", b.Leaders[1])
+	}
+}
+
+func TestParseBusinessesLeadersMissing(t *testing.T) {
+	raw := aiRawWith(`,"businesses":[{"name":"甲","related":[{"name":"相关甲"}]},{"name":"乙","leaders":null,"related":[{"name":"相关乙"}]},{"name":"丙","leaders":[],"related":[{"name":"相关丙"}]}]`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(r.Businesses) != 3 {
+		t.Fatalf("板块数量不符: %d", len(r.Businesses))
+	}
+	for _, b := range r.Businesses {
+		if len(b.Leaders) != 0 {
+			t.Fatalf("%s: 缺失/null/空数组应得到空 leaders: %+v", b.Name, b.Leaders)
+		}
+		if len(b.Related) != 1 {
+			t.Fatalf("%s: related 不应受影响: %+v", b.Name, b.Related)
+		}
+	}
+}
+
+func TestParseBusinessesLeadersWrongType(t *testing.T) {
+	raw := aiRawWith(`,"businesses":[{"name":"甲","leaders":"oops","related":[{"name":"相关甲"}]},{"name":"乙","leaders":{"name":"x"}},{"name":"丙","leaders":[1,"x",{"name":"丁"}]}]`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("脏类型不应使解析失败: %v", err)
+	}
+	if len(r.Businesses) != 3 {
+		t.Fatalf("坏 leaders 不应丢板块: %d", len(r.Businesses))
+	}
+	if len(r.Businesses[0].Leaders) != 0 || len(r.Businesses[1].Leaders) != 0 {
+		t.Fatalf("非数组 leaders 应按空处理: %+v", r.Businesses)
+	}
+	if len(r.Businesses[0].Related) != 1 {
+		t.Fatalf("坏 leaders 不应影响 related: %+v", r.Businesses[0])
+	}
+	if len(r.Businesses[2].Leaders) != 1 || r.Businesses[2].Leaders[0].Name != "丁" {
+		t.Fatalf("单条非对象只丢该条: %+v", r.Businesses[2].Leaders)
+	}
+}
+
+func TestParseBusinessesLeadersSelf(t *testing.T) {
+	// 自身位于前 3 → 先排除后补足。
+	raw := aiRawWith(`,"businesses":[{"name":"板块一","leaders":[{"name":"贵州茅台"},{"name":"甲"},{"name":"乙"},{"name":"丙"}]},{"name":"板块二","leaders":[{"name":" 贵州 茅台 "}]}]`)
+	r, err := ParseAIResult(raw, "贵州茅台")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(r.Businesses) != 2 {
+		t.Fatalf("板块数量不符: %d", len(r.Businesses))
+	}
+	first := r.Businesses[0].Leaders
+	if len(first) != aiCompanyMax {
+		t.Fatalf("排除自身后应补足 3 家: %+v", first)
+	}
+	want := []string{"甲", "乙", "丙"}
+	for i, w := range want {
+		if first[i].Name != w {
+			t.Fatalf("板块内顺序不符: %+v", first)
+		}
+	}
+	if len(r.Businesses[1].Leaders) != 0 {
+		t.Fatalf("全部为自身时 leaders 应为空: %+v", r.Businesses[1].Leaders)
+	}
+}
+
+func TestParseBusinessesLeadersDedupeCap(t *testing.T) {
+	raw := aiRawWith(`,"businesses":[{"name":"板块","leaders":[{"name":"甲","code":"12345"},{"name":" 甲 ","code":"600001"},{"name":"乙"},{"name":"丙"},{"name":"丁"}]}]`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	leaders := r.Businesses[0].Leaders
+	if len(leaders) != aiCompanyMax {
+		t.Fatalf("应截断为 %d 家: %+v", aiCompanyMax, leaders)
+	}
+	if leaders[0].Name != "甲" || leaders[0].Code != "" {
+		t.Fatalf("同名去重/非法 code 只丢字段不符: %+v", leaders[0])
+	}
+	if leaders[1].Name != "乙" || leaders[2].Name != "丙" {
+		t.Fatalf("截断顺序不符: %+v", leaders)
+	}
+}
+
+func TestParseBusinessesLeadersRelatedIndependent(t *testing.T) {
+	// 同一公司同时出现在同板块 leaders 与 related → 两边都保留；不同板块互不去重。
+	raw := aiRawWith(`,"businesses":[{"name":"板块一","leaders":[{"name":"甲公司"}],"related":[{"name":"甲公司"}]},{"name":"板块二","leaders":[{"name":"甲公司"}]}],"chain":{"upstream":[{"name":"甲公司"}]},"partners":[{"name":"甲公司"}]`)
+	r, err := ParseAIResult(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(r.Businesses) != 2 {
+		t.Fatalf("板块数量不符: %d", len(r.Businesses))
+	}
+	b1 := r.Businesses[0]
+	if len(b1.Leaders) != 1 || b1.Leaders[0].Name != "甲公司" {
+		t.Fatalf("leaders 应保留: %+v", b1.Leaders)
+	}
+	if len(b1.Related) != 1 || b1.Related[0].Name != "甲公司" {
+		t.Fatalf("related 应独立保留: %+v", b1.Related)
+	}
+	if len(r.Businesses[1].Leaders) != 1 {
+		t.Fatalf("跨板块不应去重: %+v", r.Businesses[1].Leaders)
+	}
+	if r.Chain == nil || len(r.Chain.Upstream) != 1 || len(r.Partners) != 1 {
+		t.Fatalf("chain/partners 不应与 leaders 合并去重: chain=%+v partners=%+v", r.Chain, r.Partners)
+	}
+}
+
+func TestBuildAIPromptBusinessLeaders(t *testing.T) {
+	system, _ := BuildAIPrompt(sampleAnalysis(), model.Quote{}, "low", nil, model.ValuationRecommendation{})
+	for _, want := range []string{
+		`"leaders"`,
+		"每个板块可输出 leaders（0–3 家）",
+		"不得把公司级全局行业龙头榜单复制到每个板块",
+		"leaders 与 related 语义不同、分别输出",
+		"不得把全局行业龙头、businesses[].leaders 或 chain/partners 整段复制到各板块",
+		"businesses[].leaders 是细分业务板块龙头",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("系统提示词缺少约束 %q", want)

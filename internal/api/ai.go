@@ -87,17 +87,16 @@ func (h *Handler) computeAIAnalysis(
 		return nil, err
 	}
 
-	// ★R17：龙头/竞争对手同源，一次请求尽早并发启动，与 F10 冷启动、LLM 调用重叠。
+	// ★R17：龙头请求尽早并发启动，与 F10 冷启动、LLM 调用重叠。
 	// 缓冲 1：即使后续提前 return（LLM/解析失败），goroutine 也能写入后退出。
-	// D9：失败时两者同时为空，仅打一次日志。
-	peerCh := make(chan industryBoardsResult, 1)
+	leaderCh := make(chan model.LeaderBoard, 1)
 	go func() {
-		leaders, competitors, err := h.c.FetchIndustryPeers(code)
+		board, err := h.c.FetchIndustryPeers(code)
 		if err != nil {
-			log.Printf("行业龙头/竞争对手获取失败（已同时降级为空）: code=%s err=%v", code, err)
-			leaders, competitors = model.LeaderBoard{}, nil
+			log.Printf("行业龙头获取失败（已降级为空）: code=%s err=%v", code, err)
+			board = model.LeaderBoard{}
 		}
-		peerCh <- industryBoardsResult{leaders: leaders, competitors: competitors}
+		leaderCh <- board
 	}()
 
 	cashflow, balance, income, err := h.fetchAnalysisReports(code, cfPageSize, bsPageSize)
@@ -167,35 +166,20 @@ func (h *Handler) computeAIAnalysis(
 		rec.RiskPoints, rec.AdjustRD, rec.RDRatio, rec.RDExpansion/1e8,
 		rec.BaseYear, rec.CapexCoverage, rec.DeltaNWCRatio, rec.FCFProfitRatio)
 
-	// ★R17/D9：汇合（正常情况下 LLM 耗时已覆盖两个 2s 请求，此处近零等待）。
-	boards := <-peerCh
+	// ★R17：汇合（正常情况下 LLM 耗时已覆盖两个 2s 请求，此处近零等待）。
+	board := <-leaderCh
 	ind := <-industryCh
-	boards.leaders.IndustryCode, boards.leaders.IndustryName = ind[0], ind[1]
-	if len(boards.leaders.Companies) > 0 {
-		result.Leaders = &boards.leaders
-	}
-	if boards.competitors != nil {
-		boards.competitors.IndustryCode, boards.competitors.IndustryName = ind[0], ind[1]
-		result.Competitors = boards.competitors
-	}
-	compCount, selfRank := 0, 0
-	if boards.competitors != nil {
-		compCount, selfRank = len(boards.competitors.Companies), boards.competitors.SelfRank
+	board.IndustryCode, board.IndustryName = ind[0], ind[1]
+	if len(board.Companies) > 0 || board.SelfRank > 0 {
+		result.Leaders = &board
 	}
 	chainUp, chainDown := chainCounts(result.Chain)
-	log.Printf("AI 相关公司: code=%s 龙头=%d 竞争对手=%d（本公司排名=%d，行业=%s/%s） 上游=%d 下游=%d 合作=%d",
-		code, len(boards.leaders.Companies), compCount, selfRank,
-		boards.leaders.IndustryCode, boards.leaders.IndustryName,
+	log.Printf("AI 相关公司: code=%s 龙头=%d（本公司行业排名=%d，行业=%s/%s） 上游=%d 下游=%d 合作=%d",
+		code, len(board.Companies), board.SelfRank, board.IndustryCode, board.IndustryName,
 		chainUp, chainDown, len(result.Partners))
 
 	result.Usage = &usage
 	return &result, nil
-}
-
-// industryBoardsResult 龙头/竞争对手同源结果（D9：一次请求派生两个榜单）。
-type industryBoardsResult struct {
-	leaders     model.LeaderBoard
-	competitors *model.CompetitorBoard
 }
 
 // chainCounts 空 chain 返回 0/0，避免日志处判空。

@@ -1079,11 +1079,6 @@ const app = createApp({
         ? `行业龙头 · ${l.industry_name}（按总市值排序）`
         : '行业龙头（按总市值排序）';
     }
-    function competitorTitle(c) {
-      return c && c.self_rank
-        ? `主要竞争对手 · 本公司行业第 ${c.self_rank} 名`
-        : '主要竞争对手';
-    }
     function hasChainCompanies(r) {
       return !!(r && r.chain && ((r.chain.upstream && r.chain.upstream.length)
         || (r.chain.downstream && r.chain.downstream.length)));
@@ -1091,19 +1086,15 @@ const app = createApp({
     function hasRelatedCompanies(r) {
       return hasChainCompanies(r) || !!(r && r.partners && r.partners.length);
     }
-    // D8：至少一个业务板块带相关公司时展示板块级免责文案。
-    function hasAnyBusinessRelated(r) {
-      return !!(r && r.businesses && r.businesses.some(b => b.related && b.related.length));
+    // D10：至少一个业务板块带细分业务龙头或相关公司时展示板块级免责文案。
+    function hasAnyBusinessCompanies(r) {
+      return !!(r && r.businesses && r.businesses.some(b =>
+        (b.leaders && b.leaders.length) || (b.related && b.related.length)));
     }
 
     // 龙头按代码直接换股（可信代码路径）：全程不发起名称搜索请求。
     function jumpToLeader(c) {
       if (!c || companyResolveBusy || searchBusy) return; // 同一时刻只允许一个跳转/解析
-      if (c.is_self) {               // 本公司：不换股，滚回 AI 结果顶部
-        const el = document.getElementById('ai-analysis-card');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return;
-      }
       if (!isSixDigitCode(c.code)) return; // 非法代码不跳转（后端已过滤，这里是防御）
       code.value = String(c.code);
       doSearch();
@@ -1479,7 +1470,7 @@ const app = createApp({
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
-      companyHint, companyResolving, companyKey, leaderTitle, competitorTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessRelated,
+      companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessCompanies,
       jumpToLeader, openAICompany, isSixDigitCode,
       radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
@@ -1931,7 +1922,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card" id="ai-analysis-card" v-loading="aiLoading">
+          <section class="card" v-loading="aiLoading">
             <div class="card-head"><h2 class="card-title">AI 智能分析</h2></div>
             <div class="card-body">
               <div class="ai-form">
@@ -1967,35 +1958,21 @@ const app = createApp({
                     <div><span class="ai-k">竞争格局</span><span class="ai-v">{{ aiResult.industry.competition }}</span></div>
                     <div><span class="ai-k">应用方向</span><span class="ai-v">{{ aiResult.industry.application }}</span></div>
                   </div>
-                  <!-- R17 行业龙头：后端确定性数据，按总市值排序 -->
+                  <!-- R17/D10 行业龙头：后端确定性数据，按总市值排序，已排除本公司 -->
                   <div class="ai-leaders"
-                       v-if="aiResult.leaders && aiResult.leaders.companies && aiResult.leaders.companies.length">
+                       v-if="aiResult.leaders && ((aiResult.leaders.companies && aiResult.leaders.companies.length) || aiResult.leaders.self_rank)">
                     <div class="ai-sub-title">{{ leaderTitle(aiResult.leaders) }}</div>
-                    <div class="ai-chips">
+                    <p class="ai-leader-self-note" v-if="aiResult.leaders.self_rank">
+                      本公司也是该行业龙头（排名第 {{ aiResult.leaders.self_rank }}）
+                    </p>
+                    <div class="ai-chips" v-if="aiResult.leaders.companies && aiResult.leaders.companies.length">
                       <button v-for="c in aiResult.leaders.companies" :key="c.code" type="button"
-                              class="ai-chip ai-chip-leader" :class="{ 'is-self': c.is_self }"
-                              :aria-disabled="c.is_self ? 'true' : 'false'"
-                              @click="jumpToLeader(c)">
-                        <span class="ai-chip-name">{{ c.name }}</span>
-                        <span class="ai-chip-tag" v-if="c.market_label">{{ c.market_label }}</span>
-                        <span class="ai-chip-tag ai-chip-self" v-if="c.is_self">本公司</span>
-                      </button>
-                    </div>
-                    <p class="ai-disclaimer">名单来自东财行业分类与同行市值数据，按总市值排序，随行情与行业分类更新；排序不代表投资价值，不构成投资建议。</p>
-                  </div>
-                  <!-- R17/D9 主要竞争对手：与龙头同源同一次取数，按排名相邻 2–4 家 -->
-                  <div class="ai-competitors"
-                       v-if="aiResult.competitors && aiResult.competitors.companies && aiResult.competitors.companies.length">
-                    <div class="ai-sub-title">{{ competitorTitle(aiResult.competitors) }}</div>
-                    <div class="ai-chips">
-                      <button v-for="c in aiResult.competitors.companies" :key="c.code" type="button"
                               class="ai-chip ai-chip-leader" @click="jumpToLeader(c)">
                         <span class="ai-chip-name">{{ c.name }}</span>
                         <span class="ai-chip-tag" v-if="c.market_label">{{ c.market_label }}</span>
-                        <span class="ai-chip-tag ai-chip-rank" v-if="c.rank_distance">相邻 {{ c.rank_distance }} 名</span>
                       </button>
                     </div>
-                    <p class="ai-disclaimer">按行业总市值排名选取本公司相邻公司（排名前后各至多 2 家），不代表竞争关系强弱，不构成投资建议。</p>
+                    <p class="ai-disclaimer">名单来自东财行业分类与同行市值数据，按总市值排序，已排除本公司；排序不代表投资价值，不构成投资建议。</p>
                   </div>
                 </div>
                 <div class="ai-section" v-if="aiResult.businesses && aiResult.businesses.length">
@@ -2009,6 +1986,24 @@ const app = createApp({
                       </div>
                       <div class="ai-biz-row"><span class="ai-k">前景</span><span class="ai-v">{{ b.prospect }}</span></div>
                       <div class="ai-biz-row"><span class="ai-k">风险</span><span class="ai-v">{{ b.risk }}</span></div>
+                      <!-- R17/D10：细分业务龙头（AI 推断，统一走名称搜索解析） -->
+                      <div class="ai-biz-leaders" v-if="b.leaders && b.leaders.length">
+                        <div class="ai-biz-leaders-head">
+                          <span class="ai-biz-leaders-label">细分业务龙头</span>
+                          <span class="ai-badge">AI 推断 · 供参考</span>
+                        </div>
+                        <div class="ai-chips">
+                          <button v-for="c in b.leaders" :key="c.name" type="button"
+                                  class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
+                                  :aria-disabled="companyResolving ? 'true' : 'false'"
+                                  @click="openAICompany(c)">
+                            <span class="ai-chip-name">{{ c.name }}</span>
+                            <span class="ai-chip-tag" v-if="c.relation">{{ c.relation }}</span>
+                            <span class="ai-chip-tag ai-chip-nonashare" v-if="c.market === '非A股'">非A股</span>
+                            <span class="ai-chip-loading" v-if="companyResolving === companyKey(c)">解析中…</span>
+                          </button>
+                        </div>
+                      </div>
                       <!-- R17/D8：板块相关公司（AI 推断，统一走名称搜索解析） -->
                       <div class="ai-biz-related" v-if="b.related && b.related.length">
                         <div class="ai-biz-related-head">
@@ -2029,8 +2024,8 @@ const app = createApp({
                       </div>
                     </div>
                   </div>
-                  <p class="ai-disclaimer" v-if="hasAnyBusinessRelated(aiResult)">
-                    业务板块相关公司由 AI 推断，仅用于拓展研究，不构成投资建议。
+                  <p class="ai-disclaimer" v-if="hasAnyBusinessCompanies(aiResult)">
+                    业务板块龙头与相关公司由 AI 推断，仅用于拓展研究，不构成投资建议。
                   </p>
                 </div>
                 <!-- R17 相关公司：产业链上下游 + 合作/关联公司（AI 推断） -->

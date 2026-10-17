@@ -760,8 +760,6 @@ td.num, .val, .yoy {
   transition: border-color .15s, color .15s, background .15s;
 }
 .ai-chip:hover { border-color: var(--brand); color: var(--brand); }
-.ai-chip.is-self { cursor: default; }
-.ai-chip.is-self:hover { border-color: var(--line); color: var(--ink-2); }
 .ai-chip.is-resolving { opacity: .6; }
 .ai-chip-name { overflow-wrap: anywhere; word-break: break-word; }
 .ai-chip-tag {
@@ -769,12 +767,10 @@ td.num, .val, .yoy {
   background: var(--brand-soft); color: var(--brand);
   font-size: 11px; line-height: 1.5; white-space: nowrap;
 }
-.ai-chip-self { background: #f0f2f5; color: var(--muted); }
 .ai-chip-nonashare { background: #fdf6ec; color: #b88230; }
 .ai-chip-loading { color: var(--muted); font-size: 11px; }
+.ai-leader-self-note { color: var(--brand); font-size: 12px; line-height: 1.6; margin: 4px 0 8px; }
 .ai-related { margin-top: 14px; }
-.ai-competitors { margin-top: 14px; }          /* D9：行业龙头之下 */
-.ai-chip-rank { background: #f0f2f5; color: var(--muted); }
 .ai-related-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .ai-related-col { min-width: 0; } /* 防止长名称把 grid 撑出横向滚动 */
 .ai-related-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
@@ -786,11 +782,13 @@ td.num, .val, .yoy {
   .ai-chip { min-height: 32px; }                   /* 触控目标 ≥ 28px */
 }
 
-/* D8：业务板块相关公司（复用既有 chip 体系） */
-.ai-biz-related {
+/* D8/D10：业务板块龙头与相关公司（复用既有 chip 体系） */
+.ai-biz-leaders, .ai-biz-related {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px dashed var(--line);
 }
-.ai-biz-related-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
-.ai-biz-related-label { color: var(--muted); font-size: 12px; }
+.ai-biz-leaders-head, .ai-biz-related-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.ai-biz-leaders-label, .ai-biz-related-label { color: var(--muted); font-size: 12px; }
