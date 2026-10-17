@@ -295,13 +295,15 @@ const app = createApp({
     const valLoading = ref(false);
     const valError = ref('');
 
-    // R16 估值历史记录：仅记录用户主动发起且成功的估值（manual/ai），存本机 localStorage。
-    const VAL_HISTORY_KEY = 'valuationHistory';              // 需求指定键名
-    const VAL_HISTORY_VERSION = 1;                           // 信封版本
-    const MAX_VALUATION_RECORDS = 50;                        // 最多保留条数
-    const VAL_HISTORY_PAGE_SIZE = 10;                        // 抽屉每页条数
-    const VAL_HISTORY_HINT_KEY = 'valuationHistoryHintShown'; // 首次记录提示的本地标记（D1：清空不重置）
-    const valuationHistory = ref([]);        // 按 createdAt 倒序（全量，最多 50 条）
+    // R16 估值历史记录：记录存服务端 JSON 文件，前端只经 /api/valuation-history 读写。
+    // localStorage 的旧记录仅作为一次性迁移来源保留。
+    const VAL_HISTORY_API = '/api/valuation-history';
+    const VAL_HISTORY_KEY = 'valuationHistory';                    // 仅迁移来源，保留
+    const VAL_HISTORY_VERSION = 1;                                 // 仅旧信封校验，保留
+    const VAL_HISTORY_PAGE_SIZE = 10;                              // 抽屉每页条数
+    const VAL_HISTORY_HINT_KEY = 'valuationHistoryHintShown';      // 首次记录提示（清空不重置）
+    const VAL_HISTORY_MIGRATED_KEY = 'valuationHistoryMigrated';   // 旧数据迁移完成标记
+    const valuationHistory = ref([]);        // 按 createdAt 倒序（全量，最多 50 条，服务端保证）
     const valHistoryOpen = ref(false);       // 抽屉开关
     const valHistoryPage = ref(1);           // 抽屉当前页码（打开时回到第 1 页）
     // 当前页记录与总页数：抽屉列表只渲染当前页，避免 50 条一次性铺满移动端
@@ -313,10 +315,16 @@ const app = createApp({
       Math.ceil(valuationHistory.value.length / VAL_HISTORY_PAGE_SIZE));
     const valHistoryDrawerSize = ref('420px'); // 桌面 420px / ≤768px 全宽（D4）
     const valHistoryEntryRef = ref(null);    // 顶栏入口 DOM，关闭抽屉后回焦
+    const valHistoryLoading = ref(false);    // GET 进行中（写请求会接管并清除）
+    const valHistoryError = ref('');         // 最近一次加载失败信息（''=无错误）
+    const valHistoryLoaded = ref(false);     // 是否至少成功加载过一次
+    const valHistoryDeleting = ref('');      // 正在删除的 code
+    const valHistoryClearing = ref(false);   // 清空请求在途
     let pendingValuationRestore = null;      // 非响应式：一次性回填快照（点击记录 → doSearch）
     let valRequestSeq = 0;                   // 非响应式：估值请求单调序号（竞态守卫）
     let valuationCode = '';                  // 非响应式：当前 valuation 结果属于哪只股票
-    let valHistoryPersist = true;            // 非响应式：localStorage 是否可用（失败后仅内存）
+    let valHistorySeq = 0;                   // 非响应式：记录类请求单调序号（乱序守卫）
+    let valHistoryMigrationRunning = false;  // 非响应式：迁移防重入
     let firstRecordHintShown = false;        // 非响应式：首次记录提示是否已展示
 
     // R5 AI 智能分析状态（apikey 由服务端启动参数提供，前端无需输入）
@@ -567,7 +575,8 @@ const app = createApp({
 
     // ===================== R16 估值历史记录 =====================
     // 记录 = 用户主动发起（manual/ai）且成功返回的估值快照；搜索自动估值（auto）不记录。
-    // 全部数据仅存本机 localStorage；不可用/写入失败时静默降级为内存态，不阻断估值流程。
+    // 数据源为服务端 /api/valuation-history（JSON 文件持久化）；旧 localStorage 仅用于一次性迁移。
+    // 读失败保留上次列表并可重试，写失败明确提示且不乐观更新，均不阻断估值流程。
 
     function isNum(v) { return typeof v === 'number' && isFinite(v); }
     function toNum(v) { return isNum(v) ? v : null; }
@@ -622,8 +631,96 @@ const app = createApp({
       };
     }
 
-    // 读取：版本不符/非数组 → 空；逐条 normalize 丢弃非法；createdAt 倒序 + code 去重 + 截断 50。
-    function loadValuationHistory() {
+    // 服务端响应 → 记录数组：只做基本防御（缺 code/时间非法跳过），不排序/去重/截断。
+    function historyItemsOf(json) {
+      const raw = json && json.data && Array.isArray(json.data.items) ? json.data.items : [];
+      return raw.map(normalizeValuationRecord).filter(Boolean);
+    }
+
+    function applyValuationHistory(items) {
+      valuationHistory.value = Array.isArray(items) ? items : [];
+      const maxPage = Math.max(1, valHistoryTotalPages.value);
+      if (valHistoryPage.value > maxPage) valHistoryPage.value = maxPage;
+    }
+
+    // 读取服务端列表。seq 守卫：只有最新发起的记录类请求可更新列表/错误态。
+    async function fetchValuationHistory() {
+      const seq = ++valHistorySeq;
+      valHistoryLoading.value = true;
+      try {
+        const res = await fetch(VAL_HISTORY_API);
+        const json = await readJSON(res);
+        if (seq !== valHistorySeq) return { ok: false, stale: true, message: '' };
+        if (json.code !== 0) {
+          valHistoryError.value = json.message || '加载估值记录失败';
+          return { ok: false, message: valHistoryError.value };
+        }
+        applyValuationHistory(historyItemsOf(json));
+        valHistoryError.value = '';
+        valHistoryLoaded.value = true;
+        return { ok: true, message: '' };
+      } catch (e) {
+        if (seq !== valHistorySeq) return { ok: false, stale: true, message: '' };
+        valHistoryError.value = '暂时无法加载估值记录（' + e.message + '）';
+        return { ok: false, message: valHistoryError.value };
+      } finally {
+        if (seq === valHistorySeq) valHistoryLoading.value = false;
+      }
+    }
+
+    // 新增/覆盖一条记录。成功用服务端返回的完整列表整体替换本地列表。
+    async function postValuationRecord(rec) {
+      const seq = ++valHistorySeq;
+      valHistoryLoading.value = false; // 写请求接管列表状态，避免被它取代的 GET 留下 loading
+      try {
+        const res = await fetch(VAL_HISTORY_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(rec),
+        });
+        const json = await readJSON(res);
+        if (seq !== valHistorySeq) {
+          // 已被更新的请求取代：服务端是否成功仍以 code 判断，但不回写本地列表
+          return { ok: json.code === 0, stale: true, message: json.message || '' };
+        }
+        if (json.code !== 0) return { ok: false, message: json.message || '保存失败' };
+        applyValuationHistory(historyItemsOf(json));
+        valHistoryError.value = '';
+        valHistoryLoaded.value = true;
+        return { ok: true, message: '' };
+      } catch (e) {
+        if (seq !== valHistorySeq) return { ok: false, stale: true, message: '' };
+        return { ok: false, message: '网络请求失败：' + e.message };
+      }
+    }
+
+    // 删除单条：成功以后端返回列表为准；失败保留记录并提示重试。
+    async function deleteValuationRecord(cd) {
+      const rec = valuationHistory.value.find(x => x.code === cd);
+      if (!rec || valHistoryDeleting.value) return;
+      valHistoryDeleting.value = cd;
+      const seq = ++valHistorySeq;
+      valHistoryLoading.value = false;
+      try {
+        const res = await fetch(`${VAL_HISTORY_API}/${encodeURIComponent(cd)}`, { method: 'DELETE' });
+        const json = await readJSON(res);
+        if (seq === valHistorySeq) {
+          if (json.code === 0) {
+            applyValuationHistory(historyItemsOf(json));
+            ElementPlus.ElMessage.success('已删除 ' + (rec.name || rec.code) + ' 的估值记录');
+          } else {
+            ElementPlus.ElMessage.warning('删除失败，请重试');
+          }
+        }
+      } catch (e) {
+        if (seq === valHistorySeq) ElementPlus.ElMessage.warning('删除失败，请重试');
+      } finally {
+        if (valHistoryDeleting.value === cd) valHistoryDeleting.value = '';
+      }
+    }
+
+    // 读取旧 localStorage 记录（仅迁移用）：校验 → 倒序 → 去重 → 取最新 50 条。
+    function readLegacyValuationHistory() {
       try {
         const text = localStorage.getItem(VAL_HISTORY_KEY);
         if (!text) return [];
@@ -637,29 +734,59 @@ const app = createApp({
         const seen = new Set();
         const out = [];
         for (const it of items) {
-          if (seen.has(it.code)) continue; // 损坏数据里重复 code：保留最新
+          if (seen.has(it.code)) continue; // 重复 code 保留最新
           seen.add(it.code);
           out.push(it);
-          if (out.length >= MAX_VALUATION_RECORDS) break;
+          if (out.length >= 50) break;     // 只迁最新 50 条（服务端上限）
         }
         return out;
       } catch (e) {
-        valHistoryPersist = false; // 隐私模式/被禁用：本次会话仅内存
-        return [];
+        return []; // localStorage 不可用/损坏：无可迁移数据
       }
     }
 
-    function saveValuationHistory() {
-      if (!valHistoryPersist) return false;
+    function markLegacyMigrationDone() {
+      try { localStorage.setItem(VAL_HISTORY_MIGRATED_KEY, '1'); } catch (e) {}
+    }
+
+    // 旧 localStorage → 服务端迁移：只补服务端缺失的 code，按旧时间从早到晚 POST。
+    // 全部成功（或无旧数据）才写标记；部分失败下次页面加载重试。
+    async function maybeMigrateLegacyValuationHistory() {
+      if (valHistoryMigrationRunning) return;
       try {
-        localStorage.setItem(VAL_HISTORY_KEY, JSON.stringify({
-          version: VAL_HISTORY_VERSION,
-          items: valuationHistory.value,
-        }));
-        return true;
+        if (localStorage.getItem(VAL_HISTORY_MIGRATED_KEY) === '1') return;
       } catch (e) {
-        valHistoryPersist = false; // 静默降级：仅内存，不弹错误
-        return false;
+        return; // localStorage 不可用，无法迁移
+      }
+
+      const legacy = readLegacyValuationHistory(); // createdAt 倒序（新→旧）
+      if (!legacy.length) {
+        markLegacyMigrationDone(); // 没有旧数据：直接标记，避免每次启动重复检查
+        return;
+      }
+
+      const existing = new Set(valuationHistory.value.map(r => r.code)); // 当前服务端列表
+      const pending = legacy.filter(r => !existing.has(r.code)).reverse(); // 只补缺失，旧→新
+      if (!pending.length) {
+        markLegacyMigrationDone(); // 服务端已覆盖全部 code：以服务端为准
+        return;
+      }
+
+      valHistoryMigrationRunning = true;
+      let failed = 0;
+      for (const record of pending) {
+        const { createdAt, ...body } = record; // createdAt 由服务端重新生成
+        const r = await postValuationRecord(body);
+        if (!r.ok) failed++;                    // stale 但 code=0 视为成功（服务端已保存）
+      }
+      valHistoryMigrationRunning = false;
+
+      if (failed === 0) {
+        markLegacyMigrationDone();
+        ElementPlus.ElMessage.success(`已迁移 ${pending.length} 条本机估值记录到服务端`);
+      } else {
+        // 不写标记；下次页面加载初始化 GET 后只补仍缺失的 code
+        ElementPlus.ElMessage.warning(`有 ${failed} 条估值记录迁移失败，将在下次打开时重试`);
       }
     }
 
@@ -678,7 +805,7 @@ const app = createApp({
         code: c,
         name: name || '',
         market: guessMarket(c),
-        createdAt: new Date().toISOString(), // 覆盖时刷新
+        // createdAt 由服务端写入时生成（FR-13.2），前端不再生成
         source: source === 'ai' ? 'ai' : 'manual',
         year: toInt(v.year),
         model: typeof v.model === 'string' ? v.model : '',
@@ -708,17 +835,18 @@ const app = createApp({
       };
     }
 
-    // 同 code 覆盖置顶；超限淘汰最早一条（列表始终按 createdAt 倒序）。
-    function recordValuation(cd, name, source, v) {
+    // 异步 POST 单条记录；失败不乐观更新（FR-10），估值结果照常展示。
+    async function recordValuation(cd, name, source, v) {
       const rec = buildValuationRecord(cd, name, source, v);
       if (!rec) return;
       const wasEmpty = valuationHistory.value.length === 0;
-      const list = valuationHistory.value.filter(r => r.code !== rec.code);
-      list.unshift(rec);
-      if (list.length > MAX_VALUATION_RECORDS) list.length = MAX_VALUATION_RECORDS;
-      valuationHistory.value = list;
-      saveValuationHistory();
-      maybeShowFirstRecordHint(wasEmpty);
+      const r = await postValuationRecord(rec);
+      if (r.ok) {
+        maybeShowFirstRecordHint(wasEmpty);
+      } else if (!r.stale) {
+        // 估值结果照常展示，但明确提示保存失败，且不把该条加入列表
+        ElementPlus.ElMessage.warning('估值已计算，但记录保存失败：' + (r.message || '请重试'));
+      }
     }
 
     // FR-10：本机第一条记录提示一次；D1 定稿——用独立标记，清空全部后不重置。
@@ -729,30 +857,34 @@ const app = createApp({
       ElementPlus.ElMessage.success('已记录本次估值，可在顶部「估值记录」查看');
     }
 
-    function removeValuationRecord(cd) {
-      const r = valuationHistory.value.find(x => x.code === cd);
-      if (!r) return;
-      valuationHistory.value = valuationHistory.value.filter(x => x.code !== cd);
-      saveValuationHistory();
-      // 删除后当前页可能超界（如删掉最后一页唯一一条）→ 回退到最后一页
-      const maxPage = Math.max(1, valHistoryTotalPages.value);
-      if (valHistoryPage.value > maxPage) valHistoryPage.value = maxPage;
-      ElementPlus.ElMessage.success('已删除 ' + (r.name || r.code) + ' 的估值记录');
-    }
-
     // FR-9：二次确认（含条数、危险色、默认焦点在取消）；取消不做任何修改。
     function clearValuationHistory() {
       const n = valuationHistory.value.length;
-      if (!n) return;
+      if (!n || valHistoryClearing.value) return;
       ElementPlus.ElMessageBox.confirm(
         `确定清空全部 ${n} 条估值记录？此操作不可恢复。`,
         '清空估值记录',
         { confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning',
           confirmButtonClass: 'el-button--danger', autofocus: false }
-      ).then(() => {
-        valuationHistory.value = [];
-        valHistoryPage.value = 1; // 清空后回到唯一（空）页
-        saveValuationHistory();
+      ).then(async () => {
+        valHistoryClearing.value = true;
+        const seq = ++valHistorySeq;
+        valHistoryLoading.value = false;
+        try {
+          const res = await fetch(VAL_HISTORY_API, { method: 'DELETE' });
+          const json = await readJSON(res);
+          if (seq !== valHistorySeq) return;
+          if (json.code === 0) {
+            applyValuationHistory([]);
+            valHistoryPage.value = 1;
+          } else {
+            ElementPlus.ElMessage.warning('清空失败，请重试');
+          }
+        } catch (e) {
+          if (seq === valHistorySeq) ElementPlus.ElMessage.warning('清空失败，请重试');
+        } finally {
+          valHistoryClearing.value = false;
+        }
       }).catch(() => {});
       // 确认框打开后把焦点放到「取消」（DOM 顺序：取消在前）；取不到元素则静默跳过。
       nextTick(() => requestAnimationFrame(() => {
@@ -876,6 +1008,7 @@ const app = createApp({
       syncValHistoryDrawerSize();
       valHistoryPage.value = 1; // 每次打开都回第 1 页（最新记录置顶在此页）
       valHistoryOpen.value = true;
+      fetchValuationHistory();  // 异步刷新；刷新期间展示加载态（FR-5/FR-14）
     }
 
     // FR-7：关抽屉 → 设一次性回填 → 改搜索框 → doSearch（重置 → 回填 → 自动计算）。
@@ -1444,10 +1577,12 @@ const app = createApp({
     }
 
     loadHistory();
-    // R16：初始化读取一次记录到内存（加载时不回写）；首次提示标记按 D1 每浏览器只提示一次。
-    valuationHistory.value = loadValuationHistory();
+    // R16：初始化 GET 一次用于徽标计数；成功后尝试迁移旧 localStorage 数据（每次页面加载最多一次）。
     try { firstRecordHintShown = localStorage.getItem(VAL_HISTORY_HINT_KEY) === '1'; } catch (e) {}
     syncValHistoryDrawerSize();
+    fetchValuationHistory().then(r => {
+      if (r && r.ok) maybeMigrateLegacyValuationHistory();
+    });
 
     // 单页应用，监听器与页面同生命周期，无需解绑（FR-5：窗口 resize / 横竖屏切换重排）。
     window.addEventListener('resize', handleChartResize);
@@ -1479,7 +1614,9 @@ const app = createApp({
       // R16 估值历史记录（抽屉、记录操作与展示格式化）
       valuationHistory, valHistoryOpen, valHistoryDrawerSize, valHistoryEntryRef,
       valHistoryPage, pagedValuationHistory, valHistoryTotalPages, VAL_HISTORY_PAGE_SIZE,
-      openValuationHistory, openValuationRecord, removeValuationRecord, clearValuationHistory,
+      valHistoryLoading, valHistoryError, valHistoryLoaded, valHistoryDeleting, valHistoryClearing,
+      openValuationHistory, openValuationRecord, fetchValuationHistory,
+      deleteValuationRecord, clearValuationHistory,
       fmtRecordTime, fmtRecordPerShare, recordParamSummary, recordModelName, resetValuationState,
     };
   },
@@ -2157,6 +2294,7 @@ const app = createApp({
             </div>
             <div class="vh-head-actions">
               <el-button v-if="valuationHistory.length" text type="danger" size="small"
+                         :loading="valHistoryClearing" :disabled="valHistoryClearing"
                          @click="clearValuationHistory">清空全部</el-button>
               <!-- 显式关闭入口：手机端抽屉全宽会盖住遮罩、也没有 Esc，必须始终可见 -->
               <button type="button" class="vh-close" title="关闭" aria-label="关闭估值记录"
@@ -2169,7 +2307,20 @@ const app = createApp({
             </div>
           </div>
 
-          <div v-if="valuationHistory.length" class="vh-list">
+          <!-- 刷新失败但已有上次加载的列表：弱化警告条 + 重试，列表照常展示 -->
+          <div v-if="valHistoryError && valuationHistory.length" class="vh-warn">
+            <span>刷新失败，显示的是上次加载的记录</span>
+            <el-button text size="small" @click="fetchValuationHistory()">重试</el-button>
+          </div>
+
+          <div v-if="valHistoryLoading && !valuationHistory.length" class="vh-state" v-loading="true">
+            正在加载估值记录…
+          </div>
+          <div v-else-if="valHistoryError && !valuationHistory.length" class="vh-state">
+            <p class="vh-state-tip">暂时无法加载估值记录</p>
+            <el-button size="small" @click="fetchValuationHistory()">重试</el-button>
+          </div>
+          <div v-else-if="valuationHistory.length" class="vh-list">
             <div v-for="r in pagedValuationHistory" :key="r.code" class="vh-item"
                  role="button" tabindex="0" :aria-label="'查看 ' + (r.name || r.code) + ' 的估值记录'"
                  @click="openValuationRecord(r)"
@@ -2192,7 +2343,9 @@ const app = createApp({
               <div class="vh-meta">{{ recordParamSummary(r) }}</div>
               <div class="vh-meta">记录于 {{ fmtRecordTime(r.createdAt) }}</div>
               <button type="button" class="vh-del" title="删除记录" aria-label="删除记录"
-                      @click.stop="removeValuationRecord(r.code)">
+                      :disabled="valHistoryDeleting === r.code"
+                      :aria-busy="valHistoryDeleting === r.code ? 'true' : 'false'"
+                      @click.stop="deleteValuationRecord(r.code)">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <polyline points="3 6 5 6 21 6"></polyline>
@@ -2204,10 +2357,14 @@ const app = createApp({
             </div>
           </div>
 
-          <div v-else class="vh-empty">
+          <div v-else-if="valHistoryLoaded" class="vh-empty">
             <el-empty description="还没有估值记录">
               <p class="vh-empty-tip">在「公司估值」卡片点击「计算估值」后会自动记录在这里。</p>
             </el-empty>
+          </div>
+          <!-- 首次请求尚未返回且未设置 loading：占位，避免「空态」闪烁 -->
+          <div v-else class="vh-state" v-loading="true">
+            正在加载估值记录…
           </div>
 
           <div class="vh-foot">

@@ -12,7 +12,7 @@ import (
 // R14 公司价值接口：代码位校验在拉数之前 fail-fast（不发外部请求），故可离线验证。
 // 成功路径（年份范围、数值）依赖真实报表数据，归端到端人工核验。
 func TestGetCompanyValueCodeInvalid(t *testing.T) {
-	r := NewRouter(NewHandler(client.New(), "", "", ""))
+	r := NewRouter(NewHandler(client.New(), "", "", "", nil))
 
 	// 仅校验长度（非 6 位即 400），长度达 6 位会继续拉数，故此处只取长度异常值。
 	for _, code := range []string{"12345", "1234567"} {

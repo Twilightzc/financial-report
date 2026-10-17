@@ -13,7 +13,7 @@ import (
 // R12 自定义基期自由现金流的参数校验在拉数之前 fail-fast（不发外部请求），故可离线验证。
 // 成功路径依赖真实报表数据，此处不覆盖。
 func TestGetValuationCustomParamErrors(t *testing.T) {
-	r := NewRouter(NewHandler(client.New(), "", "", ""))
+	r := NewRouter(NewHandler(client.New(), "", "", "", nil))
 
 	cases := []struct {
 		name    string

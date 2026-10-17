@@ -20,5 +20,11 @@ func NewRouter(h *Handler) *gin.Engine {
 	r.GET("/api/stock/:code/valuation", h.GetValuation)
 	r.GET("/api/stock/:code/ai-analysis", h.GetAIAnalysis)
 
+	// R16 估值历史记录（后端 JSON 文件持久化）
+	r.GET("/api/valuation-history", h.GetValuationHistory)
+	r.POST("/api/valuation-history", h.UpsertValuationHistory)
+	r.DELETE("/api/valuation-history", h.ClearValuationHistory)
+	r.DELETE("/api/valuation-history/:code", h.DeleteValuationHistory)
+
 	return r
 }

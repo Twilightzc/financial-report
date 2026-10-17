@@ -14,7 +14,7 @@ import (
 // 说明：包内其余 handler 依赖外部数据源（东财/腾讯），此处不覆盖。
 
 func TestGetSearchEmptyAndLongQuery(t *testing.T) {
-	r := NewRouter(NewHandler(client.New(), "", "", ""))
+	r := NewRouter(NewHandler(client.New(), "", "", "", nil))
 
 	cases := []struct {
 		name string
@@ -52,7 +52,7 @@ func TestGetSearchEmptyAndLongQuery(t *testing.T) {
 
 // 静态段 /api/stock/search 与通配 /api/stock/:code/... 必须互不干扰（先静态、后通配）。
 func TestRouterSearchCoexistsWithCodeRoute(t *testing.T) {
-	r := NewRouter(NewHandler(client.New(), "", "", ""))
+	r := NewRouter(NewHandler(client.New(), "", "", "", nil))
 
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/search?q=", nil))

@@ -410,7 +410,7 @@ func TestAICachePanicReleasesWaiters(t *testing.T) {
 // 若实现错误地把缓存放在取数之后，本用例会因外部请求失败而暴露。
 func TestGetAIAnalysisCacheHitSkipsFetch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h := NewHandler(client.New(), "test-key", "", "")
+	h := NewHandler(client.New(), "test-key", "", "", nil)
 	want := testAIResult("预置缓存结论")
 	h.aiCache.entries[aiCacheKeyFor("600519", "low", 0, 0, false)] = aiCacheEntry{
 		result:    want,
@@ -451,7 +451,7 @@ func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 	}
 
 	t.Run("非6位代码", func(t *testing.T) {
-		h := NewHandler(client.New(), "test-key", "", "")
+		h := NewHandler(client.New(), "test-key", "", "", nil)
 		r := NewRouter(h)
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600/ai-analysis", nil))
@@ -471,7 +471,7 @@ func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 	})
 
 	t.Run("apikey缺失", func(t *testing.T) {
-		h := NewHandler(client.New(), "", "", "")
+		h := NewHandler(client.New(), "", "", "", nil)
 		r := NewRouter(h)
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis", nil))

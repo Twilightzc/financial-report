@@ -10,6 +10,7 @@ import (
 
 	"financial-report/internal/api"
 	"financial-report/internal/client"
+	"financial-report/internal/store"
 	"financial-report/internal/web"
 )
 
@@ -18,10 +19,17 @@ func main() {
 	aiKey := flag.String("apikey", "", "DeepSeek API Key（AI 智能分析用；未填则读环境变量 DEEPSEEK_API_KEY）")
 	aiModel := flag.String("model", "deepseek-v4-pro", "DeepSeek 模型名（AI 智能分析用）")
 	aiBaseURL := flag.String("baseurl", "https://api.deepseek.com/v1", "DeepSeek 接口地址（OpenAI 兼容）")
+	dataDir := flag.String("data", "./data", "数据目录（估值历史记录等持久化数据，默认 ./data）")
 	flag.Parse()
 
 	c := client.New()
-	h := api.NewHandler(c, *aiKey, *aiModel, *aiBaseURL)
+	historyStore := store.NewValuationHistoryStore(*dataDir)
+	if err := historyStore.EnsureDir(); err != nil {
+		// FR-4.2：创建失败只记日志并继续提供服务；既有估值等功能不受影响
+		log.Printf("警告：无法创建数据目录 %s：%v（估值记录读写将失败）", *dataDir, err)
+	}
+	h := api.NewHandler(c, *aiKey, *aiModel, *aiBaseURL, historyStore)
+	log.Printf("估值记录文件: %s", historyStore.FilePath())
 	r := api.NewRouter(h)
 
 	// 托管嵌入的前端静态资源

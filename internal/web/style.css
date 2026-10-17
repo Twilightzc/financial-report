@@ -728,6 +728,24 @@ td.num, .val, .yoy {
 .vh-pager .el-pager { min-width: 0; flex-wrap: wrap; justify-content: center; }
 .vh-foot-note { text-align: center; overflow-wrap: anywhere; }
 
+/* 刷新失败但保留旧列表：顶部弱化警告条 */
+.vh-warn {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; margin: 8px 12px 0;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: #fffafa; color: var(--muted); font-size: 12px;
+  overflow-wrap: anywhere;
+}
+/* 加载/错误占位（与空态区分，避免失败时误报「还没有估值记录」） */
+.vh-state {
+  flex: 1 1 auto; min-height: 160px; min-width: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 16px; color: var(--muted); font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.vh-state-tip { margin: 0; }
+.vh-del:disabled { opacity: .45; cursor: not-allowed; }
+
 @media (max-width: 768px) {
   .val-hist-entry { margin-left: auto; }
   .vh-list { padding: 10px; }

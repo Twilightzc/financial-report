@@ -13,6 +13,7 @@ import (
 	"financial-report/internal/client"
 	"financial-report/internal/model"
 	"financial-report/internal/service"
+	"financial-report/internal/store"
 )
 
 type Handler struct {
@@ -23,6 +24,8 @@ type Handler struct {
 	aiBaseURL string
 	// aiCache AI 分析结果内存缓存（技术设计 §19.15），生命周期与 Handler 一致。
 	aiCache *aiResultCache
+	// history 估值历史记录文件存储（可为 nil，handler 需防御）。
+	history *store.ValuationHistoryStore
 }
 
 // 分析最多支持 10 个年报；每个自然年约 4 期（Q1/中报/Q3/年报）。
@@ -33,14 +36,29 @@ const (
 	bsPageSize       = (analysisMaxYears + 1) * 4 // 44 期 ≈ 11 个年报
 )
 
-func NewHandler(c *client.Client, aiAPIKey, aiModel, aiBaseURL string) *Handler {
+func NewHandler(c *client.Client, aiAPIKey, aiModel, aiBaseURL string,
+	history *store.ValuationHistoryStore) *Handler {
 	return &Handler{
 		c:         c,
 		aiAPIKey:  aiAPIKey,
 		aiModel:   aiModel,
 		aiBaseURL: aiBaseURL,
 		aiCache:   newAIResultCache(),
+		history:   history,
 	}
+}
+
+// isSixDigitCode 判断字符串是否为 6 位 ASCII 数字（估值记录 code 校验）。
+func isSixDigitCode(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // GetIndicators 聚合返回单只股票的行情与核心指标
