@@ -299,9 +299,18 @@ const app = createApp({
     const VAL_HISTORY_KEY = 'valuationHistory';              // 需求指定键名
     const VAL_HISTORY_VERSION = 1;                           // 信封版本
     const MAX_VALUATION_RECORDS = 50;                        // 最多保留条数
+    const VAL_HISTORY_PAGE_SIZE = 10;                        // 抽屉每页条数
     const VAL_HISTORY_HINT_KEY = 'valuationHistoryHintShown'; // 首次记录提示的本地标记（D1：清空不重置）
-    const valuationHistory = ref([]);        // 按 createdAt 倒序
+    const valuationHistory = ref([]);        // 按 createdAt 倒序（全量，最多 50 条）
     const valHistoryOpen = ref(false);       // 抽屉开关
+    const valHistoryPage = ref(1);           // 抽屉当前页码（打开时回到第 1 页）
+    // 当前页记录与总页数：抽屉列表只渲染当前页，避免 50 条一次性铺满移动端
+    const pagedValuationHistory = computed(() => {
+      const start = (valHistoryPage.value - 1) * VAL_HISTORY_PAGE_SIZE;
+      return valuationHistory.value.slice(start, start + VAL_HISTORY_PAGE_SIZE);
+    });
+    const valHistoryTotalPages = computed(() =>
+      Math.ceil(valuationHistory.value.length / VAL_HISTORY_PAGE_SIZE));
     const valHistoryDrawerSize = ref('420px'); // 桌面 420px / ≤768px 全宽（D4）
     const valHistoryEntryRef = ref(null);    // 顶栏入口 DOM，关闭抽屉后回焦
     let pendingValuationRestore = null;      // 非响应式：一次性回填快照（点击记录 → doSearch）
@@ -720,6 +729,9 @@ const app = createApp({
       if (!r) return;
       valuationHistory.value = valuationHistory.value.filter(x => x.code !== cd);
       saveValuationHistory();
+      // 删除后当前页可能超界（如删掉最后一页唯一一条）→ 回退到最后一页
+      const maxPage = Math.max(1, valHistoryTotalPages.value);
+      if (valHistoryPage.value > maxPage) valHistoryPage.value = maxPage;
       ElementPlus.ElMessage.success('已删除 ' + (r.name || r.code) + ' 的估值记录');
     }
 
@@ -734,6 +746,7 @@ const app = createApp({
           confirmButtonClass: 'el-button--danger', autofocus: false }
       ).then(() => {
         valuationHistory.value = [];
+        valHistoryPage.value = 1; // 清空后回到唯一（空）页
         saveValuationHistory();
       }).catch(() => {});
       // 确认框打开后把焦点放到「取消」（DOM 顺序：取消在前）；取不到元素则静默跳过。
@@ -856,6 +869,7 @@ const app = createApp({
 
     function openValuationHistory() {
       syncValHistoryDrawerSize();
+      valHistoryPage.value = 1; // 每次打开都回第 1 页（最新记录置顶在此页）
       valHistoryOpen.value = true;
     }
 
@@ -1377,6 +1391,7 @@ const app = createApp({
       searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
       // R16 估值历史记录（抽屉、记录操作与展示格式化）
       valuationHistory, valHistoryOpen, valHistoryDrawerSize, valHistoryEntryRef,
+      valHistoryPage, pagedValuationHistory, valHistoryTotalPages, VAL_HISTORY_PAGE_SIZE,
       openValuationHistory, openValuationRecord, removeValuationRecord, clearValuationHistory,
       fmtRecordTime, fmtRecordPerShare, recordParamSummary, recordModelName, resetValuationState,
     };
@@ -1949,7 +1964,7 @@ const app = createApp({
           </div>
 
           <div v-if="valuationHistory.length" class="vh-list">
-            <div v-for="r in valuationHistory" :key="r.code" class="vh-item"
+            <div v-for="r in pagedValuationHistory" :key="r.code" class="vh-item"
                  role="button" tabindex="0" :aria-label="'查看 ' + (r.name || r.code) + ' 的估值记录'"
                  @click="openValuationRecord(r)"
                  @keydown.enter.self.prevent="openValuationRecord(r)"
@@ -1989,7 +2004,13 @@ const app = createApp({
             </el-empty>
           </div>
 
-          <div class="vh-foot">记录为计算时的快照，点击后将按当时参数重新计算。</div>
+          <div class="vh-foot">
+            <el-pagination v-if="valHistoryTotalPages > 1" class="vh-pager" size="small"
+                           layout="prev, pager, next" :total="valuationHistory.length"
+                           :page-size="VAL_HISTORY_PAGE_SIZE" v-model:current-page="valHistoryPage"
+                           hide-on-single-page />
+            <div class="vh-foot-note">记录为计算时的快照，点击后将按当时参数重新计算。</div>
+          </div>
         </div>
       </el-drawer>
     </div>

@@ -719,8 +719,14 @@ td.num, .val, .yoy {
 .vh-empty { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto;
   display: flex; align-items: center; justify-content: center; padding: 12px; }
 .vh-empty-tip { margin: 0; color: var(--muted); font-size: 12px; text-align: center; overflow-wrap: anywhere; }
-.vh-foot { flex: 0 0 auto; padding: 12px 20px; border-top: 1px solid var(--line);
-  color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+/* 抽屉底部：分页器与脚注上下排列，不占据列表滚动区（flex:0 0 auto） */
+.vh-foot { flex: 0 0 auto; min-width: 0; padding: 12px 20px; border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; overflow-wrap: anywhere;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.vh-pager { max-width: 100%; justify-content: center; flex-wrap: wrap; }
+/* 320px 窄屏兜底：页码按钮允许换行，不撑破抽屉 */
+.vh-pager .el-pager { min-width: 0; flex-wrap: wrap; justify-content: center; }
+.vh-foot-note { text-align: center; overflow-wrap: anywhere; }
 
 @media (max-width: 768px) {
   .val-hist-entry { margin-left: auto; }
