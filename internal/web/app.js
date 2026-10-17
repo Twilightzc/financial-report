@@ -2107,72 +2107,74 @@ const app = createApp({
                 <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
               </div>
               <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
-              <!-- 等待态：大脑突触动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
+              <!-- 等待态：星座连线动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
                    结果区由 aiResult 独立驱动：请求返回时 aiResult 先于 aiLoading 置位，若用 v-else-if
                    会把结果/雷达图容器推迟到 finally 之后才挂载，导致 renderRadar 拿不到 DOM。 -->
               <div v-if="aiLoading && !aiResult" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
                 <div class="ai-think-visual" aria-hidden="true">
                   <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
-                    <!-- 大脑轮廓（对称脑形）与脑沟回 -->
-                    <path class="ai-brain-outline" d="M60 27C55 24 50 24 46 28C42 25 36 27 34 32C29 31 25 36 26 41C21 44 20 51 23 55C19 60 20 68 24 72C21 78 24 86 30 89C32 94 39 97 45 95C50 98 56 97 60 94C64 97 70 98 75 95C81 97 88 94 90 89C96 86 99 78 96 72C100 68 101 60 97 55C100 51 99 44 94 41C95 36 91 31 86 32C84 27 78 25 74 28C70 24 65 24 60 27Z"></path>
-                    <g class="ai-brain-folds">
-                      <path d="M60 30C58 42 58 52 60 60"></path>
-                      <path d="M44 40C38 48 40 60 46 66"></path>
-                      <path d="M76 40C82 48 80 60 74 66"></path>
-                      <path d="M32 56C36 62 42 64 48 62"></path>
-                      <path d="M88 56C84 62 78 64 72 62"></path>
-                      <path d="M40 78C48 74 54 78 60 76"></path>
-                      <path d="M80 78C72 74 66 78 60 76"></path>
+                    <!-- 星座连线：静态底纹 -->
+                    <g class="ai-star-links">
+                      <path d="M34 24L16 46" pathLength="100"></path>
+                      <path d="M34 24L48 46" pathLength="100"></path>
+                      <path d="M34 24L72 26" pathLength="100"></path>
+                      <path d="M16 46L48 46" pathLength="100"></path>
+                      <path d="M16 46L32 78" pathLength="100"></path>
+                      <path d="M48 46L72 26" pathLength="100"></path>
+                      <path d="M48 46L58 68" pathLength="100"></path>
+                      <path d="M48 46L32 78" pathLength="100"></path>
+                      <path d="M72 26L96 44" pathLength="100"></path>
+                      <path d="M72 26L58 68" pathLength="100"></path>
+                      <path d="M96 44L58 68" pathLength="100"></path>
+                      <path d="M96 44L86 72" pathLength="100"></path>
+                      <path d="M58 68L86 72" pathLength="100"></path>
+                      <path d="M58 68L32 78" pathLength="100"></path>
+                      <path d="M58 68L58 100" pathLength="100"></path>
+                      <path d="M86 72L58 100" pathLength="100"></path>
+                      <path d="M86 72L104 94" pathLength="100"></path>
+                      <path d="M32 78L14 92" pathLength="100"></path>
+                      <path d="M32 78L58 100" pathLength="100"></path>
                     </g>
-                    <!-- 突触连接：静态底纹 -->
-                    <g class="ai-synapse-links">
-                      <path d="M60 30Q52 34 44 40" pathLength="100"></path>
-                      <path d="M60 30Q68 34 76 40" pathLength="100"></path>
-                      <path d="M44 40Q38 48 32 56" pathLength="100"></path>
-                      <path d="M44 40Q50 50 60 60" pathLength="100"></path>
-                      <path d="M76 40Q70 50 60 60" pathLength="100"></path>
-                      <path d="M76 40Q82 48 88 56" pathLength="100"></path>
-                      <path d="M32 56Q38 62 46 66" pathLength="100"></path>
-                      <path d="M88 56Q82 62 74 66" pathLength="100"></path>
-                      <path d="M46 66Q53 62 60 60" pathLength="100"></path>
-                      <path d="M74 66Q67 62 60 60" pathLength="100"></path>
-                      <path d="M46 66Q48 74 52 82" pathLength="100"></path>
-                      <path d="M74 66Q72 74 68 82" pathLength="100"></path>
-                      <path d="M52 82Q56 78 60 76" pathLength="100"></path>
-                      <path d="M68 82Q64 78 60 76" pathLength="100"></path>
-                      <path d="M60 60Q60 70 60 76" pathLength="100"></path>
+                    <!-- 星光流动：与底纹同路径的短亮段沿连线流动 -->
+                    <g class="ai-star-flow">
+                      <path d="M34 24L16 46" pathLength="100"></path>
+                      <path d="M34 24L48 46" pathLength="100"></path>
+                      <path d="M34 24L72 26" pathLength="100"></path>
+                      <path d="M16 46L48 46" pathLength="100"></path>
+                      <path d="M16 46L32 78" pathLength="100"></path>
+                      <path d="M48 46L72 26" pathLength="100"></path>
+                      <path d="M48 46L58 68" pathLength="100"></path>
+                      <path d="M48 46L32 78" pathLength="100"></path>
+                      <path d="M72 26L96 44" pathLength="100"></path>
+                      <path d="M72 26L58 68" pathLength="100"></path>
+                      <path d="M96 44L58 68" pathLength="100"></path>
+                      <path d="M96 44L86 72" pathLength="100"></path>
+                      <path d="M58 68L86 72" pathLength="100"></path>
+                      <path d="M58 68L32 78" pathLength="100"></path>
+                      <path d="M58 68L58 100" pathLength="100"></path>
+                      <path d="M86 72L58 100" pathLength="100"></path>
+                      <path d="M86 72L104 94" pathLength="100"></path>
+                      <path d="M32 78L14 92" pathLength="100"></path>
+                      <path d="M32 78L58 100" pathLength="100"></path>
                     </g>
-                    <!-- 突触脉冲：与底纹同路径的短亮段沿连接线流动 -->
-                    <g class="ai-synapse-flow">
-                      <path d="M60 30Q52 34 44 40" pathLength="100"></path>
-                      <path d="M60 30Q68 34 76 40" pathLength="100"></path>
-                      <path d="M44 40Q38 48 32 56" pathLength="100"></path>
-                      <path d="M44 40Q50 50 60 60" pathLength="100"></path>
-                      <path d="M76 40Q70 50 60 60" pathLength="100"></path>
-                      <path d="M76 40Q82 48 88 56" pathLength="100"></path>
-                      <path d="M32 56Q38 62 46 66" pathLength="100"></path>
-                      <path d="M88 56Q82 62 74 66" pathLength="100"></path>
-                      <path d="M46 66Q53 62 60 60" pathLength="100"></path>
-                      <path d="M74 66Q67 62 60 60" pathLength="100"></path>
-                      <path d="M46 66Q48 74 52 82" pathLength="100"></path>
-                      <path d="M74 66Q72 74 68 82" pathLength="100"></path>
-                      <path d="M52 82Q56 78 60 76" pathLength="100"></path>
-                      <path d="M68 82Q64 78 60 76" pathLength="100"></path>
-                      <path d="M60 60Q60 70 60 76" pathLength="100"></path>
+                    <!-- 主星微光：两颗亮星的十字星芒 -->
+                    <g class="ai-star-sparkles">
+                      <path d="M30 24H38M34 20V28"></path>
+                      <path d="M52.5 68H63.5M58 62.5V73.5"></path>
                     </g>
-                    <!-- 突触节点：错峰呼吸 + 轻微缩放 -->
-                    <g class="ai-synapse-nodes">
-                      <circle cx="60" cy="30" r="2.6"></circle>
-                      <circle cx="44" cy="40" r="2.2"></circle>
-                      <circle cx="76" cy="40" r="2.2"></circle>
-                      <circle cx="32" cy="56" r="2.2"></circle>
-                      <circle cx="88" cy="56" r="2.2"></circle>
-                      <circle cx="60" cy="60" r="3"></circle>
-                      <circle cx="46" cy="66" r="2.2"></circle>
-                      <circle cx="74" cy="66" r="2.2"></circle>
-                      <circle cx="52" cy="82" r="2.2"></circle>
-                      <circle cx="68" cy="82" r="2.2"></circle>
-                      <circle cx="60" cy="76" r="2.4"></circle>
+                    <!-- 星点：错峰呼吸/点亮 -->
+                    <g class="ai-star-nodes">
+                      <circle cx="34" cy="24" r="3"></circle>
+                      <circle cx="16" cy="46" r="2.2"></circle>
+                      <circle cx="48" cy="46" r="2.4"></circle>
+                      <circle cx="72" cy="26" r="2.2"></circle>
+                      <circle cx="96" cy="44" r="2.8"></circle>
+                      <circle cx="58" cy="68" r="3.4"></circle>
+                      <circle cx="86" cy="72" r="2.2"></circle>
+                      <circle cx="32" cy="78" r="2.6"></circle>
+                      <circle cx="14" cy="92" r="2"></circle>
+                      <circle cx="58" cy="100" r="2.2"></circle>
+                      <circle cx="104" cy="94" r="2"></circle>
                     </g>
                   </svg>
                 </div>
