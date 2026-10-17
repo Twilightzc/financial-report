@@ -783,3 +783,12 @@ td.num, .val, .yoy {
   .ai-related-cols { grid-template-columns: 1fr; } /* 窄屏上下堆叠，不横向滚动 */
   .ai-chip { min-height: 32px; }                   /* 触控目标 ≥ 28px */
 }
+
+/* D8：业务板块相关公司（复用既有 chip 体系） */
+.ai-biz-related {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.ai-biz-related-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.ai-biz-related-label { color: var(--muted); font-size: 12px; }

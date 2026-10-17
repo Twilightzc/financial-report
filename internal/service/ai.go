@@ -27,7 +27,7 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
   ],
   "conclusion": "总体结论（{conclusion}，分段分点、用换行分隔，覆盖：①公司质地与商业模式，②核心竞争优势/护城河，③财务健康与盈利质量（结合盈利能力/偿债能力/现金获取能力三个维度），④主要风险与隐忧，⑤综合评级与是否值得关注）",
   "industry": {"name": "行业名称", "prospect": "前景(1-2句)", "competition": "竞争格局(1-2句)", "application": "应用方向/需求(1-2句)"},
-  "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)"}],
+  "businesses": [{"name": "业务板块", "stage": "发展阶段", "contribution": "贡献占比", "prospect": "前景(1句)", "risk": "风险(1句)", "related": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "与该板块的关系", "note": "一句话说明"}]}],
   "chain": {
     "upstream": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "上游角色", "note": "一句话说明"}],
     "downstream": [{"name": "证券简称", "code": "可选6位代码", "market": "A股|非A股", "relation": "下游角色", "note": "一句话说明"}]
@@ -66,6 +66,12 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - 依据主营构成数据（各板块营收占比、利润占比、毛利率）与行业知识，列出公司主要业务板块（2-4 个）。
 - 每个板块：name（板块名）、stage（所处阶段：起步/成长/成熟/衰退）、contribution（贡献占比，同时看营收占比与利润占比，如「营收占 87%、利润占 89%」；若利润占比明显低于营收占比，说明该板块盈利质量偏弱，要在前景/风险里点出）、prospect（前景 1 句）、risk（主要风险 1 句）。
 - 占比必须贴近主营构成数据给出的实际数值，不要凭空编造；结合毛利率判断该板块是否真正赚钱。
+- 每个板块可输出 related（0–3 家）：只列与该板块强相关的客户/供应商/渠道/合作方，
+  relation 写该板块内的角色（如「包材供应」「经销渠道」），note 写与该板块的关系。
+- 禁止把公司级行业龙头名单、chain/partners 整段复制到每个板块；不同板块允许出现同一家公司，
+  不做跨列表去重；同一板块内不得重复、不得包含当前公司自身。
+- 无把握时输出空数组 []；name/relation/note 的长度与证券简称要求同「相关公司规则」。
+- businesses 内仅允许新增 related，name/stage/contribution/prospect/risk 保持既有要求。
 
 ## 相关公司规则（产业链上下游 / 合作公司）
 - 行业龙头由系统确定性获取，**不要输出 leaders 字段**；即使输出也会被忽略。
@@ -77,7 +83,9 @@ const aiSystemFramework = `你是资深财务分析师兼行业研究员。你�
 - code 为可选项，只在确信时填写 6 位数字；不确定就留空，不得猜测或编造。
 - 合作关系只列公开可查、较高把握的内容；不确定时输出空数组，不得编造合作方。
 - relation ≤ 20 字，note ≤ 30 字；只描述产业链角色或合作内容，不写买卖建议、评级、目标价。
-- 不得改动既有 scores / conclusion / industry / businesses / valuation 的任何内容。
+- 不得改动既有 scores / conclusion / industry / valuation 的任何内容；
+  businesses 中除新增 related 外，name/stage/contribution/prospect/risk 保持既有要求，
+  不得因 related 改写成公司级龙头名单。
 `
 
 // aiScoreDimensions 五个评分维度的固定顺序与名称。
@@ -404,14 +412,15 @@ func ParseAIResult(raw string, selfName ...string) (model.AIAnalysisResult, erro
 			Score     json.Number `json:"score"`
 			Comment   string      `json:"comment"`
 		} `json:"scores"`
-		Conclusion string             `json:"conclusion"`
-		Industry   model.AIIndustry   `json:"industry"`
-		Businesses []model.AIBusiness `json:"businesses"`
-		Valuation  model.AIValuation  `json:"valuation"`
+		Conclusion string            `json:"conclusion"`
+		Industry   model.AIIndustry  `json:"industry"`
+		Valuation  model.AIValuation `json:"valuation"`
 
-		// R17：RawMessage 容忍 null / 错误类型；未知字段（含 AI 返回的 leaders）自动忽略
-		Chain    json.RawMessage `json:"chain"`
-		Partners json.RawMessage `json:"partners"`
+		// R17/D8：RawMessage 容忍 null / 错误类型；未知字段（含 AI 返回的 leaders）自动忽略。
+		// businesses 顶层类型异常也不使整体解析失败。
+		Businesses json.RawMessage `json:"businesses"`
+		Chain      json.RawMessage `json:"chain"`
+		Partners   json.RawMessage `json:"partners"`
 	}
 	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
 		return model.AIAnalysisResult{}, fmt.Errorf("解析 AI 返回失败: %w（原始返回：%s）", err, clip(s, 200))
@@ -441,7 +450,7 @@ func ParseAIResult(raw string, selfName ...string) (model.AIAnalysisResult, erro
 	r := model.AIAnalysisResult{
 		Conclusion: parsed.Conclusion,
 		Industry:   parsed.Industry,
-		Businesses: parsed.Businesses,
+		Businesses: parseBusinesses(parsed.Businesses, self),
 		Valuation:  parsed.Valuation,
 		Chain:      parseChain(parsed.Chain, self),
 		Partners:   sanitizeCompanyRefs(parseCompanyRefs(parsed.Partners), self),
@@ -464,6 +473,52 @@ const (
 	aiRelationMaxRunes = 20 // 关系标签最大字符数
 	aiNoteMaxRunes     = 30 // 说明最大字符数
 )
+
+// parseBusinesses 逐条宽松解析业务板块；顶层不是数组 → nil；单条异常只丢该条。
+// 每条 related 复用 parseCompanyRefs + sanitizeCompanyRefs：
+// 先排除自身、再去重、再截断到 3 家；不同板块的 seen 互相独立（不跨板块去重）。
+func parseBusinesses(raw json.RawMessage, selfName string) []model.AIBusiness {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil // businesses 为对象/字符串等脏类型：整体按空，不影响其余字段
+	}
+	out := make([]model.AIBusiness, 0, len(items))
+	for _, item := range items {
+		var b struct {
+			Name         string          `json:"name"`
+			Stage        string          `json:"stage"`
+			Contribution string          `json:"contribution"`
+			Prospect     string          `json:"prospect"`
+			Risk         string          `json:"risk"`
+			Related      json.RawMessage `json:"related"` // D8：类型异常只影响本板块 related
+		}
+		if err := json.Unmarshal(item, &b); err != nil {
+			continue // 单条板块字段类型异常：丢该板块，保留其余板块
+		}
+		if strings.TrimSpace(b.Name) == "" {
+			continue // null / 空对象 / 缺板块名：无法展示，直接丢弃
+		}
+		related := sanitizeCompanyRefs(parseCompanyRefs(b.Related), selfName)
+		if len(related) == 0 {
+			related = nil // omitempty：无相关公司不输出空数组
+		}
+		out = append(out, model.AIBusiness{
+			Name:         b.Name,
+			Stage:        b.Stage,
+			Contribution: b.Contribution,
+			Prospect:     b.Prospect,
+			Risk:         b.Risk,
+			Related:      related,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 // parseChain 解析 chain 对象；整体缺失/类型错误/上下游均空 → nil。
 // selfName 透传给 sanitizeCompanyRefs，确保自身在截断前被排除。

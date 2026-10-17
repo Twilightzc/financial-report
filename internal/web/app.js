@@ -1086,6 +1086,10 @@ const app = createApp({
     function hasRelatedCompanies(r) {
       return hasChainCompanies(r) || !!(r && r.partners && r.partners.length);
     }
+    // D8：至少一个业务板块带相关公司时展示板块级免责文案。
+    function hasAnyBusinessRelated(r) {
+      return !!(r && r.businesses && r.businesses.some(b => b.related && b.related.length));
+    }
 
     // 龙头按代码直接换股（可信代码路径）：全程不发起名称搜索请求。
     function jumpToLeader(c) {
@@ -1470,7 +1474,7 @@ const app = createApp({
       valuation, valLoading, valError, fetchValuation,
       aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
-      companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies,
+      companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessRelated,
       jumpToLeader, openAICompany, isSixDigitCode,
       radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
@@ -1986,8 +1990,29 @@ const app = createApp({
                       </div>
                       <div class="ai-biz-row"><span class="ai-k">前景</span><span class="ai-v">{{ b.prospect }}</span></div>
                       <div class="ai-biz-row"><span class="ai-k">风险</span><span class="ai-v">{{ b.risk }}</span></div>
+                      <!-- R17/D8：板块相关公司（AI 推断，统一走名称搜索解析） -->
+                      <div class="ai-biz-related" v-if="b.related && b.related.length">
+                        <div class="ai-biz-related-head">
+                          <span class="ai-biz-related-label">相关公司</span>
+                          <span class="ai-badge">AI 推断 · 供参考</span>
+                        </div>
+                        <div class="ai-chips">
+                          <button v-for="c in b.related" :key="c.name" type="button"
+                                  class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
+                                  :aria-disabled="companyResolving ? 'true' : 'false'"
+                                  @click="openAICompany(c)">
+                            <span class="ai-chip-name">{{ c.name }}</span>
+                            <span class="ai-chip-tag" v-if="c.relation">{{ c.relation }}</span>
+                            <span class="ai-chip-tag ai-chip-nonashare" v-if="c.market === '非A股'">非A股</span>
+                            <span class="ai-chip-loading" v-if="companyResolving === companyKey(c)">解析中…</span>
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </div>
+                  <p class="ai-disclaimer" v-if="hasAnyBusinessRelated(aiResult)">
+                    业务板块相关公司由 AI 推断，仅用于拓展研究，不构成投资建议。
+                  </p>
                 </div>
                 <!-- R17 相关公司：产业链上下游 + 合作/关联公司（AI 推断） -->
                 <div class="ai-section" v-if="hasRelatedCompanies(aiResult)">
@@ -2050,9 +2075,9 @@ const app = createApp({
                     </div>
                     <p class="ai-disclaimer">合作关系可能已变化或未被公开披露，请以公司公告为准；不构成投资建议。</p>
                   </div>
-
-                  <p class="ai-company-hint" v-if="companyHint">{{ companyHint }}</p>
                 </div>
+                <!-- R17：AI 公司解析提示为 AI 结果卡片公共节点（仅板块 related 时也可见） -->
+                <p class="ai-company-hint" v-if="companyHint">{{ companyHint }}</p>
                 <div class="ai-section">
                   <div class="ai-section-title">估值模型推荐</div>
                   <div class="ai-valuation" style="flex-direction:column;align-items:stretch;gap:12px">

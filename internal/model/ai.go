@@ -22,6 +22,9 @@ type AIBusiness struct {
 	Contribution string `json:"contribution"` // 营收 / 成长贡献占比（贴近实际主营构成）
 	Prospect     string `json:"prospect"`     // 前景
 	Risk         string `json:"risk"`         // 主要风险
+
+	// R17/D8：板块相关公司（AI 推断，0–3 家；与 leaders/chain/partners 不合并、不跨列表去重）。
+	Related []CompanyRef `json:"related,omitempty"`
 }
 
 // AIValuationParam 估值模型推荐参数，key 与估值接口（/valuation）参数对齐。
