@@ -684,8 +684,11 @@ td.num, .val, .yoy {
 .vh-count { margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
 .vh-list { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
   padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-/* 卡片：右侧 42px 内边距为 32×32 删除按钮预留空间；overflow:hidden 兜住任何子项溢出 */
-.vh-item { position: relative; min-width: 0; overflow: hidden; padding: 12px 42px 12px 14px;
+/* 卡片：右侧 42px 内边距为 32×32 删除按钮预留空间。
+   ⚠️ 不得设 overflow:hidden——它会把条目的自动最小高度变为 0，条目多时被 flex 纵向压缩，
+   换行后的名称/价值/元信息会被下边缘裁掉；横向溢出由 .vh-list/.vh-drawer 的 overflow-x:hidden 兜底。
+   flex:0 0 auto 保证卡片高度随内容自然撑开、不参与收缩。 */
+.vh-item { position: relative; flex: 0 0 auto; min-width: 0; padding: 12px 42px 12px 14px;
   border: 1px solid var(--line); border-radius: 8px; background: #fff;
   cursor: pointer; outline: none; transition: border-color .15s, background .15s; }
 .vh-item:hover, .vh-item:focus-visible { border-color: var(--brand); background: #fffafa; }
