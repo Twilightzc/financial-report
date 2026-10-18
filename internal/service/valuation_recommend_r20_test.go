@@ -12,7 +12,7 @@ import (
 
 // R20《估值增长与终值保守化》专项测试：
 //   g1 上限改为 SGR + 1pp（前瞻锚退出）；
-//   周期/商品股终值增长率以长期通胀 2% 封顶。
+//   周期/商品股终值增长率上限（R21 起为长期通胀 2.5%）。
 
 func TestTerminalGrowthR20(t *testing.T) {
 	cases := []struct {
@@ -27,15 +27,15 @@ func TestTerminalGrowthR20(t *testing.T) {
 		contains   string
 		excludes   string
 	}{
-		{"周期股 2% 封顶", 4.5, 8.0, 8.0, true, true, 2.0, "cyclical", "周期股长期通胀 2%", ""},
-		{"周期股 SGR 更低", 4.5, 8.0, 1.6, true, true, 1.5, "sgr", "长期内生增速 1.6%", "2% 封顶"},
-		{"周期股 r−1 更低", 4.5, 2.8, 8.0, true, true, 1.5, "discount", "折现率−1pp", "2% 封顶"},
-		{"周期股 SGR 不可用", 4.5, 8.0, 0, false, true, 2.0, "cyclical", "2%", ""},
+		{"周期股 2.5% 封顶", 4.5, 8.0, 8.0, true, true, 2.5, "cyclical", "周期股长期通胀 2.5%", ""},
+		{"周期股 SGR 更低", 4.5, 8.0, 1.6, true, true, 1.5, "sgr", "长期内生增速 1.6%", "2.5% 封顶"},
+		{"周期股 r−1 更低", 4.5, 2.8, 8.0, true, true, 1.5, "discount", "折现率−1pp", "2.5% 封顶"},
+		{"周期股 SGR 不可用", 4.5, 8.0, 0, false, true, 2.5, "cyclical", "2.5%", ""},
 		{"周期股 r−1≤0", 4.5, 1.0, 0, false, true, 0, "zero", "终值按 0", ""},
-		{"非周期宏观锚", 4.5, 8.0, 0, false, false, 4.5, "macro", "宏观锚", "周期股长期通胀 2%"},
-		{"非周期 SGR 生效", 7.0, 8.0, 3.2, true, false, 3.0, "sgr", "长期内生增速 3.2%", "周期股长期通胀 2%"},
-		{"非周期 r−1 生效", 4.5, 4.2, 0, false, false, 3.0, "discount", "折现率−1pp", "周期股长期通胀 2%"},
-		{"非周期不被压到 2%", 4.5, 8.0, 0, false, false, 4.5, "macro", "宏观锚", "周期股长期通胀 2%"},
+		{"非周期宏观锚", 4.5, 8.0, 0, false, false, 4.5, "macro", "宏观锚", "周期股长期通胀 2.5%"},
+		{"非周期 SGR 生效", 7.0, 8.0, 3.2, true, false, 3.0, "sgr", "长期内生增速 3.2%", "周期股长期通胀 2.5%"},
+		{"非周期 r−1 生效", 4.5, 4.2, 0, false, false, 3.0, "discount", "折现率−1pp", "周期股长期通胀 2.5%"},
+		{"非周期不被压到 2.5%", 4.5, 8.0, 0, false, false, 4.5, "macro", "宏观锚", "周期股长期通胀 2.5%"},
 	}
 	for _, c := range cases {
 		c := c
@@ -57,9 +57,9 @@ func TestTerminalGrowthR20(t *testing.T) {
 			if g < 0 || g >= c.discount {
 				t.Errorf("g∞=%v 越界（r=%v）", g, c.discount)
 			}
-			// 周期股终值不得高于 2%。
+			// 周期股终值不得高于长期通胀上限（R21 起 2.5%）。
 			if c.isCyclical && g > r20CyclicalTerminalPP+1e-9 {
-				t.Errorf("周期股 g∞=%v 超过 2%%", g)
+				t.Errorf("周期股 g∞=%v 超过 %.1f%%", g, r20CyclicalTerminalPP)
 			}
 		})
 	}
@@ -133,8 +133,8 @@ func TestTerminalNoFalseCyclicalNote(t *testing.T) {
 		{"周期股折现率更低", 4.5, 2.8, 8.0, true, true},
 	}
 	for _, c := range cases {
-		if _, _, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK, c.isCyclical); strings.Contains(note, "周期股长期通胀 2%") {
-			t.Errorf("%s：2%% 未生效却输出封顶依据：%q", c.name, note)
+		if _, _, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK, c.isCyclical); strings.Contains(note, "周期股长期通胀 2.5%") {
+			t.Errorf("%s：2.5%% 未生效却输出封顶依据：%q", c.name, note)
 		}
 	}
 }
@@ -193,13 +193,13 @@ func TestRecommendCyclicalTerminalR20(t *testing.T) {
 	rec := RecommendValuation(input)
 
 	if rec.GrowthTerminal > r20CyclicalTerminalPP+1e-9 {
-		t.Errorf("周期股 g∞ = %v，应 ≤ 2.0", rec.GrowthTerminal)
+		t.Errorf("周期股 g∞ = %v，应 ≤ %.1f", rec.GrowthTerminal, r20CyclicalTerminalPP)
 	}
 	if rec.TerminalConstraint != "cyclical" {
 		t.Errorf("terminal_constraint = %q，期望 cyclical", rec.TerminalConstraint)
 	}
-	if !strings.Contains(rec.TerminalNote, "周期股长期通胀 2%") {
-		t.Errorf("terminal_note = %q，应含周期股 2%% 依据", rec.TerminalNote)
+	if !strings.Contains(rec.TerminalNote, "周期股长期通胀 2.5%") {
+		t.Errorf("terminal_note = %q，应含周期股 2.5%% 依据", rec.TerminalNote)
 	}
 
 	// 复算 SGR = ROE × 留存率，验证 g1 ≤ SGR + 1pp。

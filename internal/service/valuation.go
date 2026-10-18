@@ -53,6 +53,13 @@ const valEquityEpsilon = 1e-9
 // valEquityFlooredNote 公司价值低于债务价值时的提示文案（股权价值 floor 到 0）。
 const valEquityFlooredNote = "公司价值低于债务价值，股权价值按 0 计（存在资不抵债风险）。"
 
+// R21 估值敏感性矩阵（what-if）：
+// 行 = 终值增长率基准 ±1pp（0.5pp 步长，5 档）；列 = 折现率基准 ±0.5pp（3 档）。
+const (
+	valSensitivityGrowthStepPP   = 0.5
+	valSensitivityDiscountStepPP = 0.5
+)
+
 var valuationModelNames = map[string]string{
 	valModelZero:       "零增长模型",
 	valModelPerpetual:  "永续增长模型",
@@ -217,6 +224,7 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 	}
 	if totalShares > 0 {
 		res.EquityValuePerShare = equityValue / totalShares
+		res.Sensitivity = buildSensitivity(params, fcf, finValue, longBook, longRet, debt, totalShares)
 	}
 
 	// 基期自由现金流选取方式提示（平均值/中位数时说明所用年份）。
@@ -362,6 +370,105 @@ func dcfValue(p model.ValuationParams, r, fcf float64) (float64, error) {
 		return dcfThreeStage(fcf, g1, float64(p.Stage1Years), g2, float64(p.Stage2Years), g3, r), nil
 	}
 	return 0, errors.New("未知估值模型")
+}
+
+// terminalGrowthParam 返回单点估值实际使用的终值增长率（%）。
+// 永续取 g、两阶段取 g2（稳定期永续）、三阶段取 g3（终值段）；零增长无终值参数。
+func terminalGrowthParam(p model.ValuationParams) float64 {
+	switch p.Model {
+	case valModelPerpetual:
+		return p.GrowthRate
+	case valModelTwoStage:
+		return p.Stage2Growth
+	case valModelThreeStage:
+		return p.TerminalGrowth
+	}
+	return 0
+}
+
+// paramsWithTerminalGrowth 复制单点参数，只替换终值增长率（%）；零增长保持不变。
+func paramsWithTerminalGrowth(p model.ValuationParams, g float64) model.ValuationParams {
+	switch p.Model {
+	case valModelPerpetual:
+		p.GrowthRate = g
+	case valModelTwoStage:
+		p.Stage2Growth = g
+	case valModelThreeStage:
+		p.TerminalGrowth = g
+	}
+	return p
+}
+
+// sensitivityCell 计算一个格子的每股股权价值（元）。
+// 只替换终值增长率 gPct 与折现率 rPct；长投价值按列 r 重算；其余输入固定。
+// 返回 nil 表示该格无效（r ≤ 0，或非零增长模型下 r ≤ g），前端显示「—」。
+func sensitivityCell(p model.ValuationParams, rPct, gPct, fcf, finValue, longBook float64,
+	longRet *float64, debt, totalShares float64) *float64 {
+	if rPct <= 0 {
+		return nil
+	}
+	if p.Model != valModelZero && rPct <= gPct {
+		return nil
+	}
+	r := rPct / 100
+	op, err := dcfValue(paramsWithTerminalGrowth(p, gPct), r, fcf)
+	if err != nil {
+		return nil // 防御：单点已校验过阶段参数，正常只可能因 r ≤ 终值增长率
+	}
+	longValue := 0.0
+	if longBook > 0 && longRet != nil {
+		longValue = math.Max(0, longBook*(*longRet/100)/r) // 与单点长投价值同一表达式
+	}
+	equity := math.Max(0, finValue+longValue+op-debt) // 与单点同口径 floor 到 0
+	v := equity / totalShares
+	return &v
+}
+
+// buildSensitivity 生成估值敏感性矩阵。
+// 标准情形：rows = 基准 g∞ −1.0/−0.5/0/+0.5/+1.0pp，cols = 基准 r −0.5/0/+0.5pp。
+// 零增长模型降级为 1×3（仅折现率），rows 为空数组、Cells 只有一行。
+// totalShares ≤ 0 时返回 nil（与单点不展示每股价值的行为一致）。
+func buildSensitivity(p model.ValuationParams, fcf, finValue, longBook float64,
+	longRet *float64, debt, totalShares float64) *model.SensitivityGrid {
+	if totalShares <= 0 {
+		return nil
+	}
+	grid := &model.SensitivityGrid{
+		Unit: "元",
+		Cols: []float64{
+			p.DiscountRate - valSensitivityDiscountStepPP,
+			p.DiscountRate, // 基准列使用精确入参，保证基准格与单点一致
+			p.DiscountRate + valSensitivityDiscountStepPP,
+		},
+		BaseCol:            1,
+		TerminalApplicable: p.Model != valModelZero,
+		Rows:               make([]float64, 0, 5),
+		Cells:              make([][]*float64, 0, 5),
+	}
+	if !grid.TerminalApplicable {
+		row := make([]*float64, len(grid.Cols))
+		for j, rPct := range grid.Cols {
+			row[j] = sensitivityCell(p, rPct, 0, fcf, finValue, longBook, longRet, debt, totalShares)
+		}
+		grid.Cells = append(grid.Cells, row)
+		grid.BaseRow = 0
+		return grid
+	}
+
+	base := terminalGrowthParam(p)
+	// 基准行使用精确入参（不取整）；相邻行 = 基准 ± 0.5pp / ±1.0pp。
+	for i := -2; i <= 2; i++ {
+		grid.Rows = append(grid.Rows, base+float64(i)*valSensitivityGrowthStepPP)
+	}
+	grid.BaseRow = 2
+	for _, gPct := range grid.Rows {
+		row := make([]*float64, len(grid.Cols))
+		for j, rPct := range grid.Cols {
+			row[j] = sensitivityCell(p, rPct, gPct, fcf, finValue, longBook, longRet, debt, totalShares)
+		}
+		grid.Cells = append(grid.Cells, row)
+	}
+	return grid
 }
 
 // dcfZero 零增长模型：经营资产价值 = FCF ÷ r（自由现金流恒定不变）。

@@ -1476,6 +1476,10 @@ const app = createApp({
     // fmtYi 已被既有指标占用（返回带「亿/万」的文本），此处用 fmtYiPlain 表示纯亿元数值。
     const fmtYiPlain = v => (v == null || isNaN(v)) ? '' : (Number(v) / 1e8).toFixed(2);
 
+    // R21：敏感性矩阵展示。轴标题 1 位小数，格子 2 位小数；null 显示「—」。
+    const fmtSensRate = v => (v == null || isNaN(v)) ? '—' : Number(v).toFixed(1) + '%';
+    const sensCellText = v => (v == null || isNaN(v)) ? '—' : Number(v).toFixed(2);
+
     // 带符号的 pp 展示（对账调整项，2 位小数）。
     function signedPP2(v) {
       if (v == null || isNaN(v)) return '0.00pp';
@@ -1834,6 +1838,7 @@ const app = createApp({
       scoreColor, fmtNum, applyAIValuation,
       // R19：估值参数六块展示辅助（模型参数取值、增长锚表、折现率勾稽、校验与 FCF 逐年明细）
       paramValue, fmtRate, fmtYiPlain,
+      fmtSensRate, sensCellText,
       signedPP2, discountLines, anchorTable, anchorRows, anchorReconcile, pctWeight,
       riskItemsText, checkText, fcfLatestPoint,
       history, querySearch, handleSelect, clearHistory,
@@ -2391,6 +2396,49 @@ const app = createApp({
                 <el-alert v-if="valuation.equity_floored" type="error" :closable="false" show-icon
                           :title="valuation.equity_note || '公司价值低于债务价值，股权价值按 0 计（存在资不抵债风险）'"
                           style="margin-top:8px" />
+                <!-- R21 估值敏感性：单点结果之后、notes 之前；只调整终值增长率与折现率的 what-if 网格 -->
+                <div class="val-sens" v-if="valuation.sensitivity">
+                  <div class="val-sens-head">估值敏感性</div>
+                  <div class="val-sens-desc">每股股权价值（元）· 仅调整终值增长率与折现率，其余参数不变</div>
+                  <div class="val-sens-base" v-if="valuation.sensitivity.terminal_applicable">
+                    当前参数：终值增长率 {{ fmtSensRate(valuation.sensitivity.rows[valuation.sensitivity.base_row]) }}，
+                    折现率 {{ fmtSensRate(valuation.sensitivity.cols[valuation.sensitivity.base_col]) }}
+                  </div>
+                  <div class="val-sens-base" v-else>
+                    当前参数：折现率 {{ fmtSensRate(valuation.sensitivity.cols[valuation.sensitivity.base_col]) }}
+                  </div>
+                  <div class="val-sens-scroll">
+                    <table class="val-sens-table">
+                      <thead>
+                        <tr>
+                          <th scope="col" class="val-sens-corner">终值增长率 ＼ 折现率</th>
+                          <th scope="col" v-for="(c, j) in valuation.sensitivity.cols" :key="j">
+                            折现率 {{ fmtSensRate(c) }}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template v-if="valuation.sensitivity.terminal_applicable">
+                          <tr v-for="(g, i) in valuation.sensitivity.rows" :key="i">
+                            <th scope="row">{{ fmtSensRate(g) }}</th>
+                            <td v-for="(v, j) in valuation.sensitivity.cells[i]" :key="j"
+                                :class="{ 'val-sens-base-cell': i === valuation.sensitivity.base_row && j === valuation.sensitivity.base_col }">
+                              {{ sensCellText(v) }}
+                            </td>
+                          </tr>
+                        </template>
+                        <tr v-else>
+                          <th scope="row">终值增长率不适用</th>
+                          <td v-for="(v, j) in valuation.sensitivity.cells[0]" :key="j"
+                              :class="{ 'val-sens-base-cell': j === valuation.sensitivity.base_col }">
+                            {{ sensCellText(v) }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="val-sens-hint">描边为当前估值参数</div>
+                </div>
                 <el-alert v-for="(n, i) in valuation.notes" :key="i" :title="n" type="warning" :closable="false" style="margin-top:8px" />
               </template>
             </div>

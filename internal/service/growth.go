@@ -44,8 +44,9 @@ const (
 	r18CyclePositionEnabled   = true
 
 	// R20 估值增长与终值保守化。
-	r20G1SGRBufferPP      = 1.0 // g1 相对 SGR 的近似误差缓冲（用户确认，不得扩大）
-	r20CyclicalTerminalPP = 2.0 // 周期/商品股终值上限 = 长期通胀
+	r20G1SGRBufferPP = 1.0 // g1 相对 SGR 的近似误差缓冲（用户确认，不得扩大）
+	// R21：周期/商品股终值上限由 2.0% 调整为 2.5%（长期通胀区间 2.0%–3.0% 的中点）。
+	r20CyclicalTerminalPP = 2.5 // 周期/商品股终值上限 = 长期通胀
 )
 
 // macroAnchor 宏观锚推导结果。
@@ -904,9 +905,9 @@ func fadeYears(gap float64) int {
 	return n
 }
 
-// terminalGrowth g∞（R20）：
+// terminalGrowth g∞（R20，R21 调整周期股上限）：
 //
-//	周期/商品股：上限 = 2.0%；非周期股：上限 = 宏观锚。
+//	周期/商品股：上限 = 2.5%；非周期股：上限 = 宏观锚。
 //	g_raw = min(上限, r − 1.0, SGR 可用时)
 //	g∞    = max(0, floorHalf(g_raw))
 //
@@ -914,7 +915,7 @@ func fadeYears(gap float64) int {
 func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g float64, constraint, note string) {
 	capValue, capKey, capName := macro, "macro", "宏观锚"
 	if isCyclical {
-		capValue, capKey, capName = r20CyclicalTerminalPP, "cyclical", "周期股长期通胀 2% 上限"
+		capValue, capKey, capName = r20CyclicalTerminalPP, "cyclical", "周期股长期通胀 2.5% 上限"
 	}
 
 	gRaw := math.Min(capValue, discount-1.0)
@@ -951,9 +952,9 @@ func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g flo
 		"discount": "折现率−1pp",
 		capKey:     capName,
 	}
-	// 周期股 2% 为真正生效的约束时用固定业务句，不暴露内部键名。
+	// 周期股 2.5% 为真正生效的约束时用固定业务句，不暴露内部键名。
 	if primary.key == "cyclical" {
-		note = "终值增长率按周期股长期通胀 2% 封顶。"
+		note = "终值增长率按周期股长期通胀 2.5% 封顶。"
 	} else {
 		note = fmt.Sprintf("终值受%s约束，向下取整至 %.2f%%。", names[primary.key], g)
 	}

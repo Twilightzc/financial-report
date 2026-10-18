@@ -66,5 +66,23 @@ type ValuationResult struct {
 	EquityFloored       bool    `json:"equity_floored,omitempty"` // 公司价值低于债务价值，股权价值按 0 计
 	EquityNote          string  `json:"equity_note,omitempty"`    // 资不抵债风险提示（EquityFloored 为真时给出）
 
+	// 估值敏感性（what-if）：行=终值增长率、列=折现率；零增长模型为 1×3。
+	// 仅在总股本 > 0（可计算每股价值）时输出；单点估值失败时整个结果不返回。
+	Sensitivity *SensitivityGrid `json:"sensitivity,omitempty"`
+
 	Notes []string `json:"notes,omitempty"`
+}
+
+// SensitivityGrid 估值敏感性矩阵（what-if）。
+// 标准情形：Rows = 终值增长率基准 ±1pp（5 档，升序），Cols = 折现率基准 ±0.5pp（3 档，升序），
+// Cells[row][col] = 每股股权价值（元，完整精度；nil 表示该格无经济意义）。
+// 零增长模型没有终值增长率：Rows 为空数组、Cells 只有一行（1×3），BaseRow=0。
+type SensitivityGrid struct {
+	Unit               string       `json:"unit"`                // 固定 "元"
+	TerminalApplicable bool         `json:"terminal_applicable"` // false：零增长模型，仅折现率敏感性
+	Rows               []float64    `json:"rows"`                // 终值增长率 %，升序；零增长为 []
+	Cols               []float64    `json:"cols"`                // 折现率 %，升序
+	Cells              [][]*float64 `json:"cells"`               // [行][列]，每股股权价值元；null = 无效格
+	BaseRow            int          `json:"base_row"`            // 基准格行下标
+	BaseCol            int          `json:"base_col"`            // 基准格列下标
 }
