@@ -134,7 +134,7 @@ func TestGrowthG1Rules(t *testing.T) {
 
 // TestConstructThreeStageStrictlyDecreasing 三阶段 n1=ceil、n2=floor、g2 严格递减。
 func TestConstructThreeStageStrictlyDecreasing(t *testing.T) {
-	p := constructThreeStage(20, 4.5, 15.5, 20, 15)
+	p := constructThreeStage(20, 4.5, 15.5, 20, 15, 0.80)
 	if p.Model != valModelThreeStage {
 		t.Fatalf("应为三阶段：%+v", p)
 	}
@@ -147,7 +147,7 @@ func TestConstructThreeStageStrictlyDecreasing(t *testing.T) {
 		t.Errorf("阶段增长率未严格递减：%v/%v/%v", p.G1, p.G2, p.GInf)
 	}
 	// g2 ≥ 折现率 → 三阶段无严格递减解，降级两阶段并告警。
-	p = constructThreeStage(20, 4.5, 15.5, 20, 9)
+	p = constructThreeStage(20, 4.5, 15.5, 20, 9, 0.80)
 	if p.Model != valModelTwoStage || !p.Degraded || p.Warning == "" {
 		t.Errorf("应降级两阶段：%+v", p)
 	}

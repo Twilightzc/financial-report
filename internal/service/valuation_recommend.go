@@ -345,7 +345,7 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	gap := A - gInf
 	mdl, _, _ := classifyGrowthModel(A, gap, ms.Score, insufficientA, negType)
 	g1, g1Constraint, g1Note := growthG1(A, gInf, fwd.Value, sgr, fwd.Available, sgrOK, sgrWindowYears)
-	path := constructGrowthPath(mdl, A, gInf, g1, discount.DiscountRate)
+	path := constructGrowthPath(mdl, A, gInf, g1, discount.DiscountRate, stability)
 	pr := paramsFromPath(path)
 	modelName := valuationModelNames[pr.Model]
 	modelReason := modelReasonText(pr.Model)

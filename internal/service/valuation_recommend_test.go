@@ -204,42 +204,60 @@ func TestRecommendValuationInsufficientData(t *testing.T) {
 	}
 }
 
-// TestConstructGrowthPath R19：0.5pp 网格、均值回归年限拆分与降级链。
+// TestConstructGrowthPath R19/R23：0.5pp 网格、均值回归年限按稳定度分档与降级链。
 func TestConstructGrowthPath(t *testing.T) {
-	// A=20、g∞=4、g1=20 → gap=16 → nTotal=clamp(round(16/1.5),3,10)=10，n1=5、n2=5；
+	// A=20、g∞=4、g1=20 → gap=16 → round(16/1.5)=11，稳定度 0.80 → 上限 8 年，n1=4、n2=4；
 	// g2=roundHalf((g1+g∞)/2)=12，且 20 > 12 > 4、12 < r=15 → 三阶段成立。
-	p := constructGrowthPath(valModelThreeStage, 20, 4, 20, 15)
+	p := constructGrowthPath(valModelThreeStage, 20, 4, 20, 15, 0.80)
 	if p.Model != valModelThreeStage || p.Degraded || p.Warning != "" {
 		t.Errorf("三阶段主路径：model=%s degraded=%v warning=%q，期望 three_stage/无降级", p.Model, p.Degraded, p.Warning)
 	}
-	if p.G1 != 20 || p.G2 != 12 || p.GInf != 4 || p.N1 != 5 || p.N2 != 5 || p.NTotal != 10 {
-		t.Errorf("三阶段路径 = %+v，期望 g1=20/g2=12/g∞=4/n1=5/n2=5/nTotal=10", p)
+	if p.G1 != 20 || p.G2 != 12 || p.GInf != 4 || p.N1 != 4 || p.N2 != 4 || p.NTotal != 8 {
+		t.Errorf("三阶段路径 = %+v，期望 g1=20/g2=12/g∞=4/n1=4/n2=4/nTotal=8", p)
 	}
 	if !(p.G1 > p.G2 && p.G2 > p.GInf) {
 		t.Errorf("三阶段应严格递减：%v > %v > %v", p.G1, p.G2, p.GInf)
 	}
 
-	// g2=12 不低于折现率 10 → 三阶段无解 → 降为两阶段（20 > 4）。
-	p = constructGrowthPath(valModelThreeStage, 20, 4, 20, 10)
+	// 同一 gap 下按稳定度分档：深周期上限 5、一般 6、稳定 8，n1/n2 按 ceil/floor 拆分。
+	tierCases := []struct {
+		stability      float64
+		nTotal, n1, n2 int
+	}{
+		{0.30, 5, 3, 2},
+		{0.60, 6, 3, 3},
+		{0.80, 8, 4, 4},
+	}
+	for _, c := range tierCases {
+		tp := constructGrowthPath(valModelThreeStage, 20, 4, 20, 15, c.stability)
+		if tp.Model != valModelThreeStage || tp.NTotal != c.nTotal || tp.N1 != c.n1 || tp.N2 != c.n2 {
+			t.Errorf("稳定度 %.2f 三阶段 = %+v，期望 nTotal=%d/n1=%d/n2=%d",
+				c.stability, tp, c.nTotal, c.n1, c.n2)
+		}
+	}
+
+	// g2=12 不低于折现率 10 → 三阶段无解 → 降为两阶段（20 > 4），stability 继续生效。
+	p = constructGrowthPath(valModelThreeStage, 20, 4, 20, 10, 0.80)
 	if p.Model != valModelTwoStage || !p.Degraded || p.Warning == "" {
 		t.Errorf("三阶段无严格递减解应降为两阶段：model=%s degraded=%v warning=%q", p.Model, p.Degraded, p.Warning)
 	}
-	if p.G1 != 20 || p.G2 != 4 || p.N1 != fadeYears(16) {
-		t.Errorf("降级两阶段路径 = %+v，期望 g1=20/g2=4/n1=%d", p, fadeYears(16))
+	if p.G1 != 20 || p.G2 != 4 || p.N1 != fadeYears(16, 0.80) {
+		t.Errorf("降级两阶段路径 = %+v，期望 g1=20/g2=4/n1=%d", p, fadeYears(16, 0.80))
 	}
 
-	// 年限按 (g1−g∞) 而非 (A−g∞)：g1 被上限压到 17 时 n1=8、nTotal=8。
-	p = constructGrowthPath(valModelTwoStage, 20, 4.5, 17, 8)
-	if p.N1 != fadeYears(17-4.5) || p.N1 == fadeYears(20-4.5) {
-		t.Errorf("两阶段 n1=%d，应取 fadeYears(g1−g∞)=%d", p.N1, fadeYears(17-4.5))
+	// 年限按 (g1−g∞) 而非 (A−g∞)：g1=14.5、g∞=4.5 时 gap=10 → n=7；
+	// 若误用 A−g∞=15.5 则会得 10 → 上限 8。
+	p = constructGrowthPath(valModelTwoStage, 20, 4.5, 14.5, 8, 0.80)
+	if p.N1 != fadeYears(14.5-4.5, 0.80) || p.N1 == fadeYears(20-4.5, 0.80) {
+		t.Errorf("两阶段 n1=%d，应取 fadeYears(g1−g∞)=%d", p.N1, fadeYears(14.5-4.5, 0.80))
 	}
-	p = constructGrowthPath(valModelThreeStage, 20, 4.5, 17, 12)
-	if p.Model != valModelThreeStage || p.NTotal != fadeYears(17-4.5) || p.N1 != 4 || p.N2 != 4 {
-		t.Errorf("三阶段路径 = %+v，nTotal 应取 fadeYears(g1−g∞)=%d", p, fadeYears(17-4.5))
+	p = constructGrowthPath(valModelThreeStage, 20, 4.5, 14.5, 12, 0.80)
+	if p.Model != valModelThreeStage || p.NTotal != fadeYears(14.5-4.5, 0.80) || p.N1 != 4 || p.N2 != 3 {
+		t.Errorf("三阶段路径 = %+v，nTotal 应取 fadeYears(g1−g∞)=%d", p, fadeYears(14.5-4.5, 0.80))
 	}
 
 	// 两阶段 g1 不高出终值 → 降为永续，g=clamp(roundHalf(A),0,g∞)。
-	p = constructGrowthPath(valModelTwoStage, 4, 4, 4, 8)
+	p = constructGrowthPath(valModelTwoStage, 4, 4, 4, 8, 0.80)
 	if p.Model != valModelPerpetual || !p.Degraded || p.Warning == "" {
 		t.Errorf("两阶段无严格递减解应降为永续：model=%s degraded=%v warning=%q", p.Model, p.Degraded, p.Warning)
 	}
@@ -248,15 +266,15 @@ func TestConstructGrowthPath(t *testing.T) {
 	}
 
 	// 永续：g=clamp(roundHalf(A),0,g∞)；A=3.26 → 3.5。
-	if p := constructGrowthPath(valModelPerpetual, 3.26, 4, 3.26, 8); p.G2 != 3.5 {
+	if p := constructGrowthPath(valModelPerpetual, 3.26, 4, 3.26, 8, 0.80); p.G2 != 3.5 {
 		t.Errorf("永续 g = %v，期望 roundHalf(3.26)=3.5", p.G2)
 	}
 	// 周期性负增长 A<0 → 低永续 g=0，模型仍为 perpetual。
-	if p := constructGrowthPath(valModelPerpetual, -2, 4, -2, 8); p.Model != valModelPerpetual || p.G2 != 0 {
+	if p := constructGrowthPath(valModelPerpetual, -2, 4, -2, 8, 0.30); p.Model != valModelPerpetual || p.G2 != 0 {
 		t.Errorf("周期性负增长应走低永续 g=0，实际 %+v", p)
 	}
 	// zero 无参数。
-	if p := constructGrowthPath(valModelZero, 0, 4, 0, 8); p.Model != valModelZero || p.NTotal != 0 {
+	if p := constructGrowthPath(valModelZero, 0, 4, 0, 8, 0.80); p.Model != valModelZero || p.NTotal != 0 {
 		t.Errorf("zero 路径 = %+v", p)
 	}
 }
@@ -319,7 +337,7 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 			}
 			mdl, _, _ := classifyGrowthModel(x, gap, sc, false, negType)
 			g1, _, _ := growthG1(x, gInf, 0, 0, false, false, 0)
-			path := constructGrowthPath(mdl, x, gInf, g1, d)
+			path := constructGrowthPath(mdl, x, gInf, g1, d, 0.7)
 			pr := paramsFromPath(path)
 			if got := paramKeys(pr.Params); !reflect.DeepEqual(got, wantKeys[pr.Model]) {
 				t.Fatalf("x=%v 分类 %s 生效 %s 的参数 key = %v，期望 %v", x, mdl, pr.Model, got, wantKeys[pr.Model])
@@ -366,8 +384,9 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 			}
 			if pr.Model == valModelTwoStage || pr.Model == valModelThreeStage {
 				n := pr.N1 + pr.N2
-				if n < r18FadeMinYears || n > r18FadeMaxYears {
-					t.Errorf("x=%v 回归年限 %d 应在 [%d,%d]", x, n, r18FadeMinYears, r18FadeMaxYears)
+				upper := fadeMaxByStability(0.7)
+				if n < r18FadeMinYears || n > upper {
+					t.Errorf("x=%v 回归年限 %d 应在 [%d,%d]", x, n, r18FadeMinYears, upper)
 				}
 			}
 		}

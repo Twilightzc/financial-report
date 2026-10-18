@@ -508,10 +508,22 @@ func TestComputeStructuralMetricsParentNetProfit(t *testing.T) {
 }
 
 func TestFadeYears(t *testing.T) {
-	cases := map[float64]int{0: 3, 1.5: 3, 4: 3, 7.5: 5, 12: 8, 15: 10, 30: 10, -10: 3}
-	for gap, want := range cases {
-		if got := fadeYears(gap); got != want {
-			t.Errorf("fadeYears(%v) = %d，期望 %d", gap, got, want)
+	cases := []struct {
+		gap, stability float64
+		want           int
+	}{
+		// 下限 3 年：gap 很小或为负，且不受稳定度分档影响。
+		{0, 0.8, 3}, {1.5, 0.8, 3}, {4, 0.8, 3}, {-10, 0.8, 3},
+		// 深周期（stability ≤ 0.4）上限 5 年；稳定度缺失（0）按深周期兜底。
+		{7.5, 0.3, 5}, {12, 0.3, 5}, {30, 0.3, 5}, {30, 0.4, 5}, {30, 0, 5},
+		// 一般（0.4 < stability ≤ 0.7）上限 6 年。
+		{7.5, 0.6, 5}, {10, 0.6, 6}, {12, 0.6, 6}, {30, 0.7, 6},
+		// 稳定（stability > 0.7）上限 8 年。
+		{12, 0.8, 8}, {15, 0.8, 8}, {30, 0.9, 8},
+	}
+	for _, c := range cases {
+		if got := fadeYears(c.gap, c.stability); got != c.want {
+			t.Errorf("fadeYears(%v, %v) = %d，期望 %d", c.gap, c.stability, got, c.want)
 		}
 	}
 }

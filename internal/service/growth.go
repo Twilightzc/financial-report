@@ -14,7 +14,11 @@ import (
 const (
 	r18FadeRatePP           = 1.5  // 均值回归速度 pp/年
 	r18FadeMinYears         = 3    // 回归年限下限
-	r18FadeMaxYears         = 10   // 回归年限上限
+	fadeStabilityCyclical   = 0.4  // 稳定度 ≤ 0.4 视为深周期
+	fadeStabilityStable     = 0.7  // 稳定度 > 0.7 视为稳定
+	fadeMaxCyclical         = 5    // 深周期高增长持续时间上限
+	fadeMaxGeneral          = 6    // 一般公司高增长持续时间上限
+	fadeMaxStable           = 8    // 稳定公司高增长持续时间上限
 	r18CycleLambdaPP        = 10.0 // Δ_cycle = -clamp(pos × λ, ±cap)
 	r18CycleCapPP           = 6.0
 	r18CycleMinYears        = 3 // 周期位置至少 3 年
@@ -946,16 +950,29 @@ func attributeNegativeGrowth(A float64, isCyclical bool, position, delta float64
 	return "structural", "周期/结构无法区分，保守按结构性处理", "周期/结构无法区分，保守按零增长处理。"
 }
 
-// fadeYears 均值回归年限 = clamp(round(gap/1.5), 3, 10)。
-func fadeYears(gap float64) int {
+// fadeYears 均值回归年限 = clamp(round(gap/1.5), 3, maxN)，maxN 按稳定度分档收紧。
+func fadeYears(gap, stability float64) int {
 	n := int(math.Round(gap / r18FadeRatePP))
 	if n < r18FadeMinYears {
 		n = r18FadeMinYears
 	}
-	if n > r18FadeMaxYears {
-		n = r18FadeMaxYears
+	if maxN := fadeMaxByStability(stability); n > maxN {
+		n = maxN
 	}
 	return n
+}
+
+// fadeMaxByStability 高增长持续年数上限：深周期（≤0.4）5 年、一般 6 年、稳定（>0.7）8 年；
+// 稳定度缺失（≤0）按深周期兜底。
+func fadeMaxByStability(stability float64) int {
+	switch {
+	case stability <= fadeStabilityCyclical:
+		return fadeMaxCyclical
+	case stability <= fadeStabilityStable:
+		return fadeMaxGeneral
+	default:
+		return fadeMaxStable
+	}
 }
 
 // terminalGrowth g∞（R22 连续化）：
@@ -1371,12 +1388,13 @@ func r20G1UpperNote(capSource string, fwd, sgr float64, sgrYears int) string {
 }
 
 // constructGrowthPath 按模型构造 0.5pp 网格路径；无严格递减解时 three→two→perpetual→zero 降级。
-func constructGrowthPath(model string, A, gInf, g1, discount float64) growthPath {
+// stability 决定高增长期年数上限（见 fadeMaxByStability）。
+func constructGrowthPath(model string, A, gInf, g1, discount, stability float64) growthPath {
 	switch model {
 	case valModelTwoStage:
-		return constructTwoStage(A, gInf, 0, g1, discount, false, "")
+		return constructTwoStage(A, gInf, 0, g1, discount, stability, false, "")
 	case valModelThreeStage:
-		return constructThreeStage(A, gInf, 0, g1, discount)
+		return constructThreeStage(A, gInf, 0, g1, discount, stability)
 	case valModelPerpetual:
 		return constructPerpetual(A, gInf, false, "")
 	default:
@@ -1401,11 +1419,11 @@ func constructPerpetual(A, gInf float64, degraded bool, warning string) growthPa
 
 // constructTwoStage 两阶段：g1 > g∞ 才成立，否则降为永续。
 // 第三参数为兼容占位（历史调用传 A−g∞），年限始终按 g1−g∞ 计算。
-func constructTwoStage(A, gInf, _ float64, g1, discount float64, degraded bool, warning string) growthPath {
+func constructTwoStage(A, gInf, _ float64, g1, discount, stability float64, degraded bool, warning string) growthPath {
 	path := growthPath{
 		Model:    valModelTwoStage,
 		G1:       g1,
-		N1:       fadeYears(g1 - gInf),
+		N1:       fadeYears(g1-gInf, stability),
 		G2:       gInf,
 		GInf:     gInf,
 		Degraded: degraded,
@@ -1425,8 +1443,8 @@ func constructTwoStage(A, gInf, _ float64, g1, discount float64, degraded bool, 
 
 // constructThreeStage 三阶段：n1=ceil(nTotal/2)、n2=nTotal−n1，g2=roundHalf((g1+g∞)/2)。
 // 年限按 g1−g∞ 均值回归；第三参数为兼容占位。无严格递减解时降级两阶段。
-func constructThreeStage(A, gInf, _ float64, g1, discount float64) growthPath {
-	nTotal := fadeYears(g1 - gInf)
+func constructThreeStage(A, gInf, _ float64, g1, discount, stability float64) growthPath {
+	nTotal := fadeYears(g1-gInf, stability)
 	n1 := (nTotal + 1) / 2
 	n2 := nTotal - n1
 	g2 := roundHalf((g1 + gInf) / 2)
@@ -1441,7 +1459,7 @@ func constructThreeStage(A, gInf, _ float64, g1, discount float64) growthPath {
 			NTotal: nTotal,
 		}
 	}
-	return constructTwoStage(A, gInf, 0, g1, discount, true, "阶段参数无严格递减解，已降级为两阶段。")
+	return constructTwoStage(A, gInf, 0, g1, discount, stability, true, "阶段参数无严格递减解，已降级为两阶段。")
 }
 
 // verifyC4a 硬约束：g∞ ≤ SGR（可用时）且 g∞ < 折现率。
