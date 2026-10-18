@@ -105,7 +105,12 @@ td.num, .val, .yoy {
 
 /* ===================== 仪表盘骨架 ===================== */
 
-.app-shell { min-height: 100vh; }
+/* 应用骨架占满视口且页面本身不滚动：唯一滚动区是 .main（顶部栏固定在滚动区上方） */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
 
 /* 左侧固定侧边栏 */
 .sidebar {
@@ -203,18 +208,21 @@ td.num, .val, .yoy {
   background: rgba(0, 0, 0, 0.5);
 }
 
-/* 主内容列 */
+/* 主内容列：顶栏 + 滚动区两段式，整列不超过视口高度 */
 .content {
   margin-left: var(--sidebar-w);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   min-width: 0;
 }
 
 /* ===================== 顶栏 ===================== */
 
 .topbar {
+  flex: 0 0 auto;
   position: sticky;
   top: 0;
   z-index: 100;
@@ -335,12 +343,28 @@ td.num, .val, .yoy {
 
 .main {
   width: 100%;
-  max-width: 1320px;
-  margin: 0 auto;
   padding: 30px 25px 60px;
   display: flex;
   flex-direction: column;
   gap: 32px; /* 区块 ↔ 区块 */
+  /* 唯一滚动区：顶栏留在滚动区外，切换区块时只滚 .main */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 内容列与顶栏内容（1320px 含 25px 左右内边距）对齐，上限放在子元素而非 .main 上，
+   保证滚动条贴在视口右缘，而不是随内容列一起收窄。 */
+.main > * {
+  width: 100%;
+  max-width: 1270px; /* 1320 - 2 × 25px 内边距，与 .topbar-inner 内容区等宽 */
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 区块视图容器：由 v-show 控制显隐，同一时刻只显示一个区块 */
+.view-section {
+  min-width: 0;
 }
 
 .dashboard-section {

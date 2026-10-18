@@ -1,4 +1,4 @@
-const { createApp, ref, computed, nextTick, onMounted, onBeforeUnmount } = Vue;
+const { createApp, ref, computed, nextTick } = Vue;
 
 // 指标趋势图：图表可用宽度窄于此值时启用窄屏布局（图例移底、字号 11px、边距收紧）。
 // 注意「窄屏」按图表实测宽度判断（弹窗宽度是 min(680px, 92vw)，非固定）；「移动端」按视口宽度，见 style.css。
@@ -1833,44 +1833,43 @@ const app = createApp({
     }
 
     // ===================== 仪表盘侧边栏 =====================
-    // 仅承载「锚点滚动 + 当前区块高亮」这一层 UI 状态，不参与任何数据请求。
-    // 单页滚动：搜索后所有区块仍在同一页内，菜单只负责平滑滚动定位。
+    // 视图切换：同一时刻只显示一个区块（v-show），侧边栏高亮直接由 activeSection 决定，
+    // 不再根据滚动位置反推。每个区块的滚动位置记在 sectionScroll，切走时保存、切回时恢复。
+    // 区块状态全部是 setup 里的 ref（analysisActive / activeTab / aiResult 等），v-show 不卸载组件，
+    // 因此切换区块不会重置状态，也不销毁 ECharts 实例与表格 DOM。
     const SECTION_IDS = ['overview', 'statements', 'analysis', 'company-value', 'valuation', 'ai'];
     const sidebarOpen = ref(false);
     const activeSection = ref(SECTION_IDS[0]);
-    let sectionScrollRaf = 0;
+    const mainRef = ref(null);   // .main 是唯一滚动容器（topbar 固定在其上方）
+    const sectionScroll = {};    // 非响应式：区块 id → 上次 scrollTop（断点续看）
 
-    function scrollToSection(id) {
-      sidebarOpen.value = false;
-      const el = document.getElementById(id);
-      if (!el) return; // 未搜索（欢迎页）时区块不存在：不滚动、不报错
-      const topbar = document.querySelector('.topbar');
-      const offset = (topbar ? topbar.offsetHeight : 66) + 16;
-      const top = el.getBoundingClientRect().top + window.scrollY - offset;
-      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    function switchSection(id) {
+      sidebarOpen.value = false; // 移动端点菜单后收起抽屉
+      if (!data.value) return;   // 欢迎页无区块可切换：不报错、不切换
+      if (mainRef.value) sectionScroll[activeSection.value] = mainRef.value.scrollTop;
       activeSection.value = id;
-    }
-
-    // 当前区块：视口顶部 120px 线以上、位置最靠下的区块。
-    function updateActiveSection() {
-      let current = SECTION_IDS[0];
-      for (const id of SECTION_IDS) {
-        const el = document.getElementById(id);
-        if (el && el.getBoundingClientRect().top <= 120) current = id;
-      }
-      activeSection.value = current;
-    }
-
-    function onWindowScroll() {
-      if (sectionScrollRaf) return;
-      sectionScrollRaf = window.requestAnimationFrame(() => {
-        sectionScrollRaf = 0;
-        updateActiveSection();
+      // 等 v-show 完成、目标区块参与布局后再恢复滚动位置
+      nextTick(() => {
+        if (!mainRef.value) return;
+        mainRef.value.scrollTop = sectionScroll[id] || 0;
+        if (id === 'ai') resizeRadarOnShow();
       });
     }
 
-    onMounted(() => window.addEventListener('scroll', onWindowScroll, { passive: true }));
-    onBeforeUnmount(() => window.removeEventListener('scroll', onWindowScroll));
+    // AI 区块被 v-show 隐藏期间容器尺寸为 0，切回时：已有实例则重新测量（必要时切回宽屏规格），
+    // 尚未初始化（结果在别的区块返回、隐藏时 init 失败）则补渲染。
+    function resizeRadarOnShow() {
+      if (!aiResult.value || !aiRadarRef.value) return;
+      const el = aiRadarRef.value;
+      const chart = echarts.getInstanceByDom(el);
+      if (!chart) { renderRadar(); return; }
+      const narrow = el.clientWidth < RADAR_NARROW_WIDTH;
+      if (narrow !== radarNarrow.value) {
+        radarNarrow.value = narrow;
+        chart.setOption(buildRadarOption(aiResult.value.scores || [], narrow));
+      }
+      chart.resize();
+    }
 
     loadHistory();
     // R16：初始化 GET 一次用于徽标计数；成功后尝试迁移旧 localStorage 数据（每次页面加载最多一次）。
@@ -1922,8 +1921,8 @@ const app = createApp({
       deleteValuationRecord, clearValuationHistory,
       fmtRecordTime, fmtRecordPerShare, recordParamSummary, recordModelName, resetValuationState,
       focusValHistoryEntry,
-      // 仪表盘侧边栏（锚点滚动 + 当前区块高亮）
-      sidebarOpen, activeSection, scrollToSection,
+      // 仪表盘侧边栏（v-show 视图切换 + 每区块滚动位置记忆）
+      sidebarOpen, activeSection, switchSection, mainRef, sectionScroll,
     };
   },
   template: `
@@ -1937,7 +1936,7 @@ const app = createApp({
           <span class="brand-name">A股财报分析</span>
         </div>
         <nav class="sidebar-nav" aria-label="页面导航">
-          <button type="button" class="nav-item" :class="{ active: activeSection === 'overview' }" @click="scrollToSection('overview')">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'overview' }" @click="switchSection('overview')">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
               <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
@@ -1946,7 +1945,7 @@ const app = createApp({
             </svg>
             <span>公司总览</span>
           </button>
-          <button type="button" class="nav-item" :class="{ active: activeSection === 'statements' }" @click="scrollToSection('statements')">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'statements' }" @click="switchSection('statements')">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
               <polyline points="14 2 14 8 20 8"></polyline>
@@ -1955,7 +1954,7 @@ const app = createApp({
             </svg>
             <span>三大财报</span>
           </button>
-          <button type="button" class="nav-item" :class="{ active: activeSection === 'analysis' }" @click="scrollToSection('analysis')">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'analysis' }" @click="switchSection('analysis')">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <line x1="6" y1="20" x2="6" y2="15"></line>
               <line x1="12" y1="20" x2="12" y2="10"></line>
@@ -1964,7 +1963,7 @@ const app = createApp({
             </svg>
             <span>财务指标分析</span>
           </button>
-          <button type="button" class="nav-item" :class="{ active: activeSection === 'company-value' }" @click="scrollToSection('company-value')">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'company-value' }" @click="switchSection('company-value')">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M6 3h12l4 6-10 12L2 9z"></path>
               <path d="M2 9h20"></path>
@@ -1973,7 +1972,7 @@ const app = createApp({
             </svg>
             <span>公司价值</span>
           </button>
-          <button type="button" class="nav-item" :class="{ active: activeSection === 'valuation' }" @click="scrollToSection('valuation')">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'valuation' }" @click="switchSection('valuation')">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="4" y="2" width="16" height="20" rx="2"></rect>
               <line x1="8" y1="6" x2="16" y2="6"></line>
@@ -1988,7 +1987,7 @@ const app = createApp({
             </svg>
             <span>公司估值</span>
           </button>
-          <button type="button" class="nav-item" :class="{ active: activeSection === 'ai' }" @click="scrollToSection('ai')">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'ai' }" @click="switchSection('ai')">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path>
               <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"></path>
@@ -2072,7 +2071,7 @@ const app = createApp({
         <div v-if="searchHint" class="topbar-hint">{{ searchHint }}</div>
       </header>
 
-      <main class="main">
+      <main ref="mainRef" class="main">
         <section v-if="!data" class="welcome">
           <div class="welcome-title">读懂一家公司，从财报开始</div>
           <div class="welcome-desc">输入 A 股代码，查看核心指标、三大报表、六维财务分析、估值与 AI 智能诊断。</div>
@@ -2085,7 +2084,10 @@ const app = createApp({
         </section>
 
         <template v-if="data">
-          <section id="overview" class="dashboard-section">
+          <!-- 视图切换：每块一个 v-show 容器，同一时刻只显示 activeSection 对应区块。
+               v-show 不卸载 DOM/组件，各区块内部状态与 ECharts 实例在切换间保留。 -->
+          <section v-show="activeSection === 'overview'" id="overview" class="view-section">
+          <section class="dashboard-section">
             <section class="card stock-card">
               <div class="stock-main">
                 <div class="stock-id">
@@ -2112,8 +2114,10 @@ const app = createApp({
               </div>
             </section>
           </section>
+          </section>
 
-          <section id="statements" class="card" v-loading="finLoading">
+          <section v-show="activeSection === 'statements'" id="statements" class="view-section">
+          <section class="card" v-loading="finLoading">
             <div class="card-head">
               <h2 class="card-title">三大财报数据<span class="sub">年报</span></h2>
               <div class="year-filter">
@@ -2157,8 +2161,10 @@ const app = createApp({
               </div>
             </div>
           </section>
+          </section>
 
-          <section id="analysis" class="card" v-loading="analysisLoading">
+          <section v-show="activeSection === 'analysis'" id="analysis" class="view-section">
+          <section class="card" v-loading="analysisLoading">
             <div class="card-head">
               <h2 class="card-title">财务指标分析<span class="sub">六维</span></h2>
               <div class="year-filter">
@@ -2236,8 +2242,10 @@ const app = createApp({
               </el-dialog>
             </div>
           </section>
+          </section>
 
-          <section id="company-value" class="card" v-loading="cvLoading">
+          <section v-show="activeSection === 'company-value'" id="company-value" class="view-section">
+          <section class="card" v-loading="cvLoading">
             <div class="card-head">
               <h2 class="card-title">公司价值<span class="sub">逐年</span></h2>
               <div class="year-filter">
@@ -2294,8 +2302,10 @@ const app = createApp({
               </template>
             </div>
           </section>
+          </section>
 
-          <section id="valuation" class="card" v-loading="valLoading">
+          <section v-show="activeSection === 'valuation'" id="valuation" class="view-section">
+          <section class="card" v-loading="valLoading">
             <div class="card-head"><h2 class="card-title">公司估值<span class="sub">现金流贴现</span></h2></div>
             <div class="card-body">
               <div class="val-form">
@@ -2460,8 +2470,10 @@ const app = createApp({
               </template>
             </div>
           </section>
+          </section>
 
-          <section id="ai" class="card">
+          <section v-show="activeSection === 'ai'" id="ai" class="view-section">
+          <section class="card">
             <div class="card-head">
               <h2 class="card-title">AI 智能分析</h2>
             </div>
@@ -2895,6 +2907,7 @@ const app = createApp({
                 </div>
               </template>
             </div>
+          </section>
           </section>
         </template>
       </main>
