@@ -677,55 +677,114 @@ func TestScenarioJSONContract(t *testing.T) {
 	}
 }
 
-// TestScenarioFCFDiscreteAnchors FR-38：保守=min(base,median)、基准=base、乐观=max(base,latest)，
-// 依据取实际生效的那个。
+// TestScenarioFCFDiscreteAnchors FR-38：Low/High 离散锚，
+// 保守=min(base,Low)、基准=base、乐观=max(base,High)，依据取实际生效的那个。
 func TestScenarioFCFDiscreteAnchors(t *testing.T) {
 	series := []model.FCFYearPoint{
-		{Year: 2020, FCF: 80e8},
-		{Year: 2021, FCF: 100e8},
-		{Year: 2022, FCF: 140e8},
+		{Year: 2020, FCF: 130e8},
+		{Year: 2021, FCF: 120e8},
+		{Year: 2022, FCF: 110e8},
+		{Year: 2023, FCF: 100e8},
+		{Year: 2024, FCF: 90e8},
 	}
-	anchor := newFCFScenarioAnchor(120e8, series, valFCFMedian)
+	anchor := newFCFScenarioAnchor(110e8, series, valFCFMedian)
 	if !anchor.Available {
 		t.Fatalf("非空且非 custom 的序列应可用于离散锚定：%+v", anchor)
 	}
-	if math.Abs(anchor.Median-100e8) > 1e-9 || math.Abs(anchor.Latest-140e8) > 1e-9 {
+	if math.Abs(anchor.Low-90e8) > 1e-9 || math.Abs(anchor.High-130e8) > 1e-9 {
 		t.Fatalf("离散锚计算错误：%+v", anchor)
 	}
 
 	in := scenarioTestInput()
-	in.BaseFCF, in.FCFMedian, in.FCFLatest = anchor.Base, anchor.Median, anchor.Latest
+	in.BaseFCF, in.FCFLow, in.FCFHigh = anchor.Base, anchor.Low, anchor.High
 	in.FCFAnchorOK, in.FCFMode = anchor.Available, valFCFMedian
 	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
 	if len(scenes) != 3 {
 		t.Fatalf("三档长度应为 3，实际 %d", len(scenes))
 	}
 
-	if math.Abs(scenes[0].BaseFCF-100e8) > 1e-9 || scenes[0].BaseFCFBasis != "近年中位数" {
-		t.Errorf("保守档应取 min(120,100)=100 亿（近年中位数），实际 %v / %q",
+	// 下降序列不再因「中位数/最近一年」逻辑 collapse：保守锚最低年、乐观锚最高年。
+	if math.Abs(scenes[0].BaseFCF-90e8) > 1e-9 || scenes[0].BaseFCFBasis != "近年最低" {
+		t.Errorf("保守档应取 min(110,90)=90 亿（近年最低），实际 %v / %q",
 			scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
 	}
-	if math.Abs(scenes[1].BaseFCF-120e8) > 1e-9 || scenes[1].BaseFCFBasis != "当前推荐" {
-		t.Errorf("基准档应保持推荐值 120 亿（当前推荐），实际 %v / %q",
+	if math.Abs(scenes[1].BaseFCF-110e8) > 1e-9 || scenes[1].BaseFCFBasis != "当前推荐" {
+		t.Errorf("基准档应保持推荐值 110 亿（当前推荐），实际 %v / %q",
 			scenes[1].BaseFCF/1e8, scenes[1].BaseFCFBasis)
 	}
-	if math.Abs(scenes[2].BaseFCF-140e8) > 1e-9 || scenes[2].BaseFCFBasis != "最近一年" {
-		t.Errorf("乐观档应取 max(120,140)=140 亿（最近一年），实际 %v / %q",
+	if math.Abs(scenes[2].BaseFCF-130e8) > 1e-9 || scenes[2].BaseFCFBasis != "近年最高" {
+		t.Errorf("乐观档应取 max(110,130)=130 亿（近年最高），实际 %v / %q",
 			scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-
-	// 离散值不高于基准时，对应档仍取基准，并说明「无离散」。
-	in.FCFMedian, in.FCFLatest = 120e8, 100e8
-	scenes = buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	if scenes[0].BaseFCF != 120e8 || scenes[0].BaseFCFBasis != "无离散（中位数=基准）" {
-		t.Errorf("中位数等于基准时保守档应保持基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != 120e8 || scenes[2].BaseFCFBasis != "无离散（最近一年不高于基准）" {
-		t.Errorf("最近一年不高于基准时乐观档应保持基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
 	}
 }
 
-// TestScenarioFCFAnchorGuards FR-38 守卫：median/latest ≤ 0 或序列不可用（含 custom）时退回 base。
+// TestScenarioFCFCycleClamp FR-38：强周期穿越低点/高点不做比例 clamp；
+// 非周期/稳定档位收口到 base × [0.75, 1.25]；序列极差过小视为无离散。
+func TestScenarioFCFCycleClamp(t *testing.T) {
+	bands := scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5}
+	newInput := func(base, low, high float64, strongCyclical bool) scenarioInput {
+		in := scenarioTestInput()
+		in.BaseFCF, in.FCFLow, in.FCFHigh = base, low, high
+		in.FCFAnchorOK, in.FCFMode, in.FCFStrongCyclical = true, valFCFMedian, strongCyclical
+		return in
+	}
+
+	// 强周期：base=100、Low=30、High=200 → 30/200，不做 ±25% clamp。
+	scenes := buildScenariosForTest(newInput(100e8, 30e8, 200e8, true), bands)
+	if scenes[0].BaseFCF != 30e8 || scenes[0].BaseFCFBasis != "近年最低" {
+		t.Errorf("强周期保守档应取 30 亿（近年最低），实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != 200e8 || scenes[2].BaseFCFBasis != "近年最高" {
+		t.Errorf("强周期乐观档应取 200 亿（近年最高），实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
+	}
+
+	// 非周期且低点在 ±25% 内：base=100、Low=95、High=105 → 95/105。
+	scenes = buildScenariosForTest(newInput(100e8, 95e8, 105e8, false), bands)
+	if scenes[0].BaseFCF != 95e8 || scenes[0].BaseFCFBasis != "近年最低" {
+		t.Errorf("非周期保守档应取 95 亿（近年最低），实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != 105e8 || scenes[2].BaseFCFBasis != "近年最高" {
+		t.Errorf("非周期乐观档应取 105 亿（近年最高），实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
+	}
+
+	// 非周期单年异常低点：Low=20、base=100 → 保守 clamp 到 75；乐观仍锚 High=105。
+	scenes = buildScenariosForTest(newInput(100e8, 20e8, 105e8, false), bands)
+	if scenes[0].BaseFCF != 75e8 || scenes[0].BaseFCFBasis != "非周期 clamp（±25%）" {
+		t.Errorf("非周期异常低点应 clamp 到 75 亿，实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != 105e8 || scenes[2].BaseFCFBasis != "近年最高" {
+		t.Errorf("非周期乐观档应取 105 亿（近年最高），实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
+	}
+
+	// 非周期单年异常高点：High=300、base=100 → 乐观 clamp 到 125；保守仍锚 Low=95。
+	scenes = buildScenariosForTest(newInput(100e8, 95e8, 300e8, false), bands)
+	if scenes[0].BaseFCF != 95e8 || scenes[0].BaseFCFBasis != "近年最低" {
+		t.Errorf("非周期保守档应取 95 亿（近年最低），实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != 125e8 || scenes[2].BaseFCFBasis != "非周期 clamp（±25%）" {
+		t.Errorf("非周期异常高点应 clamp 到 125 亿，实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
+	}
+
+	// 无离散：|High−Low| ≤ base×5% → 三档同取 base，依据「无离散」。
+	scenes = buildScenariosForTest(newInput(100e8, 98e8, 103e8, false), bands)
+	for i, s := range scenes {
+		if s.BaseFCF != 100e8 {
+			t.Errorf("无离散第 %d 档应取基准 100 亿，实际 %v", i, s.BaseFCF/1e8)
+		}
+	}
+	if scenes[0].BaseFCFBasis != "无离散" || scenes[2].BaseFCFBasis != "无离散" {
+		t.Errorf("无离散依据应一致：%q / %q", scenes[0].BaseFCFBasis, scenes[2].BaseFCFBasis)
+	}
+
+	// base ≤ 0 也按无离散处理（避免除零），三档同取 base。
+	scenes = buildScenariosForTest(newInput(0, -5e8, 10e8, false), bands)
+	if scenes[0].BaseFCF != 0 || scenes[0].BaseFCFBasis != "无离散" || scenes[2].BaseFCFBasis != "无离散" {
+		t.Errorf("base 非正时应按无离散退回基准：%v / %q / %q",
+			scenes[0].BaseFCF, scenes[0].BaseFCFBasis, scenes[2].BaseFCFBasis)
+	}
+}
+
+// TestScenarioFCFAnchorGuards FR-38 守卫：Low/High ≤ 0 或序列不可用（含 custom）时退回 base。
 func TestScenarioFCFAnchorGuards(t *testing.T) {
 	const base = 120e8
 	bands := scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5}
@@ -736,20 +795,23 @@ func TestScenarioFCFAnchorGuards(t *testing.T) {
 		return in
 	}
 
-	// median ≤ 0：保守档退回 base，乐观档仍可锚到正 latest。
+	// Low ≤ 0：保守档退回 base，乐观档仍可锚到正 High。
 	in := newInput()
-	in.FCFMedian, in.FCFLatest = -5e8, 140e8
+	in.FCFLow, in.FCFHigh = -5e8, 140e8
 	scenes := buildScenariosForTest(in, bands)
-	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "中位数非正，回退基准" {
-		t.Errorf("中位数非正时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
+	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "近年最低非正，回退基准" {
+		t.Errorf("最低值为非正时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != 140e8 || scenes[2].BaseFCFBasis != "近年最高" {
+		t.Errorf("最低值非正不应影响乐观档：%v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
 	}
 
-	// latest ≤ 0：乐观档退回 base。
+	// High ≤ 0：乐观档退回 base。
 	in = newInput()
-	in.FCFMedian, in.FCFLatest = 100e8, -10e8
+	in.FCFLow, in.FCFHigh = -10e8, -1e8
 	scenes = buildScenariosForTest(in, bands)
-	if scenes[2].BaseFCF != base || scenes[2].BaseFCFBasis != "最近一年非正，回退基准" {
-		t.Errorf("最近一年非正时乐观档应退回基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
+	if scenes[2].BaseFCF != base || scenes[2].BaseFCFBasis != "近年最高非正，回退基准" {
+		t.Errorf("最高值非正时乐观档应退回基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
 	}
 
 	// fcf_series 为空：三档都取 base。
@@ -758,7 +820,7 @@ func TestScenarioFCFAnchorGuards(t *testing.T) {
 		t.Fatalf("空序列不应可用于离散锚定：%+v", empty)
 	}
 	in = newInput()
-	in.FCFAnchorOK, in.FCFMedian, in.FCFLatest, in.FCFMode = empty.Available, empty.Median, empty.Latest, valFCFLatest
+	in.FCFAnchorOK, in.FCFLow, in.FCFHigh, in.FCFMode = empty.Available, empty.Low, empty.High, valFCFLatest
 	scenes = buildScenariosForTest(in, bands)
 	for i, s := range scenes {
 		if s.BaseFCF != base {
@@ -772,7 +834,7 @@ func TestScenarioFCFAnchorGuards(t *testing.T) {
 	// custom：基期 FCF 由规则直接给出，不参与离散锚定。
 	custom := newFCFScenarioAnchor(base, []model.FCFYearPoint{{Year: 2022, FCF: 300e8}}, valFCFCustom)
 	in = newInput()
-	in.FCFAnchorOK, in.FCFMedian, in.FCFLatest, in.FCFMode = custom.Available, custom.Median, custom.Latest, valFCFCustom
+	in.FCFAnchorOK, in.FCFLow, in.FCFHigh, in.FCFMode = custom.Available, custom.Low, custom.High, valFCFCustom
 	scenes = buildScenariosForTest(in, bands)
 	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "无离散（自定义）" {
 		t.Errorf("custom 时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)

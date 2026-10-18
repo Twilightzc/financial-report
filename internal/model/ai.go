@@ -56,7 +56,7 @@ type ValuationScenario struct {
 	NegativeGrowthType string             `json:"negative_growth_type,omitempty"` // structural/cyclical；非负增长省略
 	// R15/FR-38：三档基期 FCF（元，纯展示，不参与每档估值计算）。
 	BaseFCF      float64 `json:"base_fcf"`       // 该档基期 FCF（保守=min(base,median)、乐观=max(base,latest)）
-	BaseFCFBasis string  `json:"base_fcf_basis"` // 取值依据（当前推荐/近年中位数/最近一年/…）
+	BaseFCFBasis string  `json:"base_fcf_basis"` // 取值依据（当前推荐/近年最低/近年最高/非周期 clamp（±25%）/无离散/…）
 }
 
 // GrowthWeights 复合锚三权重（FR-19）。三者之和为 1，或数据不足时全 0。

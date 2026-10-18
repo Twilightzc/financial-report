@@ -501,6 +501,8 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	// —— R15 整合版：三档情景参数（基准档直接复用上面的最终变量，不重新推导）——
 	// FR-38：基期 FCF 也按离散锚分档，因此必须在 fcfSeries / baseFCF 就绪后再构造三档。
 	fcfAnchor := newFCFScenarioAnchor(baseFCF, fcfSeries, fcfRec.Mode)
+	// 强周期：生效周期判定，或 FCF 自身 CV > 0.5（成长性否决不影响 FCF 序列的波动事实）。
+	fcfStrongCyclical := isCyclical || (cycle.Evaluated && cycle.CV > valCycleCVThreshold)
 	bands := computeScenarioBands(A, x, delta, k > 0, fwd, pr.Model)
 	scenInput := scenarioInput{
 		A: A, RawA: comp.RawA, Discount: discount, GInf: gInf,
@@ -510,9 +512,9 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 		Insufficient: insufficientA, IsCyclical: isCyclical, Position: pos,
 		StructuralMetrics: sm, ROEVals: roeVals,
 		DownsideDispersion: downsideDispersion, StabilityAvailable: stabilityAvailable,
-		BaseFCF: fcfAnchor.Base, FCFMedian: fcfAnchor.Median,
-		FCFLatest: fcfAnchor.Latest, FCFAnchorOK: fcfAnchor.Available,
-		FCFMode: fcfRec.Mode,
+		BaseFCF: fcfAnchor.Base, FCFLow: fcfAnchor.Low,
+		FCFHigh: fcfAnchor.High, FCFAnchorOK: fcfAnchor.Available,
+		FCFMode: fcfRec.Mode, FCFStrongCyclical: fcfStrongCyclical,
 	}
 	scenarios := buildScenarios(scenInput, bands, pr, path, score, negType)
 
@@ -1865,6 +1867,11 @@ const (
 	valScenarioOptimisticAnchorMax   = 40.0
 	valScenarioOptimisticDiscountMin = 7.0
 	valScenarioFallbackBandRatio     = 0.20 // 无历史/前瞻分歧时按 0.2×A 生成最小带宽
+
+	// FR-38 基期 FCF 离散锚：非强周期档位做 ±25% 双向 clamp，序列极差过小视为无离散。
+	valFCFFlatClampDown = 0.75 // 非周期保守档下限 = base × 0.75
+	valFCFFlatClampUp   = 1.25 // 非周期乐观档上限 = base × 1.25
+	valFCFNoSpreadRatio = 0.05 // |High − Low| ≤ base × 5% → 三档同取 base
 )
 
 // round1 / round2 展示口径舍入（计算链继续用未舍入值）。
@@ -1912,41 +1919,42 @@ type scenarioInput struct {
 	DownsideDispersion float64
 	StabilityAvailable bool
 	// R15/FR-38：基期 FCF 的离散锚（仅用于展示字段，不参与参数重算）。
-	BaseFCF     float64 // 当前推荐基期 FCF（元）
-	FCFMedian   float64 // 分年 FCF 中位数（元）
-	FCFLatest   float64 // 最近一年 FCF（元）
-	FCFAnchorOK bool    // 分年序列是否可用于分档（非 custom 且非空）
-	FCFMode     string  // 推荐模式（custom 需单独回退文案）
+	BaseFCF           float64 // 当前推荐基期 FCF（元）
+	FCFLow            float64 // 分年 FCF 最低值（元）
+	FCFHigh           float64 // 分年 FCF 最高值（元）
+	FCFAnchorOK       bool    // 分年序列是否可用于分档（非 custom 且非空）
+	FCFMode           string  // 推荐模式（custom 需单独回退文案）
+	FCFStrongCyclical bool    // 强周期（生效 IsCyclical 或 FCF CV > 0.5）：不做 ±25% clamp
 }
 
 // fcfScenarioAnchor 三档基期 FCF 的离散锚（FR-38，纯函数）。
 type fcfScenarioAnchor struct {
 	Base      float64 // 当前推荐值
-	Median    float64 // fcf_series 中位数
-	Latest    float64 // fcf_series 最近一年
+	Low       float64 // fcf_series 最低值
+	High      float64 // fcf_series 最高值
 	Available bool    // 序列是否可用于离散锚定
 }
 
-// newFCFScenarioAnchor 从已输出的 FCF 分年序列构造离散锚。
+// newFCFScenarioAnchor 从已输出的 FCF 分年序列构造离散锚（最低/最高值）。
 // custom 的基期 FCF 由用户/规则直接给出，不参与离散锚定（与空序列同样回退 base）。
 func newFCFScenarioAnchor(base float64, series []model.FCFYearPoint, mode string) fcfScenarioAnchor {
 	a := fcfScenarioAnchor{Base: base}
 	if mode == valFCFCustom || len(series) == 0 {
 		return a
 	}
-	vals := make([]float64, 0, len(series))
-	for _, p := range series {
-		vals = append(vals, p.FCF)
+	a.Low, a.High = series[0].FCF, series[0].FCF
+	for _, p := range series[1:] {
+		a.Low = math.Min(a.Low, p.FCF)
+		a.High = math.Max(a.High, p.FCF)
 	}
-	a.Median = medianOf(vals)
-	a.Latest = series[len(series)-1].FCF
 	a.Available = true
 	return a
 }
 
 // scenarioFCF 返回单档基期 FCF 与取值依据（FR-38）。
-// 保守 = min(base, median)；基准 = base；乐观 = max(base, latest)。
-// median/latest ≤ 0 或序列不可用时退回 base，避免把三档锚到非正值。
+// 保守 = min(base, Low)；基准 = base；乐观 = max(base, High)。
+// 强周期（生效 IsCyclical 或 FCF CV > 0.5）穿越周期低点/高点即情景，不做比例 clamp；
+// 非周期/稳定档位再收口到 base × [0.75, 1.25]。序列无离散或极值非正时退回 base。
 func scenarioFCF(in scenarioInput, key string) (value float64, basis string) {
 	if key == "base" {
 		return in.BaseFCF, "当前推荐"
@@ -1957,23 +1965,33 @@ func scenarioFCF(in scenarioInput, key string) (value float64, basis string) {
 		}
 		return in.BaseFCF, "无离散"
 	}
+	// 无离散：序列极差相对基准 ≤ 5%，或基准非正（避免除零）→ 三档同取基准。
+	if in.BaseFCF <= 0 || math.Abs(in.FCFHigh-in.FCFLow) <= in.BaseFCF*valFCFNoSpreadRatio {
+		return in.BaseFCF, "无离散"
+	}
 	switch key {
 	case "conservative":
-		if in.FCFMedian <= 0 {
-			return in.BaseFCF, "中位数非正，回退基准"
+		if in.FCFLow <= 0 {
+			return in.BaseFCF, "近年最低非正，回退基准"
 		}
-		if in.FCFMedian >= in.BaseFCF {
-			return in.BaseFCF, "无离散（中位数=基准）"
+		v := math.Min(in.BaseFCF, in.FCFLow)
+		if !in.FCFStrongCyclical {
+			if floor := in.BaseFCF * valFCFFlatClampDown; v < floor {
+				return floor, "非周期 clamp（±25%）"
+			}
 		}
-		return in.FCFMedian, "近年中位数"
+		return v, "近年最低"
 	case "optimistic":
-		if in.FCFLatest <= 0 {
-			return in.BaseFCF, "最近一年非正，回退基准"
+		if in.FCFHigh <= 0 {
+			return in.BaseFCF, "近年最高非正，回退基准"
 		}
-		if in.FCFLatest <= in.BaseFCF {
-			return in.BaseFCF, "无离散（最近一年不高于基准）"
+		v := math.Max(in.BaseFCF, in.FCFHigh)
+		if !in.FCFStrongCyclical {
+			if ceil := in.BaseFCF * valFCFFlatClampUp; v > ceil {
+				return ceil, "非周期 clamp（±25%）"
+			}
 		}
-		return in.FCFLatest, "最近一年"
+		return v, "近年最高"
 	}
 	return in.BaseFCF, "当前推荐"
 }
