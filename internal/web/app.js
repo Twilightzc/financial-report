@@ -2545,6 +2545,7 @@ const app = createApp({
                           </tr>
                         </thead>
                         <tbody>
+                          <tr><th>基期 FCF（亿）</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtYiPlain(s.base_fcf) }}<template v-if="s.base_fcf_basis">（{{ s.base_fcf_basis }}）</template></td></tr>
                           <tr><th>折现率</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.discount_rate) }}%</td></tr>
                           <tr><th>模型</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></td></tr>
                           <tr><th>复合锚 A</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.growth_anchor) }}%</td></tr>
@@ -2559,13 +2560,14 @@ const app = createApp({
                       <div class="ai-scenario-cards">
                         <div v-for="s in aiResult.valuation.scenarios" :key="s.key" class="ai-scenario-card" :class="{ 'scenario-base': s.key === 'base' }">
                           <div class="ai-scenario-card-title">{{ s.name }}<span v-if="s.key === 'base'" class="ai-scenario-badge">当前套用</span></div>
+                          <div class="ai-v">基期 FCF {{ fmtYiPlain(s.base_fcf) }} 亿<template v-if="s.base_fcf_basis"> · {{ s.base_fcf_basis }}</template></div>
                           <div class="ai-v">折现率 {{ fmtRate(s.discount_rate) }}% · 模型 {{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></div>
                           <div class="ai-v">A {{ fmtRate(s.growth_anchor) }}% · g1 {{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }} · g∞ {{ fmtRate(s.terminal_growth) }}%</div>
                           <div class="ai-v">得分 {{ fmtScore(s.model_score) }} · {{ scenarioDelta(s) }}</div>
                           <div class="ai-v ai-scenario-note">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></div>
                         </div>
                       </div>
-                      <p class="ai-text">三档仅调整折现率与增长参数，基期 FCF 不变；基准档与上方参数及「套用到估值」一致。增长参数相同时仅折现率分档。</p>
+                      <p class="ai-text">三档的基期 FCF 按分年序列离散锚定：保守取 min(基准, 近年中位数)、乐观取 max(基准, 最近一年)；该值仅作展示，不参与每档估值计算（P0 不输出逐档股价）。基准档与上方参数及「套用到估值」一致。增长参数相同时仅折现率分档。</p>
                     </div>
                     <!-- 组四：基期现金流（逐年恒等式 → 选中口径 → 周期判定 → 口径说明/逐年明细） -->
                     <div>

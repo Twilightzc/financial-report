@@ -310,13 +310,14 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 				g1Text = fmt.Sprintf("%.1f%%", v)
 			}
 			if s.Key == "base" {
-				b.WriteString(fmt.Sprintf("- %s：r=%.1f%%，A=%.1f%%，g1=%s，g∞=%.1f%%，模型=%s（与单点输出一致）\n",
-					s.Name, s.DiscountRate, s.GrowthAnchor, g1Text, s.TerminalGrowth, s.ModelName))
+				b.WriteString(fmt.Sprintf("- %s：r=%.1f%%，A=%.1f%%，g1=%s，g∞=%.1f%%，模型=%s，基期FCF=%.2f亿元（%s）（与单点输出一致）\n",
+					s.Name, s.DiscountRate, s.GrowthAnchor, g1Text, s.TerminalGrowth, s.ModelName,
+					s.BaseFCF/1e8, s.BaseFCFBasis))
 				continue
 			}
-			b.WriteString(fmt.Sprintf("- %s：r=%.1f%%，A=%.1f%%，g1=%s，g∞=%.1f%%，模型=%s，Δ增长=%+.1fpp，Δ折现=%+.1fpp，说明=%s\n",
+			b.WriteString(fmt.Sprintf("- %s：r=%.1f%%，A=%.1f%%，g1=%s，g∞=%.1f%%，模型=%s，基期FCF=%.2f亿元（%s），Δ增长=%+.1fpp，Δ折现=%+.1fpp，说明=%s\n",
 				s.Name, s.DiscountRate, s.GrowthAnchor, g1Text, s.TerminalGrowth, s.ModelName,
-				s.DeltaGrowth, s.DeltaDiscount, s.Note))
+				s.BaseFCF/1e8, s.BaseFCFBasis, s.DeltaGrowth, s.DeltaDiscount, s.Note))
 		}
 	}
 	b.WriteString("- 三档由服务端确定性计算；你只能在 rationale 中解释基准与差异，不得输出不同数值、概率或目标价。\n")
@@ -912,6 +913,7 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	r.Valuation.ScenarioTerminalAdjust = round2(rec.ScenarioTerminalAdjust)
 	r.Valuation.ScenarioBandSource = rec.ScenarioBandSource
 	r.Valuation.ScenarioBandRaw = round2(rec.ScenarioBandRaw)
+	// Scenarios 整体拷贝，含 FR-38 的 base_fcf / base_fcf_basis（确定性回填，丢弃大模型值）。
 	r.Valuation.Scenarios = rec.Scenarios
 	r.Valuation.GrowthWeights = rec.GrowthWeights
 	r.Valuation.GrowthAnchorCount = rec.GrowthAnchorCount

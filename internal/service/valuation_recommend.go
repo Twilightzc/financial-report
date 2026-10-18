@@ -409,19 +409,6 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	// C4b 软约束：g1 > SGR 只告警，不降级、不重算参数。
 	warns = appendWarnOnce(warns, verifyC4b(pr.G1, sgr, sgrOK))
 
-	// —— R15 整合版：三档情景参数（基准档直接复用上面的最终变量，不重新推导）——
-	bands := computeScenarioBands(A, x, delta, k > 0, fwd, pr.Model)
-	scenInput := scenarioInput{
-		A: A, Discount: discount, GInf: gInf,
-		Macro: macro.Value, MacroBasis: macro.Basis,
-		Dispersion: dispersion, Delta: delta, Fwd: fwd,
-		SGR: sgr, SGROK: sgrOK, Envelope: envelope,
-		Insufficient: insufficientA, IsCyclical: isCyclical, Position: pos,
-		StructuralMetrics: sm, ROEVals: roeVals,
-		DownsideDispersion: downsideDispersion, StabilityAvailable: stabilityAvailable,
-	}
-	scenarios := buildScenarios(scenInput, bands, pr, path, score, negType)
-
 	// —— R13：基期自由现金流推荐（解耦：只吃 FCF 自身序列 + 周期状态）——
 	// capex 守卫依赖最终模型（two_stage/three_stage），因此 capex 覆盖率必须先于推荐计算。
 	capexRatio, capexOK := 0.0, false
@@ -511,6 +498,24 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 			FCF:               op - preserve,
 		})
 	}
+	// —— R15 整合版：三档情景参数（基准档直接复用上面的最终变量，不重新推导）——
+	// FR-38：基期 FCF 也按离散锚分档，因此必须在 fcfSeries / baseFCF 就绪后再构造三档。
+	fcfAnchor := newFCFScenarioAnchor(baseFCF, fcfSeries, fcfRec.Mode)
+	bands := computeScenarioBands(A, x, delta, k > 0, fwd, pr.Model)
+	scenInput := scenarioInput{
+		A: A, Discount: discount, GInf: gInf,
+		Macro: macro.Value, MacroBasis: macro.Basis,
+		Dispersion: dispersion, Delta: delta, Fwd: fwd,
+		SGR: sgr, SGROK: sgrOK, Envelope: envelope,
+		Insufficient: insufficientA, IsCyclical: isCyclical, Position: pos,
+		StructuralMetrics: sm, ROEVals: roeVals,
+		DownsideDispersion: downsideDispersion, StabilityAvailable: stabilityAvailable,
+		BaseFCF: fcfAnchor.Base, FCFMedian: fcfAnchor.Median,
+		FCFLatest: fcfAnchor.Latest, FCFAnchorOK: fcfAnchor.Available,
+		FCFMode: fcfRec.Mode,
+	}
+	scenarios := buildScenarios(scenInput, bands, pr, path, score, negType)
+
 	fcfRec = finalizeFCFRationale(fcfRec, fcfRationaleContext{
 		WindowStart:      fcfWindowStart,
 		WindowEnd:        fcfWindowEnd,
@@ -1895,6 +1900,71 @@ type scenarioInput struct {
 	ROEVals            []float64
 	DownsideDispersion float64
 	StabilityAvailable bool
+	// R15/FR-38：基期 FCF 的离散锚（仅用于展示字段，不参与参数重算）。
+	BaseFCF     float64 // 当前推荐基期 FCF（元）
+	FCFMedian   float64 // 分年 FCF 中位数（元）
+	FCFLatest   float64 // 最近一年 FCF（元）
+	FCFAnchorOK bool    // 分年序列是否可用于分档（非 custom 且非空）
+	FCFMode     string  // 推荐模式（custom 需单独回退文案）
+}
+
+// fcfScenarioAnchor 三档基期 FCF 的离散锚（FR-38，纯函数）。
+type fcfScenarioAnchor struct {
+	Base      float64 // 当前推荐值
+	Median    float64 // fcf_series 中位数
+	Latest    float64 // fcf_series 最近一年
+	Available bool    // 序列是否可用于离散锚定
+}
+
+// newFCFScenarioAnchor 从已输出的 FCF 分年序列构造离散锚。
+// custom 的基期 FCF 由用户/规则直接给出，不参与离散锚定（与空序列同样回退 base）。
+func newFCFScenarioAnchor(base float64, series []model.FCFYearPoint, mode string) fcfScenarioAnchor {
+	a := fcfScenarioAnchor{Base: base}
+	if mode == valFCFCustom || len(series) == 0 {
+		return a
+	}
+	vals := make([]float64, 0, len(series))
+	for _, p := range series {
+		vals = append(vals, p.FCF)
+	}
+	a.Median = medianOf(vals)
+	a.Latest = series[len(series)-1].FCF
+	a.Available = true
+	return a
+}
+
+// scenarioFCF 返回单档基期 FCF 与取值依据（FR-38）。
+// 保守 = min(base, median)；基准 = base；乐观 = max(base, latest)。
+// median/latest ≤ 0 或序列不可用时退回 base，避免把三档锚到非正值。
+func scenarioFCF(in scenarioInput, key string) (value float64, basis string) {
+	if key == "base" {
+		return in.BaseFCF, "当前推荐"
+	}
+	if !in.FCFAnchorOK {
+		if in.FCFMode == valFCFCustom {
+			return in.BaseFCF, "无离散（自定义）"
+		}
+		return in.BaseFCF, "无离散"
+	}
+	switch key {
+	case "conservative":
+		if in.FCFMedian <= 0 {
+			return in.BaseFCF, "中位数非正，回退基准"
+		}
+		if in.FCFMedian >= in.BaseFCF {
+			return in.BaseFCF, "无离散（中位数=基准）"
+		}
+		return in.FCFMedian, "近年中位数"
+	case "optimistic":
+		if in.FCFLatest <= 0 {
+			return in.BaseFCF, "最近一年非正，回退基准"
+		}
+		if in.FCFLatest <= in.BaseFCF {
+			return in.BaseFCF, "无离散（最近一年不高于基准）"
+		}
+		return in.FCFLatest, "最近一年"
+	}
+	return in.BaseFCF, "当前推荐"
 }
 
 // computeScenarioBands 按 FR-31/Q1/Q7/Q8 计算带宽。
@@ -1974,6 +2044,7 @@ func buildScenario(in scenarioInput, off scenarioOffsets) model.ValuationScenari
 	note := joinWarns(append([]string{
 		buildScenarioNote(off, in, A_s, r_s, gInf_s, cap_s, adjust_s, negType_s, negBasis_s, pr_s),
 	}, sceneWarns...))
+	baseFCF, baseFCFBasis := scenarioFCF(in, off.Key)
 
 	return model.ValuationScenario{
 		Key:                off.Key,
@@ -1992,6 +2063,8 @@ func buildScenario(in scenarioInput, off scenarioOffsets) model.ValuationScenari
 		ModelDegraded:      pr_s.Degraded,
 		GrowthFadeYears:    path_s.NTotal,
 		NegativeGrowthType: negTypeForJSON(negType_s),
+		BaseFCF:            baseFCF,
+		BaseFCFBasis:       baseFCFBasis,
 	}
 }
 
@@ -2015,6 +2088,8 @@ func buildBaseScenario(in scenarioInput, pr paramResult, path growthPath,
 		ModelDegraded:      pr.Degraded,
 		GrowthFadeYears:    path.NTotal,
 		NegativeGrowthType: negTypeForJSON(negType),
+		BaseFCF:            in.BaseFCF,
+		BaseFCFBasis:       "当前推荐",
 	}
 }
 

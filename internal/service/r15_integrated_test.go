@@ -580,6 +580,145 @@ func TestScenarioJSONContract(t *testing.T) {
 	}
 }
 
+// TestScenarioFCFDiscreteAnchors FR-38：保守=min(base,median)、基准=base、乐观=max(base,latest)，
+// 依据取实际生效的那个。
+func TestScenarioFCFDiscreteAnchors(t *testing.T) {
+	series := []model.FCFYearPoint{
+		{Year: 2020, FCF: 80e8},
+		{Year: 2021, FCF: 100e8},
+		{Year: 2022, FCF: 140e8},
+	}
+	anchor := newFCFScenarioAnchor(120e8, series, valFCFMedian)
+	if !anchor.Available {
+		t.Fatalf("非空且非 custom 的序列应可用于离散锚定：%+v", anchor)
+	}
+	if math.Abs(anchor.Median-100e8) > 1e-9 || math.Abs(anchor.Latest-140e8) > 1e-9 {
+		t.Fatalf("离散锚计算错误：%+v", anchor)
+	}
+
+	in := scenarioTestInput()
+	in.BaseFCF, in.FCFMedian, in.FCFLatest = anchor.Base, anchor.Median, anchor.Latest
+	in.FCFAnchorOK, in.FCFMode = anchor.Available, valFCFMedian
+	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
+	if len(scenes) != 3 {
+		t.Fatalf("三档长度应为 3，实际 %d", len(scenes))
+	}
+
+	if math.Abs(scenes[0].BaseFCF-100e8) > 1e-9 || scenes[0].BaseFCFBasis != "近年中位数" {
+		t.Errorf("保守档应取 min(120,100)=100 亿（近年中位数），实际 %v / %q",
+			scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
+	}
+	if math.Abs(scenes[1].BaseFCF-120e8) > 1e-9 || scenes[1].BaseFCFBasis != "当前推荐" {
+		t.Errorf("基准档应保持推荐值 120 亿（当前推荐），实际 %v / %q",
+			scenes[1].BaseFCF/1e8, scenes[1].BaseFCFBasis)
+	}
+	if math.Abs(scenes[2].BaseFCF-140e8) > 1e-9 || scenes[2].BaseFCFBasis != "最近一年" {
+		t.Errorf("乐观档应取 max(120,140)=140 亿（最近一年），实际 %v / %q",
+			scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
+	}
+
+	// 离散值不高于基准时，对应档仍取基准，并说明「无离散」。
+	in.FCFMedian, in.FCFLatest = 120e8, 100e8
+	scenes = buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
+	if scenes[0].BaseFCF != 120e8 || scenes[0].BaseFCFBasis != "无离散（中位数=基准）" {
+		t.Errorf("中位数等于基准时保守档应保持基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != 120e8 || scenes[2].BaseFCFBasis != "无离散（最近一年不高于基准）" {
+		t.Errorf("最近一年不高于基准时乐观档应保持基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
+	}
+}
+
+// TestScenarioFCFAnchorGuards FR-38 守卫：median/latest ≤ 0 或序列不可用（含 custom）时退回 base。
+func TestScenarioFCFAnchorGuards(t *testing.T) {
+	const base = 120e8
+	bands := scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5}
+
+	newInput := func() scenarioInput {
+		in := scenarioTestInput()
+		in.BaseFCF, in.FCFAnchorOK, in.FCFMode = base, true, valFCFMedian
+		return in
+	}
+
+	// median ≤ 0：保守档退回 base，乐观档仍可锚到正 latest。
+	in := newInput()
+	in.FCFMedian, in.FCFLatest = -5e8, 140e8
+	scenes := buildScenariosForTest(in, bands)
+	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "中位数非正，回退基准" {
+		t.Errorf("中位数非正时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
+	}
+
+	// latest ≤ 0：乐观档退回 base。
+	in = newInput()
+	in.FCFMedian, in.FCFLatest = 100e8, -10e8
+	scenes = buildScenariosForTest(in, bands)
+	if scenes[2].BaseFCF != base || scenes[2].BaseFCFBasis != "最近一年非正，回退基准" {
+		t.Errorf("最近一年非正时乐观档应退回基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
+	}
+
+	// fcf_series 为空：三档都取 base。
+	empty := newFCFScenarioAnchor(base, nil, valFCFLatest)
+	if empty.Available {
+		t.Fatalf("空序列不应可用于离散锚定：%+v", empty)
+	}
+	in = newInput()
+	in.FCFAnchorOK, in.FCFMedian, in.FCFLatest, in.FCFMode = empty.Available, empty.Median, empty.Latest, valFCFLatest
+	scenes = buildScenariosForTest(in, bands)
+	for i, s := range scenes {
+		if s.BaseFCF != base {
+			t.Errorf("空序列第 %d 档应取基准 %v，实际 %v", i, base, s.BaseFCF)
+		}
+	}
+	if scenes[0].BaseFCFBasis != "无离散" || scenes[2].BaseFCFBasis != "无离散" {
+		t.Errorf("空序列依据应为「无离散」：%q / %q", scenes[0].BaseFCFBasis, scenes[2].BaseFCFBasis)
+	}
+
+	// custom：基期 FCF 由规则直接给出，不参与离散锚定。
+	custom := newFCFScenarioAnchor(base, []model.FCFYearPoint{{Year: 2022, FCF: 300e8}}, valFCFCustom)
+	in = newInput()
+	in.FCFAnchorOK, in.FCFMedian, in.FCFLatest, in.FCFMode = custom.Available, custom.Median, custom.Latest, valFCFCustom
+	scenes = buildScenariosForTest(in, bands)
+	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "无离散（自定义）" {
+		t.Errorf("custom 时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
+	}
+	if scenes[2].BaseFCF != base || scenes[2].BaseFCFBasis != "无离散（自定义）" {
+		t.Errorf("custom 时乐观档应退回基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
+	}
+}
+
+// TestApplyValuationRecommendationCarriesScenarioFCF FR-38：三档 base_fcf 随 Scenarios 确定性回填，
+// 且 JSON 字段恒定输出。
+func TestApplyValuationRecommendationCarriesScenarioFCF(t *testing.T) {
+	balance, cashflow, income := recommendFixture()
+	rec := RecommendValuation(balance, cashflow, income)
+	if len(rec.Scenarios) != 3 {
+		t.Fatalf("三档长度应为 3，实际 %d", len(rec.Scenarios))
+	}
+
+	res := model.AIAnalysisResult{}
+	ApplyValuationRecommendation(&res, rec)
+	for i, want := range rec.Scenarios {
+		got := res.Valuation.Scenarios[i]
+		if got.BaseFCF != want.BaseFCF || got.BaseFCFBasis != want.BaseFCFBasis {
+			t.Errorf("第 %d 档 base_fcf 未回填：got %v/%q want %v/%q",
+				i, got.BaseFCF, got.BaseFCFBasis, want.BaseFCF, want.BaseFCFBasis)
+		}
+		if got.BaseFCFBasis == "" {
+			t.Errorf("第 %d 档 base_fcf_basis 不应为空", i)
+		}
+		raw, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("序列化失败：%v", err)
+		}
+		if !strings.Contains(string(raw), `"base_fcf":`) || !strings.Contains(string(raw), `"base_fcf_basis":`) {
+			t.Errorf("第 %d 档 JSON 缺少 base_fcf 字段：%s", i, raw)
+		}
+	}
+	if res.Valuation.Scenarios[1].BaseFCF != rec.FCFBaseValue {
+		t.Errorf("基准档 base_fcf 应等于 fcf_base_value：%v vs %v",
+			res.Valuation.Scenarios[1].BaseFCF, rec.FCFBaseValue)
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, it := range items {
 		if it == want {
