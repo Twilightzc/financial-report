@@ -42,6 +42,10 @@ const (
 	r18DynamicGDPEnabled      = true
 	r18PayoutRetentionEnabled = true
 	r18CyclePositionEnabled   = true
+
+	// R20 估值增长与终值保守化。
+	r20G1SGRBufferPP      = 1.0 // g1 相对 SGR 的近似误差缓冲（用户确认，不得扩大）
+	r20CyclicalTerminalPP = 2.0 // 周期/商品股终值上限 = 长期通胀
 )
 
 // macroAnchor 宏观锚推导结果。
@@ -900,21 +904,20 @@ func fadeYears(gap float64) int {
 	return n
 }
 
-// capTerminalGrowth 终值增长率收口：g = max(0, floorHalf(min(raw, macro, discount−1, SGR))).
-// 基准与三档情景共用；raw=+Inf 表示只受 caps 约束（基准口径）。
-func capTerminalGrowth(raw, macro, discount, sgr float64, sgrOK bool) float64 {
-	g := math.Min(raw, macro)
-	g = math.Min(g, discount-1.0)
-	if sgrOK {
-		g = math.Min(g, sgr)
+// terminalGrowth g∞（R20）：
+//
+//	周期/商品股：上限 = 2.0%；非周期股：上限 = 宏观锚。
+//	g_raw = min(上限, r − 1.0, SGR 可用时)
+//	g∞    = max(0, floorHalf(g_raw))
+//
+// constraint 取真正生效的 sgr / discount / cyclical / macro / zero（并列时按 sgr > discount > 上限 取主约束）。
+func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g float64, constraint, note string) {
+	capValue, capKey, capName := macro, "macro", "宏观锚"
+	if isCyclical {
+		capValue, capKey, capName = r20CyclicalTerminalPP, "cyclical", "周期股长期通胀 2% 上限"
 	}
-	return math.Max(0, floorHalf(g))
-}
 
-// terminalGrowth g∞ = max(0, floorHalf(min(macro, discount−1, SGR)))，并给出真正生效的约束。
-// constraint 取 macro / sgr / discount / zero（并列时按 sgr > discount > macro 取主约束）。
-func terminalGrowth(macro, discount, sgr float64, sgrOK bool) (g float64, constraint, note string) {
-	gRaw := math.Min(macro, discount-1.0)
+	gRaw := math.Min(capValue, discount-1.0)
 	if sgrOK {
 		gRaw = math.Min(gRaw, sgr)
 	}
@@ -927,10 +930,10 @@ func terminalGrowth(macro, discount, sgr float64, sgrOK bool) (g float64, constr
 		key string
 		val float64
 	}
-	sources := []source{{key: "discount", val: discount - 1.0}, {key: "macro", val: macro}}
+	sources := []source{{key: "discount", val: discount - 1.0}, {key: capKey, val: capValue}}
 	if sgrOK {
-		// 主约束优先级 sgr > discount > macro：sgr 放最前，比较时同值取先出现者。
-		sources = []source{{key: "sgr", val: sgr}, {key: "discount", val: discount - 1.0}, {key: "macro", val: macro}}
+		// 主约束优先级 sgr > discount > 上限：sgr 放最前，比较时同值取先出现者。
+		sources = []source{{key: "sgr", val: sgr}, {key: "discount", val: discount - 1.0}, {key: capKey, val: capValue}}
 	}
 	primary := sources[0]
 	ties := make([]string, 0, 2)
@@ -943,8 +946,17 @@ func terminalGrowth(macro, discount, sgr float64, sgrOK bool) (g float64, constr
 			ties = append(ties, s.key)
 		}
 	}
-	names := map[string]string{"sgr": "长期内生增速 SGR", "discount": "折现率−1pp", "macro": "宏观锚"}
-	note = fmt.Sprintf("终值受%s约束，向下取整至 %.2f%%。", names[primary.key], g)
+	names := map[string]string{
+		"sgr":      fmt.Sprintf("长期内生增速 %.1f%%", sgr),
+		"discount": "折现率−1pp",
+		capKey:     capName,
+	}
+	// 周期股 2% 为真正生效的约束时用固定业务句，不暴露内部键名。
+	if primary.key == "cyclical" {
+		note = "终值增长率按周期股长期通胀 2% 封顶。"
+	} else {
+		note = fmt.Sprintf("终值受%s约束，向下取整至 %.2f%%。", names[primary.key], g)
+	}
 	if len(ties) > 0 {
 		tieNames := make([]string, 0, len(ties))
 		for _, k := range ties {
@@ -961,7 +973,7 @@ func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, y
 	div model.DividendSnapshot) (sgr, retention float64, basis string, ok bool, warning string) {
 	basis = "unavailable"
 	if year <= 0 {
-		return 0, 0, basis, false, "留存率/ROE 数据不足，SGR 不可用，终值不施加 SGR 约束。"
+		return 0, 0, basis, false, "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
 	}
 	equity := equityValue(balanceByYear[year])
 	np := v0(incomeByYear[year], "PARENT_NETPROFIT")
@@ -971,7 +983,7 @@ func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, y
 		npNote = "归母净利润缺失或非正，留存率与 ROE 按重构净利润近似。"
 	}
 	if equity <= 0 || np <= 0 {
-		return 0, 0, basis, false, "留存率/ROE 数据不足，SGR 不可用，终值不施加 SGR 约束。"
+		return 0, 0, basis, false, "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
 	}
 	roeSGR := np / equity * 100
 
@@ -991,7 +1003,7 @@ func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, y
 	if ret, okRet := retentionRate(balanceByYear, incomeByYear, year); okRet {
 		return roeSGR * ret, ret, "equity_growth", true, npNote
 	}
-	return 0, 0, "unavailable", false, "留存率/ROE 数据不足，SGR 不可用，终值不施加 SGR 约束。"
+	return 0, 0, "unavailable", false, "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
 }
 
 // dividendForYear 汇总某一报告年度的现金分红（中期 + 年度 + 特别分红）。
@@ -1054,29 +1066,56 @@ func classifyGrowthModel(A, gap, score float64, insufficient bool, negType strin
 	}
 }
 
-// growthG1 由复合锚 A 得到 g1 与唯一上限约束。
-// capBase = min(30, max(前瞻/ SGR) + 2)；g1 = floorHalf(clamp(A, g∞, capBase))。
+// growthG1 由复合锚 A 得到 g1 与唯一上限约束（R20）。
+// SGR 可用：capG1 = min(30, max(0, SGR + 1))；前瞻锚不参与上限。
+// SGR 不可用：前瞻锚可用时 min(30, max(0, 前瞻锚) + 2)，否则 30。
+// g1 = floorHalf(clamp(A, g∞, capG1))。
 func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constraint, note string) {
-	capBase := 30.0
+	capG1 := 30.0
+	capSource := "none" // 内部使用，不输出
 	switch {
-	case fwdOK && sgrOK:
-		capBase = math.Min(30.0, math.Max(fwd, sgr)+2.0)
-	case fwdOK:
-		capBase = math.Min(30.0, fwd+2.0)
 	case sgrOK:
-		capBase = math.Min(30.0, sgr+2.0)
+		capG1 = math.Min(30.0, math.Max(0, sgr+r20G1SGRBufferPP))
+		capSource = "sgr"
+	case fwdOK:
+		capG1 = math.Min(30.0, math.Max(0, fwd)+2.0)
+		capSource = "forward"
 	}
-	if capBase < gInf {
+	// 上限低于终值：g1 按终值收口，不得出现 g1 < g∞ 或负值。
+	if capG1 < gInf {
 		return gInf, "cap_below_terminal", "上限低于终值，g1 按终值收口。"
 	}
-	g1 = floorHalf(clampFloat(A, gInf, capBase))
+	g1 = floorHalf(clampFloat(A, gInf, capG1))
+	// 约束判定比较 A 与 capG1，而不是 g1 与 A：
+	// 排除 A 仅被 0.5pp 网格向下取整、并未真正触顶的情况。
 	switch {
-	case g1 < A-1e-9:
-		return g1, "upper", "g1 受前瞻/SGR +2pp 上限约束。"
+	case A > capG1+1e-9:
+		return g1, "upper", r20G1UpperNote(capSource, sgr)
 	case A < gInf-1e-9:
 		return g1, "terminal", "g1 按终值收口。"
 	default:
 		return g1, "none", ""
+	}
+}
+
+// r20G1UpperNote g1 触顶时的依据句（只含业务语言与实际数字，不输出内部键名）。
+func r20G1UpperNote(capSource string, sgr float64) string {
+	switch capSource {
+	case "sgr":
+		switch {
+		case sgr <= -1.0:
+			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%），高增长期增长率按 0 收口。", sgr)
+		case sgr <= 0:
+			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%），高增长期增长率按 1pp 上限收口。", sgr)
+		case sgr+r20G1SGRBufferPP > 30.0:
+			return fmt.Sprintf("自筹资金可持续增速 %.1f%%，高增长期增长率按 30%% 上限约束。", sgr)
+		default:
+			return fmt.Sprintf("高增长期增长率受自筹资金可持续增速 %.1f%% + 1pp 上限约束。", sgr)
+		}
+	case "forward":
+		return "自筹资金可持续增速不可用，高增长期增长率按前瞻锚 + 2pp 上限（且不超过 30%）约束。"
+	default:
+		return "自筹资金可持续增速不可用，高增长期增长率仅受 30% 上限约束。"
 	}
 }
 
@@ -1160,17 +1199,17 @@ func verifyC4a(gInf, discount, sgr float64, sgrOK bool) (ok bool, warning string
 		return false, fmt.Sprintf("终值 %.2f%% 不低于折现率 %.2f%%，已按折现率−1pp 收口。", gInf, discount)
 	}
 	if sgrOK && sgr > 0 && gInf > sgr+1e-9 {
-		return false, fmt.Sprintf("终值 %.2f%% 高于长期内生增速 SGR %.2f%%，已按 SGR 收口。", gInf, sgr)
+		return false, fmt.Sprintf("终值 %.2f%% 高于长期内生增速 %.2f%%，已按长期内生增速收口。", gInf, sgr)
 	}
 	return true, ""
 }
 
-// verifyC4b 软约束：g1 > SGR 只告警，不降级。
+// verifyC4b 软约束：g1 > SGR + 1pp 才告警（1pp 缓冲本身不告警），不降级。
 func verifyC4b(g1, sgr float64, sgrOK bool) string {
-	if !sgrOK || sgr <= 0 || g1 <= sgr+1e-9 {
+	if !sgrOK || sgr <= 0 || g1 <= sgr+r20G1SGRBufferPP+1e-9 {
 		return ""
 	}
-	return fmt.Sprintf("高增长期增长率 %.2f%% 高于长期内生增速 SGR %.2f%%，仅告警，不降级。", g1, sgr)
+	return fmt.Sprintf("高增长期增长率 %.2f%% 高于自筹资金可持续增速 %.2f%% + 1pp，仅告警，不降级。", g1, sgr)
 }
 
 // verifyC4c 防御复核：g1 > cap 且 cap ≥ A−envelope 时返回 true（需用 cap 重建）。

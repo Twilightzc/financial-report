@@ -305,7 +305,7 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 	discounts := []float64{8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0}
 	for _, d := range discounts {
 		// 零快照 → 宏观锚回退 4.5% → g∞=4.5；所有档位必须使用同一个 g∞。
-		gInf, _, _ := terminalGrowth(r18GDPFallbackPP, d, 0, false)
+		gInf, _, _ := terminalGrowth(r18GDPFallbackPP, d, 0, false, false)
 		if gInf != 4.5 {
 			t.Fatalf("回退宏观锚下 g∞ = %v，期望 4.5", gInf)
 		}
@@ -686,9 +686,10 @@ func TestRecommendValuationDeterministic(t *testing.T) {
 			t.Fatalf("第 %d 次调用结果与首次不一致：\n首次 %+v\n本次 %+v", i+2, first, got)
 		}
 	}
-	// A=19、r=8：三阶段 g2=roundHalf((g1+g∞)/2)=8 不满足 g2<r，按设计降级为两阶段。
-	if first.Model != valModelTwoStage || !first.ModelDegraded {
-		t.Errorf("三指标增速约 20%% 应降级为 two_stage，实际 %s degraded=%v（A=%v）",
+	// R20：A=19、r=8，g1=floorHalf(min(A, SGR+1))=10.0，
+	// 三阶段 g2=roundHalf((g1+g∞)/2)=7.5 < r，三阶段成立、不降级。
+	if first.Model != valModelThreeStage || first.ModelDegraded {
+		t.Errorf("三指标增速约 20%% 应为 three_stage，实际 %s degraded=%v（A=%v）",
 			first.Model, first.ModelDegraded, first.GrowthAnchor.Final)
 	}
 	// 构成表可复算：Σ贡献 = 加权合计，权重合计 = 1。

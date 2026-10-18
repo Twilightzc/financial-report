@@ -180,7 +180,7 @@ type AIValuation struct {
 	ConsensusYears         int               `json:"consensus_years,omitempty"`
 	ConsensusReliability   string            `json:"consensus_reliability,omitempty"` // high/medium/unavailable
 	GrowthTerminal         float64           `json:"growth_terminal"`                 // g∞，%
-	TerminalConstraint     string            `json:"terminal_constraint"`             // macro/sgr/discount/zero
+	TerminalConstraint     string            `json:"terminal_constraint"`             // macro/sgr/discount/cyclical/zero
 	TerminalNote           string            `json:"terminal_note,omitempty"`
 	SGR                    float64           `json:"sgr,omitempty"`                  // 仅在终值受 SGR 约束时输出
 	RetentionRate          float64           `json:"retention_rate,omitempty"`       // 留存率 0–1

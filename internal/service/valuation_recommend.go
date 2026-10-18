@@ -317,7 +317,7 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	// SGR 与终值。
 	sgr, retention, retentionBasis, sgrOK, sgrWarn :=
 		sustainableGrowthR18(balanceByYear, incomeByYear, latest, input.Snapshot.Dividends)
-	gInf, terminalConstraint, terminalNote := terminalGrowth(macro.Value, discount.DiscountRate, sgr, sgrOK)
+	gInf, terminalConstraint, terminalNote := terminalGrowth(macro.Value, discount.DiscountRate, sgr, sgrOK, isCyclical)
 
 	// 负增长归因（结构性→零增长；周期性→低永续）。
 	sm := computeStructuralMetrics(incomeByYear, cycleWindow)

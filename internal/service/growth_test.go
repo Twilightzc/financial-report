@@ -528,7 +528,7 @@ func TestTerminalGrowth(t *testing.T) {
 		words      string
 	}{
 		{"宏观锚最低", 4.5, 10, 6.8, true, 4.5, "macro", "宏观锚"},
-		{"SGR 约束", 7, 8, 6.8, true, 6.5, "sgr", "SGR"},
+		{"SGR 约束", 7, 8, 6.8, true, 6.5, "sgr", "长期内生增速 6.8%"},
 		{"折现率约束", 7, 6.5, 9, true, 5.5, "discount", "折现率"},
 		{"SGR 不可用", 7, 10, 0, false, 7, "macro", "宏观锚"},
 		{"折现率下限", 4.5, 4.2, 0, false, 3, "discount", "折现率"},
@@ -536,7 +536,7 @@ func TestTerminalGrowth(t *testing.T) {
 		{"网格向下取整", 4.7, 10, 0, false, 4.5, "macro", "向下取整"},
 	}
 	for _, c := range cases {
-		got, constraint, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK)
+		got, constraint, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK, false)
 		if got != c.want {
 			t.Errorf("%s：g∞ = %v，期望 %v", c.name, got, c.want)
 		}
@@ -549,7 +549,7 @@ func TestTerminalGrowth(t *testing.T) {
 	}
 	// g∞ 永不低于 0 且 < 折现率。
 	for _, d := range []float64{8, 10, 15} {
-		g, _, _ := terminalGrowth(10, d, 0, false)
+		g, _, _ := terminalGrowth(10, d, 0, false, false)
 		if g < 0 || g >= d {
 			t.Errorf("discount=%v 时 g∞=%v 越界", d, g)
 		}
@@ -606,8 +606,8 @@ func TestSustainableGrowthR18(t *testing.T) {
 	loss := map[int]model.ReportRow{2024: rowAt("2024-12-31", map[string]float64{
 		"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 1100,
 	})}
-	if _, _, basis, ok, warn := sustainableGrowthR18(balance, loss, 2024, div); ok || basis != "unavailable" || !strings.Contains(warn, "SGR 不可用") {
-		t.Errorf("亏损应 SGR 不可用：%q/%v/%q", basis, ok, warn)
+	if _, _, basis, ok, warn := sustainableGrowthR18(balance, loss, 2024, div); ok || basis != "unavailable" || !strings.Contains(warn, "自筹资金可持续增速不可用") {
+		t.Errorf("亏损应自筹资金可持续增速不可用：%q/%v/%q", basis, ok, warn)
 	}
 }
 

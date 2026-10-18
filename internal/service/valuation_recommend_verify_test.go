@@ -495,7 +495,7 @@ func prGk(t *testing.T, rec model.ValuationRecommendation) float64 {
 	case valModelPerpetual:
 		return vfyValue(t, rec.Params, "g")
 	default:
-		gInf, _, _ := terminalGrowth(r18GDPFallbackPP, rec.DiscountRate, 0, false)
+		gInf, _, _ := terminalGrowth(r18GDPFallbackPP, rec.DiscountRate, 0, false, false)
 		return gInf
 	}
 }
