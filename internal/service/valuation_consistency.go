@@ -2,25 +2,18 @@ package service
 
 import (
 	"fmt"
-	"strings"
 
 	"financial-report/internal/model"
 )
 
-// R15/P4《估值模型参数确定性约束》一致性校验层（生效日期 2026-10-17）。
-// C1~C3 由构造保证（r > gk、严格递减、gk ≤ 长期 GDP），本文件补充 C5/C6 告警、C7 口径同源
-// 与 C4 的防御性复核。全部为纯函数（无 IO / 随机 / 时间依赖）；C5/C6 只告警、不自动降参。
+// R19 关键校验：Capex 覆盖率与 FCF/净利润（纯函数，无 IO / 随机 / 时间依赖）。
 const (
-	valCapexCoverageHigh = 1.3 // 购建长期资产现金 ÷ 保全性资本支出 > 1.3 → 明显扩张
-	valC6WindowYears     = 5   // C6 观察窗口（≤5 年）
-	valC6MinSamples      = 3   // C6 至少 3 个有效年度才判定
-	valFCFProfitHigh     = 1.5 // FCF ÷ 净利润 中位数 > 1.5 → 告警
-	valNWCDragRatio      = 0.3 // ΔNWC ÷ FCF > 0.3 → 告警（C5 增强）
-	valNWCMinFCF         = 0.0 // FCF ≤ 0 时不计算 ΔNWC 比率
+	valCapexCoverageHigh = 1.3 // 净资本支出 ÷ 保全性资本支出 > 1.3 → 明显扩张
+	valFCFProfitHigh     = 1.5 // 基期 FCF ÷ 净利润 > 1.5 → 告警
 )
 
 // commonBaseYear 返回利润表与现金流量表共同的最新年度。
-// 无交集（或任一表为空）→ 0，由调用方回退到三表最新年并给出 C7 告警。
+// 无交集（或任一表为空）→ 0，由调用方回退到三表最新年并给出告警。
 func commonBaseYear(incomeYears, cfYears []int) int {
 	if len(incomeYears) == 0 || len(cfYears) == 0 {
 		return 0
@@ -48,85 +41,145 @@ func preservationCapex(income, cf model.ReportRow) float64 {
 		disposalLongAssetLoss(cf) + v0(cf, "FA_SCRAP_LOSS")
 }
 
-// capexCoverage 购建长期资产支付的现金 ÷ 保全性资本支出。
-// 分子字段 CONSTRUCT_LONG_ASSET 缺失（Fields 中为 nil，而非显式 0）→ ok=false；
-// 分母 preservationCapex ≤ 0（折旧摊销+减值为 0/缺失）→ ok=false。
-func capexCoverage(cf, income model.ReportRow) (ratio float64, ok bool) {
-	num := cf.Fields["CONSTRUCT_LONG_ASSET"]
-	if num == nil {
-		return 0, false
-	}
-	den := preservationCapex(income, cf)
-	if den <= 0 {
-		return 0, false
-	}
-	return *num / den, true
-}
-
-// coreWorkingCapital 核心营运资本 = Σ营运资产核心科目 − Σ营运负债核心科目。
-// 只用核心科目集，不含 residual / discretionary（避免把未分类差额或自由裁量科目当营运资本）。
-func coreWorkingCapital(balance model.ReportRow) float64 {
-	return sum0Fields(balance, operatingAssetFields) - sum0Fields(balance, operatingLiabilityFields)
-}
-
-// deltaNWC 核心营运资本同比变动；期初/期末任一缺表 → ok=false。
-func deltaNWC(balanceByYear map[int]model.ReportRow, year int) (delta float64, ok bool) {
-	if year <= 0 {
-		return 0, false
-	}
-	cur, okCur := balanceByYear[year]
-	prev, okPrev := balanceByYear[year-1]
-	if !okCur || !okPrev || cur.Fields == nil || prev.Fields == nil {
-		return 0, false
-	}
-	return coreWorkingCapital(cur) - coreWorkingCapital(prev), true
-}
-
-// fcfToProfitMedian 最近 ≤5 年 FCF ÷ 重构净利润 的中位数。
-// 仅纳入 FCF>0 且净利润>0 的年度；有效年度 < valC6MinSamples → ok=false。
-func fcfToProfitMedian(fcfByYear map[int]float64, incomeByYear map[int]model.ReportRow, years []int) (median float64, samples int, ok bool) {
-	m := len(years)
-	if m > valC6WindowYears {
-		m = valC6WindowYears
-	}
-	ratios := make([]float64, 0, m)
-	for _, y := range years[len(years)-m:] {
-		fcf := fcfByYear[y]
-		np := netProfitReconstructed(incomeByYear[y])
-		if fcf <= 0 || np <= 0 {
-			continue
+// effectiveWindow 返回与基期 FCF 一致的校验窗口：多年度方式用 selectBaseFCF 的实际年份，
+// latest/custom 用最新年报。
+func effectiveWindow(mode string, usedYears []int, latest int) []int {
+	if mode == valFCFLatest || mode == valFCFCustom || len(usedYears) == 0 {
+		if latest > 0 {
+			return []int{latest}
 		}
-		ratios = append(ratios, fcf/np)
+		return nil
 	}
-	if len(ratios) < valC6MinSamples {
-		return 0, len(ratios), false
-	}
-	return medianOf(ratios), len(ratios), true
+	return usedYears
 }
 
-// c5Warning 返回 C5 提示（无提示返回 ""）：高增长模型 + 明显扩张性资本支出 / 营运资本占用。
-// 只告警、不修改参数（方法论 §3.4 允许「扣扩张 Capex」或「降增速」二选一，本项目选后者由用户操作）。
-func c5Warning(mdl string, g1, gInf float64, cf, income model.ReportRow, balanceByYear map[int]model.ReportRow,
-	baseYear int, baseFCF float64) string {
-	highGrowth := (mdl == valModelTwoStage || mdl == valModelThreeStage) && g1 > gInf
-	if !highGrowth {
-		return "" // 永续/零增长不涉及扩张 Capex 假设
+// capexCoverageDetail 净资本支出（购建−处置收回）÷ 保全性资本支出，窗口与聚合方式与基期 FCF 一致。
+func capexCoverageDetail(cfByYear, incomeByYear map[int]model.ReportRow, years []int, mode string) model.CapexCoverageDetail {
+	det := model.CapexCoverageDetail{Mode: mode}
+	if len(years) == 0 {
+		det.Reason = "缺少现金流量表或利润表年度"
+		return det
 	}
+	det.WindowStart, det.WindowEnd = years[0], years[len(years)-1]
+	for _, y := range years {
+		cf := cfByYear[y]
+		construct := cf.Fields["CONSTRUCT_LONG_ASSET"]
+		if construct == nil {
+			det.Reason = fmt.Sprintf("购建长期资产现金缺失（%d）", y)
+			return det
+		}
+		det.Numerator += *construct - v0(cf, "DISPOSAL_LONG_ASSET")
+		det.Denominator += preservationCapex(incomeByYear[y], cf)
+	}
+	if det.Denominator <= 0 {
+		det.Reason = "保全性资本支出≤0"
+		return det
+	}
+	det.Available = true
+	det.Ratio = round2(det.Numerator / det.Denominator)
+	det.Note = fmt.Sprintf(
+		"净资本支出（购建−处置收回）/ 保全性资本支出（含非现金减值/处置项）；窗口 %d–%d。",
+		det.WindowStart, det.WindowEnd)
+	if mode == valFCFCustom {
+		det.Note += "自定义 FCF，覆盖率按最新年报。"
+	}
+	return det
+}
 
-	warns := make([]string, 0, 2)
-	if ratio, ok := capexCoverage(cf, income); ok && ratio > valCapexCoverageHigh {
-		warns = append(warns, fmt.Sprintf(
-			"基期自由现金流为保全口径（仅扣折旧摊销与减值），近一年购建长期资产现金为保全性支出的 %.2f 倍，未扣除扩张性资本支出；在高增长假设下偏乐观，建议下调增长率或改用更低增速场景。",
-			ratio))
+// aggregateProfit 按与 FCF 相同的聚合方式聚合净利润序列。
+func aggregateProfit(values []float64, mode string) float64 {
+	if len(values) == 0 {
+		return 0
 	}
-	if baseFCF > valNWCMinFCF {
-		if delta, ok := deltaNWC(balanceByYear, baseYear); ok && delta > 0 && delta/baseFCF > valNWCDragRatio {
-			warns = append(warns, fmt.Sprintf(
-				"营运资本同比增加 %.2f 亿元（占基期 FCF 的 %.0f%%），扩张期现金消耗未体现在基期 FCF 中。",
-				delta/1e8, delta/baseFCF*100))
+	switch mode {
+	case valFCFAverage:
+		sum := 0.0
+		for _, v := range values {
+			sum += v
+		}
+		return sum / float64(len(values))
+	case valFCFMedian:
+		return medianOf(values)
+	case valFCFTrimMean:
+		return trimMeanOf(values)
+	default: // latest / custom
+		return values[len(values)-1]
+	}
+}
+
+// fcfProfitDetail 基期 FCF（含研发调整）÷ 同窗口同聚合净利润。
+func fcfProfitDetail(fcfBase float64, adjustRD bool, rdExpansion float64,
+	incomeByYear map[int]model.ReportRow, years []int, mode string) model.FCFProfitDetail {
+	det := model.FCFProfitDetail{
+		FCF: fcfBase, Mode: mode, AdjustRD: adjustRD, RDExpansion: rdExpansion,
+	}
+	if fcfBase <= 0 {
+		det.Reason = "基期 FCF≤0"
+		return det
+	}
+	if len(years) == 0 {
+		det.Reason = "缺少利润表年度"
+		return det
+	}
+	det.WindowStart, det.WindowEnd = years[0], years[len(years)-1]
+	det.Years = len(years)
+
+	parent := make([]float64, 0, len(years))
+	parentOK := true
+	for _, y := range years {
+		v := incomeByYear[y].Fields["PARENT_NETPROFIT"]
+		if v == nil {
+			parentOK = false
+			break
+		}
+		parent = append(parent, *v)
+	}
+	basis := "parent"
+	profit := 0.0
+	if parentOK {
+		profit = aggregateProfit(parent, mode)
+	} else {
+		basis = "reconstructed"
+		recon := make([]float64, 0, len(years))
+		for _, y := range years {
+			recon = append(recon, netProfitReconstructed(incomeByYear[y]))
+		}
+		profit = aggregateProfit(recon, mode)
+	}
+	// 归母口径聚合后 ≤0：整个窗口统一换重构净利润（含少数股东损益），不剔除亏损年。
+	if profit <= 0 && basis == "parent" {
+		recon := make([]float64, 0, len(years))
+		for _, y := range years {
+			recon = append(recon, netProfitReconstructed(incomeByYear[y]))
+		}
+		if v := aggregateProfit(recon, mode); v > 0 {
+			profit, basis = v, "reconstructed"
 		}
 	}
-	return strings.Join(warns, "；")
+	if profit <= 0 {
+		det.Reason = "净利润≤0"
+		return det
+	}
+
+	det.Available = true
+	det.Ratio = round2(fcfBase / profit)
+	det.Profit = profit
+	det.ProfitBasis = basis
+	rdText := "未含研发调整"
+	if adjustRD {
+		rdText = "含研发调整"
+	}
+	basisText := "同期归母净利润"
+	if basis == "reconstructed" {
+		basisText = "同期含少数股东损益的重构净利润"
+	}
+	modeName := valFCFModeNames[mode]
+	if modeName == "" {
+		modeName = "最近一年"
+	}
+	det.Note = fmt.Sprintf("基期 FCF（%s）/ %s；窗口 %d–%d；聚合方式 %s；有效 %d 年。",
+		rdText, basisText, det.WindowStart, det.WindowEnd, modeName, det.Years)
+	return det
 }
 
 // appendWarnOnce 追加非空且未出现过的提示（保持首次出现顺序）。
@@ -147,6 +200,15 @@ func dedupeWarns(warns []string) []string {
 	out := make([]string, 0, len(warns))
 	for _, w := range warns {
 		out = appendWarnOnce(out, w)
+	}
+	return out
+}
+
+// truncateWarns 去重后最多保留 n 条材料性警告。
+func truncateWarns(warns []string, n int) []string {
+	out := dedupeWarns(warns)
+	if len(out) > n {
+		out = out[:n]
 	}
 	return out
 }

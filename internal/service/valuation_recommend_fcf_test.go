@@ -85,7 +85,7 @@ func TestRecommendBaseFCF(t *testing.T) {
 			years:         []int{2023, 2024},
 			wantMode:      valFCFLatest,
 			wantYears:     0,
-			wantRationale: "不足 3 年",
+			wantRationale: "可用年度不足",
 		},
 		{
 			name:      "无数据",

@@ -827,47 +827,55 @@ td.num, .val, .yoy {
 .ai-model { font-weight: 700; color: var(--brand-bright); font-size: 14px; }
 .ai-usage { margin-top: 16px; color: var(--muted-2); font-size: 12px; }
 
-/* R15 估值参数展示：贡献表、三档情景表/卡片、FCF 公式与明细。
-   基准档用中性色高亮（避免红绿暗示好坏），移动端表格切换为纵向卡片。 */
-.ai-weight-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px; }
-.ai-weight-table th, .ai-weight-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+/* R19 估值参数展示：六块紧凑排布（模型 / 基期 FCF / 折现率 / 增长参数 / 关键校验 / 结论），
+   锚构成表与 FCF 明细共用 ai-weight-table；窄屏改为纵向堆叠，避免横向滚动。 */
+.ai-val-params { min-width: 0; }
+.ai-val-block {
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.ai-val-block:first-child { padding-top: 0; border-top: 0; }
+.ai-val-head { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px; letter-spacing: 0.02em; }
+.ai-val-muted { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.ai-val-line { overflow-wrap: anywhere; }
+.ai-val-warn { color: var(--warn, var(--brand-bright)); }
+.ai-val-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+.ai-weight-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px; table-layout: fixed; }
+.ai-weight-table th, .ai-weight-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; vertical-align: top; overflow-wrap: anywhere; }
 .ai-weight-table th:first-child, .ai-weight-table td:first-child { text-align: left; }
 .ai-weight-table thead th { color: var(--muted); font-weight: 600; background: var(--surface-2); }
 .ai-weight-table tbody th { color: var(--muted); font-weight: 600; }
 .ai-weight-total td { font-weight: 700; color: var(--ink); background: var(--surface-2); }
 
-.ai-scenario-head {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; flex-wrap: wrap; margin-bottom: 4px;
-}
-/* 档位选择器 + 套用按钮：窄屏换行后仍保持右对齐的触控区域 */
-.ai-scenario-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ai-scenario-band { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
-.ai-scenario-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px; table-layout: fixed; }
-.ai-scenario-table th, .ai-scenario-table td { padding: 6px 8px; border: 1px solid var(--line); text-align: right; vertical-align: top; }
-.ai-scenario-table thead th { color: var(--ink); background: var(--surface-2); text-align: center; }
-.ai-scenario-table tbody th { width: 76px; color: var(--muted); font-weight: 600; text-align: left; background: var(--surface-2); }
-.ai-scenario-table .scenario-base { background: rgba(139, 148, 158, 0.12); border-color: var(--line-strong); }
-.ai-scenario-table td:last-child { white-space: normal; line-height: 1.5; text-align: left; }
-.ai-scenario-cards { display: none; }
-.ai-scenario-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
-.ai-scenario-card.scenario-base { border-color: var(--line-strong); background: rgba(139, 148, 158, 0.12); }
-.ai-scenario-card-title { font-weight: 700; color: var(--ink); margin-bottom: 4px; display: flex; gap: 8px; align-items: center; }
-.ai-scenario-badge { font-weight: 400; font-size: 11px; color: var(--brand-bright); background: var(--brand-soft); border-radius: 999px; padding: 1px 8px; }
-.ai-scenario-note { color: var(--muted); }
-
 .ai-fcf-series { margin-top: 4px; }
-.ai-g1-steps { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; }
 .ai-clamp-2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .ai-clamp-off { display: block; -webkit-line-clamp: unset; overflow: visible; }
 
 @media (max-width: 760px) {
-  .ai-scenario-table { display: none; }
-  .ai-scenario-cards { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 8px; }
   .ai-weight-table { font-size: 12px; }
   .ai-weight-table th, .ai-weight-table td { padding: 4px 6px; }
   .ai-weight-table thead th { white-space: normal; }
   .ai-clamp-2 { -webkit-line-clamp: 3; }
+}
+
+/* AC-19：375px 下锚构成/明细表纵向堆叠，字段名由 data-label 提供，不产生横向滚动。 */
+@media (max-width: 600px) {
+  .ai-weight-table,
+  .ai-weight-table tbody,
+  .ai-weight-table tr,
+  .ai-weight-table td { display: block; width: 100%; }
+  .ai-weight-table thead { display: none; }
+  .ai-weight-table tr { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .ai-weight-table tr:last-child { border-bottom: 0; }
+  .ai-weight-table td,
+  .ai-weight-table td:first-child { padding: 2px 4px; border-bottom: 0; text-align: left; }
+  .ai-weight-table td[data-label]::before {
+    content: attr(data-label) "：";
+    color: var(--muted);
+    display: inline;
+  }
 }
 
 /* 指标趋势图容器：桌面 380px，移动端见下方媒体查询（FR-4）。

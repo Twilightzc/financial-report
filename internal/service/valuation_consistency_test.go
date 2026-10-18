@@ -1,10 +1,9 @@
 package service
 
-// R15/P4《估值模型参数确定性约束》一致性校验层（C4~C7）的单元测试。
-// 全部断言取自《技术设计文档》19.8 / 19.9 的硬编码期望值。
+// R19 一致性校验层：Capex 覆盖率与 FCF/净利润（同窗口、同聚合口径）。
+// 全部断言取自《技术设计文档》§5.6 / §5.7 的硬编码期望值。
 
 import (
-	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -33,157 +32,119 @@ func TestCommonBaseYear(t *testing.T) {
 	}
 }
 
-func TestCapexCoverage(t *testing.T) {
-	// 购建长期资产现金 150 ÷ 保全性支出 100（折旧）= 1.5。
-	if got, ok := capexCoverage(
-		row(map[string]float64{"CONSTRUCT_LONG_ASSET": 150, "FA_IR_DEPR": 100}),
-		row(map[string]float64{})); !ok || math.Abs(got-1.5) > 1e-9 {
-		t.Errorf("capexCoverage = (%v,%v)，期望 (1.5,true)", got, ok)
+func TestCapexCoverageDetail(t *testing.T) {
+	cf := map[int]model.ReportRow{
+		2024: rowAt("2024-12-31", map[string]float64{
+			"CONSTRUCT_LONG_ASSET": 150, "DISPOSAL_LONG_ASSET": 50, "FA_IR_DEPR": 100,
+		}),
 	}
-	// 分母 ≤ 0 → 不可算。
-	if _, ok := capexCoverage(
-		row(map[string]float64{"CONSTRUCT_LONG_ASSET": 150}),
-		row(map[string]float64{})); ok {
-		t.Error("保全性资本支出为 0 时应返回 ok=false")
-	}
-	// 分子字段缺失（nil，而非显式 0）→ 不可算。
-	if _, ok := capexCoverage(
-		row(map[string]float64{"FA_IR_DEPR": 100}),
-		row(map[string]float64{})); ok {
-		t.Error("CONSTRUCT_LONG_ASSET 缺失时应返回 ok=false")
-	}
-}
-
-func TestCoreWorkingCapitalAndDeltaNWC(t *testing.T) {
-	// 核心营运资本 = 营运资产核心科目 − 营运负债核心科目；residual 类科目（TOTAL_ASSETS）不参与。
-	cur := row(map[string]float64{
-		"ACCOUNTS_RECE": 100, "INVENTORY": 50,
-		"ACCOUNTS_PAYABLE": 30, "STAFF_SALARY_PAYABLE": 20,
-		"TOTAL_ASSETS": 5000,
-	})
-	if got := coreWorkingCapital(cur); math.Abs(got-100) > 1e-9 {
-		t.Errorf("coreWorkingCapital = %v，期望 100（150−50，残差不参与）", got)
-	}
-
-	byYear := map[int]model.ReportRow{
-		2023: row(map[string]float64{"ACCOUNTS_RECE": 60}),
-		2024: cur,
-	}
-	if d, ok := deltaNWC(byYear, 2024); !ok || math.Abs(d-40) > 1e-9 {
-		t.Errorf("deltaNWC = (%v,%v)，期望 (40,true)", d, ok)
-	}
-	// 上年缺表 → 不可算。
-	if _, ok := deltaNWC(map[int]model.ReportRow{2024: cur}, 2024); ok {
-		t.Error("上年缺表时 deltaNWC 应返回 ok=false")
-	}
-}
-
-func TestC5Warning(t *testing.T) {
-	cfHigh := row(map[string]float64{"CONSTRUCT_LONG_ASSET": 150, "FA_IR_DEPR": 100}) // 覆盖率 1.5
-	cfLow := row(map[string]float64{"CONSTRUCT_LONG_ASSET": 120, "FA_IR_DEPR": 100})  // 覆盖率 1.2
-	empty := row(map[string]float64{})
-	byYear := map[int]model.ReportRow{
-		2023: row(map[string]float64{"ACCOUNTS_RECE": 60}),
-		2024: row(map[string]float64{"ACCOUNTS_RECE": 100}),
-	}
-
-	// 高增长 + 覆盖率 1.5 → 告警。
-	msg := c5Warning(valModelTwoStage, 20, 4, cfHigh, empty, byYear, 2024, 0)
-	if !strings.Contains(msg, "扩张性资本支出") {
-		t.Errorf("高增长 + 覆盖率 1.5 应告警，实际 %q", msg)
-	}
-	// 高增长 + 覆盖率 1.2 → 不告警。
-	if msg := c5Warning(valModelTwoStage, 20, 4, cfLow, empty, byYear, 2024, 0); msg != "" {
-		t.Errorf("覆盖率 1.2 不应告警，实际 %q", msg)
-	}
-	// 永续模型不涉及扩张 Capex 假设 → 不告警。
-	if msg := c5Warning(valModelPerpetual, 0, 4, cfHigh, empty, byYear, 2024, 0); msg != "" {
-		t.Errorf("永续模型不应告警，实际 %q", msg)
-	}
-	// ΔNWC/基期 FCF = 40/100 = 0.4 > 0.3 → 追加告警。
-	msg = c5Warning(valModelTwoStage, 20, 4, empty, empty, byYear, 2024, 100)
-	if !strings.Contains(msg, "营运资本") {
-		t.Errorf("ΔNWC 占比 0.4 应告警，实际 %q", msg)
-	}
-	// ΔNWC < 0 → 不追加。
-	down := map[int]model.ReportRow{
-		2023: row(map[string]float64{"ACCOUNTS_RECE": 100}),
-		2024: row(map[string]float64{"ACCOUNTS_RECE": 60}),
-	}
-	if msg := c5Warning(valModelTwoStage, 20, 4, empty, empty, down, 2024, 100); msg != "" {
-		t.Errorf("ΔNWC 为负不应告警，实际 %q", msg)
-	}
-}
-
-func TestFCFToProfitMedian(t *testing.T) {
-	years := []int{2022, 2023, 2024}
-	fcf := map[int]float64{2022: 600, 2023: 600, 2024: 600}
 	income := map[int]model.ReportRow{
-		2022: row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 700}),
-		2023: row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 700}),
-		2024: row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 700}),
-	}
-	if med, n, ok := fcfToProfitMedian(fcf, income, years); !ok || n != 3 || math.Abs(med-2) > 1e-9 {
-		t.Errorf("fcfToProfitMedian = (%v,%d,%v)，期望 (2,3,true)", med, n, ok)
+		2024: rowAt("2024-12-31", map[string]float64{}),
 	}
 
-	// 有效样本 <3 → 不可算。
-	if _, n, ok := fcfToProfitMedian(fcf, income, []int{2023, 2024}); ok || n != 2 {
-		t.Errorf("2 个样本应返回 ok=false，实际 (%d,%v)", n, ok)
+	// 净资本支出 (150−50) ÷ 保全性支出 100 = 1.0。
+	d := capexCoverageDetail(cf, income, []int{2024}, valFCFLatest)
+	if !d.Available || math.Abs(d.Ratio-1.0) > 1e-9 || d.Numerator != 100 || d.Denominator != 100 {
+		t.Errorf("覆盖率 = %+v，期望 1.0（100/100）", d)
+	}
+	if d.WindowStart != 2024 || d.WindowEnd != 2024 || d.Mode != valFCFLatest {
+		t.Errorf("窗口/方式 = %+v", d)
 	}
 
-	// 负净利润 / 非正 FCF 的年度跳过。
-	badIncome := map[int]model.ReportRow{
-		2022: row(map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 1100}),
-		2023: income[2023],
-		2024: income[2024],
+	// 多年度按窗口合计。
+	cf[2023] = rowAt("2023-12-31", map[string]float64{
+		"CONSTRUCT_LONG_ASSET": 100, "FA_IR_DEPR": 100,
+	})
+	income[2023] = rowAt("2023-12-31", map[string]float64{})
+	d = capexCoverageDetail(cf, income, []int{2023, 2024}, valFCFAverage)
+	if !d.Available || math.Abs(d.Ratio-1.0) > 1e-9 || d.Denominator != 200 {
+		t.Errorf("两年合计 = %+v，期望 200/200", d)
 	}
-	badFCF := map[int]float64{2022: 200, 2023: 0, 2024: 200}
-	if _, n, ok := fcfToProfitMedian(badFCF, badIncome, years); ok || n != 1 {
-		t.Errorf("负净利润/非正 FCF 应跳过，实际 (%d,%v)", n, ok)
+
+	// 分母 ≤ 0 → 不可算。
+	noCapex := capexCoverageDetail(
+		map[int]model.ReportRow{2024: rowAt("2024-12-31", map[string]float64{"CONSTRUCT_LONG_ASSET": 150})},
+		income, []int{2024}, valFCFLatest)
+	if noCapex.Available || noCapex.Reason == "" {
+		t.Errorf("保全性支出为 0 应不可算：%+v", noCapex)
+	}
+
+	// CONSTRUCT_LONG_ASSET 缺失（nil）→ 不可算并给出年度。
+	missing := capexCoverageDetail(
+		map[int]model.ReportRow{2024: rowAt("2024-12-31", map[string]float64{"FA_IR_DEPR": 100})},
+		income, []int{2024}, valFCFLatest)
+	if missing.Available || !strings.Contains(missing.Reason, "2024") {
+		t.Errorf("购建长期资产缺失应不可算：%+v", missing)
 	}
 }
 
-func TestVerifyC4(t *testing.T) {
-	// C4a 硬约束：g∞ ≤ SGR 且 g∞ < 折现率。
-	if ok, w := verifyC4a(4.5, 8, 6.83, true); !ok || w != "" {
-		t.Errorf("g∞=4.5 ≤ SGR=6.83 且 < r=8 应通过，实际 ok=%v w=%q", ok, w)
+func TestEffectiveWindow(t *testing.T) {
+	if got := effectiveWindow(valFCFAverage, []int{2022, 2023, 2024}, 2024); len(got) != 3 || got[0] != 2022 {
+		t.Errorf("多年度应沿用实际窗口：%v", got)
 	}
-	if ok, w := verifyC4a(5, 8, 4.2, true); ok || w == "" {
-		t.Errorf("g∞=5 > SGR=4.2 应违反并给出 Warning，实际 ok=%v w=%q", ok, w)
+	if got := effectiveWindow(valFCFLatest, []int{2022, 2023, 2024}, 2024); len(got) != 1 || got[0] != 2024 {
+		t.Errorf("latest 应取基期年：%v", got)
 	}
-	if ok, _ := verifyC4a(8, 8, 0, false); ok {
-		t.Error("g∞ 不低于折现率应违反")
-	}
-	// SGR 不可用/非正时不施加 SGR 约束（sgr<=0 由 terminalGrowth 收到 0）。
-	if ok, _ := verifyC4a(7, 8, 0, false); !ok {
-		t.Error("SGR 不可用且 g∞<r 应通过")
-	}
-
-	// C4b 软约束：只告警、不降级。
-	if w := verifyC4b(12, 6.83, true); w == "" {
-		t.Error("g1=12 > SGR=6.83 应返回只告警 Warning")
-	}
-	if w := verifyC4b(5, 6.83, true); w != "" {
-		t.Errorf("g1 ≤ SGR 不应告警，实际 %q", w)
-	}
-	if w := verifyC4b(12, 0, false); w != "" {
-		t.Error("SGR 不可用不应告警")
-	}
-
-	// C4c 防御复核 + 冲突豁免。
-	if !verifyC4c(10, 8, 5) {
-		t.Error("g1=10 > cap=8 且 cap ≥ A−5 应触发复核")
-	}
-	if verifyC4c(10, 3, 5) {
-		t.Error("cap < A−envelope 时应豁免（M1 包络优先）")
-	}
-	if verifyC4c(8, 8, 5) {
-		t.Error("g1 ≤ cap 不应触发复核")
+	if got := effectiveWindow(valFCFCustom, []int{2022, 2023, 2024}, 2024); len(got) != 1 || got[0] != 2024 {
+		t.Errorf("custom 应按最新年报校验：%v", got)
 	}
 }
 
-// TestRecommendValuationC7 C7：现金流量表缺 2024 而利润表有 → 基期年回退 2023 并告警。
+func TestFCFProfitDetail(t *testing.T) {
+	income := map[int]model.ReportRow{
+		2022: rowAt("2022-12-31", map[string]float64{"PARENT_NETPROFIT": 300}),
+		2023: rowAt("2023-12-31", map[string]float64{"PARENT_NETPROFIT": 360}),
+		2024: rowAt("2024-12-31", map[string]float64{"PARENT_NETPROFIT": 432}),
+	}
+	years := []int{2022, 2023, 2024}
+
+	// 平均口径：600 / 364 = 1.65。
+	d := fcfProfitDetail(600, false, 0, income, years, valFCFAverage)
+	if !d.Available || math.Abs(d.Ratio-1.65) > 0.005 || d.ProfitBasis != "parent" || d.Years != 3 {
+		t.Errorf("FCF/净利润 = %+v，期望 1.65/parent/3", d)
+	}
+	if !strings.Contains(d.Note, "未含研发调整") || !strings.Contains(d.Note, "2022–2024") {
+		t.Errorf("口径说明缺失：%q", d.Note)
+	}
+
+	// 归母字段缺一年 → 整窗口回落重构净利润。
+	noParent := map[int]model.ReportRow{
+		2022: rowAt("2022-12-31", map[string]float64{"TOTAL_OPERATE_INCOME": 300}),
+		2023: rowAt("2023-12-31", map[string]float64{"TOTAL_OPERATE_INCOME": 360}),
+		2024: rowAt("2024-12-31", map[string]float64{"TOTAL_OPERATE_INCOME": 432}),
+	}
+	if d := fcfProfitDetail(600, true, 10, noParent, years, valFCFAverage); !d.Available ||
+		d.ProfitBasis != "reconstructed" || !strings.Contains(d.Note, "含研发调整") {
+		t.Errorf("重构口径 = %+v", d)
+	}
+
+	// 亏损年不剔除：平均 (100−50+100)/3 = 50。
+	loss := map[int]model.ReportRow{
+		2022: rowAt("2022-12-31", map[string]float64{"PARENT_NETPROFIT": 100}),
+		2023: rowAt("2023-12-31", map[string]float64{"PARENT_NETPROFIT": -50}),
+		2024: rowAt("2024-12-31", map[string]float64{"PARENT_NETPROFIT": 100}),
+	}
+	d = fcfProfitDetail(100, false, 0, loss, years, valFCFAverage)
+	if !d.Available || math.Abs(d.Ratio-2.0) > 1e-9 || d.Years != 3 {
+		t.Errorf("亏损年不应剔除：%+v，期望 100/50=2", d)
+	}
+
+	// 基期 FCF≤0 → 不可算。
+	if d := fcfProfitDetail(0, false, 0, income, years, valFCFLatest); d.Available || d.Reason == "" {
+		t.Errorf("FCF≤0 应不可算：%+v", d)
+	}
+	// 净利润≤0 → 不可算。
+	allLoss := map[int]model.ReportRow{
+		2022: rowAt("2022-12-31", map[string]float64{"PARENT_NETPROFIT": -1}),
+		2023: rowAt("2023-12-31", map[string]float64{"PARENT_NETPROFIT": -2}),
+		2024: rowAt("2024-12-31", map[string]float64{"PARENT_NETPROFIT": -3}),
+	}
+	if d := fcfProfitDetail(100, false, 0, allLoss, years, valFCFAverage); d.Available || d.Reason == "" {
+		t.Errorf("净利润≤0 应不可算：%+v", d)
+	}
+}
+
+// TestRecommendValuationC7 现金流量表缺 2024 而利润表有 → 基期年回退 2023 并告警。
 func TestRecommendValuationC7(t *testing.T) {
 	income := []model.ReportRow{
 		rowAt("2022-12-31", map[string]float64{"TOTAL_OPERATE_INCOME": 1000, "OPERATE_COST": 700}),
@@ -199,57 +160,77 @@ func TestRecommendValuationC7(t *testing.T) {
 		rowAt("2024-12-31", map[string]float64{"TOTAL_EQUITY": 5500, "SHORT_LOAN": 100}),
 	}
 
-	rec := RecommendValuation(balance, cashflow, income)
+	rec := RecommendValuation(ValuationRecommendInput{Balance: balance, Cashflow: cashflow, Income: income})
 	if rec.BaseYear != 2023 {
 		t.Errorf("BaseYear = %d，期望 2023（利润表 ∩ 现金流量表）", rec.BaseYear)
 	}
-	if !strings.Contains(rec.Warning, "口径同源") {
-		t.Errorf("Warning 应说明 C7 口径同源，实际 %q", rec.Warning)
+	warns := strings.Join(rec.Warnings, "；")
+	if !strings.Contains(warns, "最新共同年度为 2023") {
+		t.Errorf("Warnings 应说明同源基期，实际 %q", rec.Warnings)
 	}
-	// 增速窗口截断到基期年：说明文字只应出现 ≤2023 的年份。
-	if strings.Contains(rec.BaseGrowthNote, "2024") {
-		t.Errorf("增长窗口应截断到基期年 2023，实际 %q", rec.BaseGrowthNote)
+	if rec.FCFWindowEnd != 2023 {
+		t.Errorf("FCF 窗口应截止 2023，实际 %d", rec.FCFWindowEnd)
 	}
 }
 
-// TestRecommendValuationP4Fields C5/C6 可观测字段与告警（只告警、不改参数）。
-func TestRecommendValuationP4Fields(t *testing.T) {
+// TestRecommendValuationChecks R19 关键校验：净 Capex/保全支出、FCF/净利润与告警。
+func TestRecommendValuationChecks(t *testing.T) {
 	years := []int{2022, 2023, 2024}
 	income := make([]model.ReportRow, 0, len(years))
 	cashflow := make([]model.ReportRow, 0, len(years))
 	balance := make([]model.ReportRow, 0, len(years))
 	for i, y := range years {
-		date := fmt.Sprintf("%d-12-31", y)
-		rev := 1000.0 * math.Pow(1.2, float64(i)) // 营收年增 20% → 有正增长，模型不落 zero
+		date := ymd(y)
+		rev := 1000.0 * math.Pow(1.2, float64(i))
 		income = append(income, rowAt(date, map[string]float64{
-			"TOTAL_OPERATE_INCOME": rev, "OPERATE_COST": rev * 0.7, // 净利润 = 营收 × 0.3
+			"TOTAL_OPERATE_INCOME": rev, "OPERATE_COST": rev * 0.7,
+			"TOTAL_PROFIT": rev * 0.2, "PARENT_NETPROFIT": rev * 0.2, "INCOME_TAX": 0,
 		}))
 		cashflow = append(cashflow, rowAt(date, map[string]float64{
-			"NETCASH_OPERATE": 700, "FA_IR_DEPR": 100, // FCF = 600
-			"CONSTRUCT_LONG_ASSET": 150, // 覆盖率 1.5
+			"NETCASH_OPERATE": 700, "FA_IR_DEPR": 100,
+			"CONSTRUCT_LONG_ASSET": 150, "DISPOSAL_LONG_ASSET": 0,
 		}))
 		balance = append(balance, rowAt(date, map[string]float64{
-			"ACCOUNTS_RECE": 100, "TOTAL_EQUITY": 5000, "SHORT_LOAN": 100,
+			"TOTAL_EQUITY": 5000, "SHORT_LOAN": 100,
 		}))
 	}
 
-	rec := RecommendValuation(balance, cashflow, income)
-	if math.Abs(rec.CapexCoverage-1.5) > 1e-9 {
-		t.Errorf("CapexCoverage = %v，期望 1.5", rec.CapexCoverage)
+	rec := RecommendValuation(ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 100e8,
+	})
+	if !rec.CapexCheck.Available || math.Abs(rec.CapexCheck.Ratio-1.5) > 1e-9 {
+		t.Errorf("CapexCheck = %+v，期望 1.5", rec.CapexCheck)
 	}
-	// 净利润 300/360/432 → 比率 2/1.667/1.389，中位数 = 600/360。
-	if math.Abs(rec.FCFProfitRatio-600.0/360.0) > 1e-9 {
-		t.Errorf("FCFProfitRatio = %v，期望 %v（600/360 中位数）", rec.FCFProfitRatio, 600.0/360.0)
+	// 基期 FCF=600（latest 窗口 2024），归母净利润 288 → 2.08。
+	if !rec.FCFProfitCheck.Available || math.Abs(rec.FCFProfitCheck.Ratio-2.08) > 0.005 {
+		t.Errorf("FCFProfitCheck = %+v，期望 2.08", rec.FCFProfitCheck)
 	}
-	if !strings.Contains(rec.Warning, "长期显著高于净利润") {
-		t.Errorf("C6（FCF/净利润 2 > 1.5）应告警，实际 %q", rec.Warning)
+	if rec.FCFProfitCheck.ProfitBasis != "parent" {
+		t.Errorf("有归母字段时应取归母口径：%+v", rec.FCFProfitCheck)
 	}
-	// ΔNWC = 0（营运资本不变）→ 比率为 0。
-	if rec.DeltaNWCRatio != 0 {
-		t.Errorf("DeltaNWCRatio = %v，期望 0", rec.DeltaNWCRatio)
+	warns := strings.Join(rec.Warnings, "；")
+	if !strings.Contains(warns, "资本支出") || !strings.Contains(warns, "FCF 为净利润的 2.08 倍") {
+		t.Errorf("关键校验应进入 Warnings，实际 %q", rec.Warnings)
 	}
-	// 只告警不改参数：仍输出合法参数集。
-	if rec.Model == "" || len(rec.Params) == 0 {
-		t.Errorf("C5/C6 不应清空模型/参数：%+v", rec)
+	if len(rec.Warnings) > 6 {
+		t.Errorf("Warnings 最多 6 条，实际 %d", len(rec.Warnings))
 	}
+}
+
+func ymd(year int) string {
+	return strings.Join([]string{itoa(year), "12", "31"}, "-")
+}
+
+func itoa(v int) string {
+	if v == 0 {
+		return "0"
+	}
+	var b [8]byte
+	i := len(b)
+	for v > 0 {
+		i--
+		b[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(b[i:])
 }

@@ -42,7 +42,7 @@ func TestVerifyRDIncomeYearNotThreeTableLatest(t *testing.T) {
 		t.Fatalf("用例前提不成立：latestYear = %d，期望 2025", latest)
 	}
 
-	rec := RecommendValuation(balance, cashflow, income)
+	rec := RecommendValuation(ValuationRecommendInput{Balance: balance, Cashflow: cashflow, Income: income})
 	if !rec.AdjustRD {
 		t.Errorf("应取利润表末位年报 2024（研发费用率 8%%）→ AdjustRD=true，实际 false（疑似误用了三表 latestYear=2025 的零值行）")
 	}
@@ -135,7 +135,7 @@ func TestVerifyRDResponseJSONContract(t *testing.T) {
 				t.Errorf("覆盖后 model 应为确定性结果 zero，实际 %q (err=%v)", model, err)
 			}
 			var rationale string
-			if err := json.Unmarshal(out.Valuation["rationale"], &rationale); err != nil || rationale != "r" {
+			if err := json.Unmarshal(out.Valuation["rationale"], &rationale); err != nil || rationale != "r。" {
 				t.Errorf("rationale 应保留大模型原文，实际 %q", rationale)
 			}
 		})
@@ -179,7 +179,7 @@ func TestVerifyRDThresholdFloatBoundary(t *testing.T) {
 			if ratio == nil {
 				t.Fatalf("ratioPct 不应为 nil")
 			}
-			if rec := RecommendValuation(nil, nil, rows); rec.RDRatio != c.wantRatio {
+			if rec := RecommendValuation(ValuationRecommendInput{Income: rows}); rec.RDRatio != c.wantRatio {
 				t.Errorf("展示值 RDRatio = %v，期望 %v（%s）", rec.RDRatio, c.wantRatio, c.expectNote)
 			}
 		})
@@ -202,9 +202,10 @@ func TestVerifyRDDeterministic(t *testing.T) {
 		r8Inc("2023-12-31", 950, r8Ptr(60)),
 		r8Inc("2024-12-31", 1000, r8Ptr(80)),
 	}
-	first := RecommendValuation(nil, nil, income)
+	input := ValuationRecommendInput{Income: income}
+	first := RecommendValuation(input)
 	for i := 0; i < 5; i++ {
-		got := RecommendValuation(nil, nil, income)
+		got := RecommendValuation(input)
 		if got.AdjustRD != first.AdjustRD || got.RDRatio != first.RDRatio {
 			t.Fatalf("第 %d 次推导不一致：%v/%v vs %v/%v", i+2, got.AdjustRD, got.RDRatio, first.AdjustRD, first.RDRatio)
 		}

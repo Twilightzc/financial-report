@@ -32,7 +32,7 @@ func sampleAnalysis() model.FinancialAnalysis {
 }
 
 func TestParseAIResultValid(t *testing.T) {
-	raw := `{"scores":[{"dimension":"盈利能力","score":88,"comment":"强"},{"dimension":"偿债能力","score":90,"comment":"强"},{"dimension":"现金获取能力","score":85,"comment":"强"},{"dimension":"经营效率","score":76,"comment":"中"},{"dimension":"成长能力","score":82,"comment":"强"}],"conclusion":"质地优秀","industry":{"name":"白酒","prospect":"稳健","competition":"集中","application":"消费"},"valuation":{"model":"two_stage","model_name":"两阶段模型","discount_rate":8,"params":[{"key":"g1","label":"高增长期增长率","value":10}],"rationale":"稳定成长"}}`
+	raw := `{"scores":[{"dimension":"盈利能力","score":88,"comment":"强"},{"dimension":"偿债能力","score":90,"comment":"强"},{"dimension":"现金获取能力","score":85,"comment":"强"},{"dimension":"经营效率","score":76,"comment":"中"},{"dimension":"成长能力","score":82,"comment":"强"}],"conclusion":"质地优秀","industry":{"name":"白酒","prospect":"稳健","competition":"集中","application":"消费"},"valuation":{"industry_type":"general","company_risks":[{"type":"governance","severity":"medium","note":"治理结构待完善"}],"rationale":"稳定成长"}}`
 	r, err := ParseAIResult(raw)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
@@ -40,8 +40,13 @@ func TestParseAIResultValid(t *testing.T) {
 	if len(r.Scores) != 5 || r.Scores[0].Dimension != "盈利能力" || r.Scores[0].Score != 88 {
 		t.Fatalf("评分解析不符: %+v", r.Scores)
 	}
-	if r.Valuation.Model != "two_stage" || r.Valuation.DiscountRate != 8 {
+	// AI 只回传定性判断；模型/折现率等确定性参数由 ApplyValuationRecommendation 覆盖。
+	if r.Valuation.IndustryType != "general" || len(r.Valuation.CompanyRisks) != 1 ||
+		r.Valuation.CompanyRisks[0].Type != "governance" || r.Valuation.Rationale != "稳定成长。" {
 		t.Fatalf("估值解析不符: %+v", r.Valuation)
+	}
+	if r.Valuation.Model != "" || r.Valuation.DiscountRate != 0 {
+		t.Fatalf("确定性参数不应由 AI 回传: %+v", r.Valuation)
 	}
 }
 
@@ -127,7 +132,7 @@ func TestBuildAIPrompt(t *testing.T) {
 	system, user := BuildAIPrompt(a, q, "medium", []model.SegmentIncome{
 		{Name: "茅台酒", RevenueRatio: 0.87, ProfitRatio: 0.89, GrossMargin: 0.94},
 		{Name: "其他系列酒", RevenueRatio: 0.13, ProfitRatio: 0.11, GrossMargin: 0.76},
-	}, sampleRecommendation())
+	}, recommendedStub())
 	if !strings.Contains(system, "盈利能力") {
 		t.Fatalf("系统提示词缺少框架: %s", system)
 	}
@@ -172,7 +177,7 @@ func aiScoresJSON() string {
 
 // aiRawWith 拼接一份合法 AI 返回（extra 为附加的 JSON 字段片段，如 ,"chain":{...}）。
 func aiRawWith(extra string) string {
-	return `{"scores":` + aiScoresJSON() + `,"conclusion":"c","industry":{"name":"n"},"valuation":{"model":"zero","model_name":"零增长模型","discount_rate":8}` + extra + `}`
+	return `{"scores":` + aiScoresJSON() + `,"conclusion":"c","industry":{"name":"n"},"valuation":{"industry_type":"general","rationale":"r"}` + extra + `}`
 }
 
 func TestParseAIResultWithChainPartners(t *testing.T) {
@@ -504,8 +509,9 @@ func TestParseAIResultTolerantBusinessesTopLevel(t *testing.T) {
 		if len(r.Businesses) != 0 {
 			t.Fatalf("%s: businesses 应为空: %+v", extra, r.Businesses)
 		}
-		if len(r.Scores) != 5 || r.Conclusion != "c" || r.Valuation.Model != "zero" {
-			t.Fatalf("%s: 其余字段应正常解析: scores=%d conclusion=%q model=%q", extra, len(r.Scores), r.Conclusion, r.Valuation.Model)
+		if len(r.Scores) != 5 || r.Conclusion != "c" || r.Valuation.IndustryType != "general" || r.Valuation.Rationale != "r。" {
+			t.Fatalf("%s: 其余字段应正常解析: scores=%d conclusion=%q industry=%q rationale=%q",
+				extra, len(r.Scores), r.Conclusion, r.Valuation.IndustryType, r.Valuation.Rationale)
 		}
 	}
 }

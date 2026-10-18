@@ -3,7 +3,6 @@ package service
 import (
 	"encoding/json"
 	"math"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -11,878 +10,243 @@ import (
 )
 
 // TestRecommendBaseFCFUnstableMedian R10：变异系数 > 0.30 或正负交替 ≥1 时禁止普通平均，
-// 改用中位数；平稳序列仍取平均（FR-4）。
+// 改用中位数；平稳序列仍取平均。
 func TestRecommendBaseFCFUnstableMedian(t *testing.T) {
 	years := []int{2020, 2021, 2022, 2023, 2024}
-	cases := []struct {
-		name      string
-		fcf       map[int]float64
-		cycle     fcfCycle
-		wantMode  string
-		wantInRat string
-	}{
-		{
-			name:      "CV高且无翻转→中位数",
-			fcf:       map[int]float64{2020: 20e8, 2021: 28e8, 2022: 39e8, 2023: 55e8, 2024: 77e8},
-			cycle:     fcfCycle{Evaluated: true, CV: 0.466, SignChanges: 0},
-			wantMode:  valFCFMedian,
-			wantInRat: "变异系数",
-		},
-		{
-			name:     "平稳→平均值",
-			fcf:      map[int]float64{2020: 100e8, 2021: 102e8, 2022: 101e8, 2023: 103e8, 2024: 100e8},
-			cycle:    fcfCycle{Evaluated: true, CV: 0.01, SignChanges: 0},
-			wantMode: valFCFAverage,
-		},
-		{
-			name:     "有正负交替→中位数",
-			fcf:      map[int]float64{2020: 100e8, 2021: 102e8, 2022: 101e8, 2023: 103e8, 2024: 100e8},
-			cycle:    fcfCycle{Evaluated: true, CV: 0.10, SignChanges: 1},
-			wantMode: valFCFMedian,
-		},
+	fcf := map[int]float64{2020: 100, 2021: -20, 2022: 130, 2023: 90, 2024: 110}
+	rec := recommendBaseFCF(fcf, years, fcfCycle{})
+	if rec.Mode != valFCFMedian {
+		t.Errorf("波动序列应取中位数，实际 %s", rec.Mode)
 	}
-	for _, c := range cases {
-		rec := RecommendBaseFCF(c.fcf, years, c.cycle)
-		if rec.Mode != c.wantMode {
-			t.Errorf("%s：mode=%s，期望 %s（理由：%s）", c.name, rec.Mode, c.wantMode, rec.Rationale)
-		}
-		if c.wantInRat != "" && !strings.Contains(rec.Rationale, c.wantInRat) {
-			t.Errorf("%s：理由缺少 %q：%s", c.name, c.wantInRat, rec.Rationale)
-		}
+
+	stable := map[int]float64{2020: 100, 2021: 102, 2022: 101, 2023: 103, 2024: 104}
+	if rec := recommendBaseFCF(stable, years, fcfCycle{}); rec.Mode != valFCFAverage {
+		t.Errorf("平稳序列应取平均，实际 %s", rec.Mode)
 	}
 }
 
-// TestApplyFCFCapexGuard capex 守卫：仅高增长模型 + 覆盖率 >1.3 时把 latest 改成多年中枢；
-// custom 只追加提示；zero 模型不触发（FR-6）。
-func TestApplyFCFCapexGuard(t *testing.T) {
-	years := []int{2020, 2021, 2022, 2023, 2024}
-	fcf := map[int]float64{2020: 100e8, 2021: 110e8, 2022: 105e8, 2023: 120e8, 2024: 130e8}
-	cycle := fcfCycle{Evaluated: true, CV: 0.10}
-	latest := fcfRecLatest("最近一年经营自由现金流较高。")
+// valuationDiscountFixture 构造 E=市值 100 亿、D=短期借款 20 亿的资产负债表。
+func valuationDiscountFixture() (balance, income map[int]model.ReportRow) {
+	balance = map[int]model.ReportRow{
+		2023: rowAt("2023-12-31", map[string]float64{"TOTAL_EQUITY": 80e8, "SHORT_LOAN": 10e8}),
+		2024: rowAt("2024-12-31", map[string]float64{"TOTAL_EQUITY": 90e8, "SHORT_LOAN": 20e8}),
+	}
+	income = map[int]model.ReportRow{
+		2023: rowAt("2023-12-31", map[string]float64{"TOTAL_PROFIT": 10e8, "INCOME_TAX": 1.5e8}),
+		2024: rowAt("2024-12-31", map[string]float64{"TOTAL_PROFIT": 12e8, "INCOME_TAX": 1.8e8}),
+	}
+	return balance, income
+}
 
-	got := applyFCFCapexGuard(latest, valModelTwoStage, 1.5, true, cycle, fcf, years)
-	if got.Mode != valFCFMedian || got.Years != 3 {
-		t.Errorf("两阶段 + capex 1.5 应改为 3 年中位数，实际 mode=%s years=%d", got.Mode, got.Years)
-	}
-	if !strings.Contains(got.Rationale, "扩张性资本支出") {
-		t.Errorf("守卫理由应包含「扩张性资本支出」：%s", got.Rationale)
-	}
+// TestValuationDiscountReconcile WACC 分步与取整/区间对账必须自洽。
+func TestValuationDiscountReconcile(t *testing.T) {
+	balance, income := valuationDiscountFixture()
+	d := valuationDiscount(balance, income, 2024, valIndustryGeneral, 100e8, 0.5, false)
 
-	if got := applyFCFCapexGuard(latest, valModelTwoStage, 1.0, true, cycle, fcf, years); got.Mode != valFCFLatest {
-		t.Errorf("capex 1.0 不应改变模式，实际 %s", got.Mode)
+	if !d.DiscountReconcileAvailable || d.DiscountBaseLabel != "WACC" {
+		t.Fatalf("应输出 WACC 对账：%+v", d)
 	}
-	if got := applyFCFCapexGuard(latest, valModelZero, 1.5, true, cycle, fcf, years); got.Mode != valFCFLatest {
-		t.Errorf("零增长模型不应触发 capex 守卫，实际 %s", got.Mode)
+	wantRe := round2(valRiskFreeRate + valBetaNormal*valEquityRiskPrem + 0.5)
+	if d.EquityCost != wantRe {
+		t.Errorf("Re = %v，期望 %v", d.EquityCost, wantRe)
 	}
-
-	custom := fcfRecommendation{Mode: valFCFCustom, ModeName: valFCFModeNames[valFCFCustom], CustomYuan: 90e8, CustomUnit: "yi", Rationale: "自定义中枢。"}
-	got = applyFCFCapexGuard(custom, valModelThreeStage, 1.5, true, cycle, fcf, years)
-	if got.Mode != valFCFCustom || !strings.Contains(got.Rationale, "扩张性资本支出") {
-		t.Errorf("custom 应保留模式并追加提示：%+v", got)
+	if d.EquityWeight != round4(100.0/120.0) || d.DebtWeight != round4(1-d.EquityWeight) {
+		t.Errorf("权重 = %v/%v", d.EquityWeight, d.DebtWeight)
 	}
-
-	if got := applyFCFCapexGuard(latest, valModelTwoStage, 1.5, false, cycle, fcf, years); got.Mode != valFCFLatest {
-		t.Errorf("capex 覆盖率不可用（ok=false）不应触发守卫，实际 %s", got.Mode)
+	identity := round2(d.DiscountBaseValue + d.DiscountRoundingAdjustment + d.DiscountRangeAdjustment)
+	if identity != d.DiscountRate {
+		t.Errorf("对账等式 %.2f + %.2f + %.2f = %.2f，不等于 r=%.2f",
+			d.DiscountBaseValue, d.DiscountRoundingAdjustment, d.DiscountRangeAdjustment,
+			identity, d.DiscountRate)
+	}
+	if d.DiscountRate < valDiscountRateMin || d.DiscountRate > valDiscountRateMax {
+		t.Errorf("r 越界：%v", d.DiscountRate)
+	}
+	// 无上期利息数据 → Rd 走 Rf+2pp 估计。
+	if !d.DebtCostEstimated || d.DebtCostPretax != 4.5 || d.AfterTaxDebtCost <= 0 {
+		t.Errorf("Rd 估计口径异常：%+v", d)
 	}
 }
 
-// TestFinalizeFCFRationaleComplete 理由补全：窗口、模式、一次性项目、capex、现金含量均出现，
-// 且不使用「综合判断」等模糊措辞（FR-7）。
-func TestFinalizeFCFRationaleComplete(t *testing.T) {
-	rec := fcfRecMedian([]int{2022, 2023, 2024}, "近 3 年经营自由现金流波动较大（变异系数 0.35，正负交替 0 次），普通平均会被异常年份拉偏，取近 3 年中位数。")
-	got := finalizeFCFRationale(rec, fcfRationaleContext{
-		WindowStart:      2020,
-		WindowEnd:        2024,
-		WindowYears:      5,
-		CapexRatio:       1.5,
-		FCFProfitRatio:   1.6,
-		FCFProfitSamples: 5,
-		ModeName:         valFCFModeNames[valFCFMedian],
-	})
-	for _, want := range []string{"2020–2024", "中位数", "一次性项目", "扩张性资本支出", "净利润"} {
-		if !strings.Contains(got.Rationale, want) {
-			t.Errorf("理由缺少 %q：%s", want, got.Rationale)
-		}
+// TestValuationDiscountMarketCapFallback 市值缺失时 E 回落账面所有者权益并披露。
+func TestValuationDiscountMarketCapFallback(t *testing.T) {
+	balance, income := valuationDiscountFixture()
+	d := valuationDiscount(balance, income, 2024, valIndustryUtility, 0, 0, false)
+	if d.EquitySource != "book_equity" || d.EquityValue != 90e8 ||
+		!strings.Contains(d.EquitySourceNote, "账面所有者权益") {
+		t.Errorf("E 未按账面回落：%+v", d)
 	}
-	if strings.Contains(got.Rationale, "综合判断") {
-		t.Errorf("理由不应出现模糊措辞：%s", got.Rationale)
+	if d.Beta != valBetaUtility || d.IndustryType != valIndustryUtility {
+		t.Errorf("β 档位 = %v/%s", d.Beta, d.IndustryType)
 	}
 }
 
-// TestRecommendValuationFCFSeriesAndScenarios 集成校验：
-// fcf_series 每年满足 FCF=经营现金流−保全性资本支出；fcf_base_value 与 selectBaseFCF 一致；
-// 三档顺序/方向正确，基准档与顶层单点输出逐字段一致（AC-27）。
-func TestRecommendValuationFCFSeriesAndScenarios(t *testing.T) {
-	balance, cashflow, income := recommendFixture()
-	rec := RecommendValuation(balance, cashflow, income)
-
-	if len(rec.FCFSeries) != 4 {
-		t.Fatalf("fcf_series 应有 4 年，实际 %d", len(rec.FCFSeries))
-	}
-	for _, p := range rec.FCFSeries {
-		if want := p.OperatingCash - p.PreservationCapex; math.Abs(p.FCF-want) > 1e-6 {
-			t.Errorf("%d 年 FCF=%.2f，期望 %.2f", p.Year, p.FCF, want)
-		}
-	}
-	if rec.FCFBaseValue <= 0 {
-		t.Errorf("基期 FCF 应为正：%v", rec.FCFBaseValue)
-	}
-	fcfByYear := make(map[int]float64, len(rec.FCFSeries))
-	years := make([]int, 0, len(rec.FCFSeries))
-	for _, p := range rec.FCFSeries {
-		fcfByYear[p.Year] = p.FCF
-		years = append(years, p.Year)
-	}
-	if v, _, _, err := selectBaseFCF(fcfByYear, years, rec.FCFMode, rec.FCFYears, rec.FCFCustomYuan); err == nil {
-		if math.Abs(v-rec.FCFBaseValue) > 1e-6 {
-			t.Errorf("fcf_base_value=%.2f，selectBaseFCF 复算=%.2f", rec.FCFBaseValue, v)
-		}
-	}
-	if rec.FCFWindowStart == 0 || rec.FCFWindowEnd != rec.FCFSeries[len(rec.FCFSeries)-1].Year {
-		t.Errorf("推荐窗口异常：%d–%d", rec.FCFWindowStart, rec.FCFWindowEnd)
-	}
-
-	if len(rec.Scenarios) != 3 {
-		t.Fatalf("三档长度应为 3，实际 %d", len(rec.Scenarios))
-	}
-	cons, base, opt := rec.Scenarios[0], rec.Scenarios[1], rec.Scenarios[2]
-	if cons.Key != "conservative" || base.Key != "base" || opt.Key != "optimistic" {
-		t.Errorf("三档顺序错误：%s/%s/%s", cons.Key, base.Key, opt.Key)
-	}
-	if !(cons.DiscountRate >= base.DiscountRate && base.DiscountRate >= opt.DiscountRate) {
-		t.Errorf("折现率方向错误：%v/%v/%v", cons.DiscountRate, base.DiscountRate, opt.DiscountRate)
-	}
-	if !(cons.GrowthAnchor <= base.GrowthAnchor && base.GrowthAnchor <= opt.GrowthAnchor) {
-		t.Errorf("复合锚方向错误：%v/%v/%v", cons.GrowthAnchor, base.GrowthAnchor, opt.GrowthAnchor)
-	}
-	if !(cons.TerminalGrowth <= base.TerminalGrowth && base.TerminalGrowth <= opt.TerminalGrowth) {
-		t.Errorf("终值方向错误：%v/%v/%v", cons.TerminalGrowth, base.TerminalGrowth, opt.TerminalGrowth)
-	}
-
-	// 基准档逐字段一致（率/得分为展示口径，用容差比较）。
-	if base.Model != rec.Model || base.ModelName != rec.ModelName {
-		t.Errorf("基准档模型与顶层不一致：%s vs %s", base.Model, rec.Model)
-	}
-	for name, pair := range map[string][2]float64{
-		"折现率":  {base.DiscountRate, rec.DiscountRate},
-		"复合锚":  {base.GrowthAnchor, rec.GrowthComposite},
-		"终值":   {base.TerminalGrowth, rec.GrowthTerminal},
-		"模型得分": {base.ModelScore, rec.ModelScore},
-	} {
-		if math.Abs(pair[0]-pair[1]) > 1e-6 {
-			t.Errorf("基准档 %s=%v，顶层=%v", name, pair[0], pair[1])
-		}
-	}
-	if !reflect.DeepEqual(base.Params, rec.Params) {
-		t.Errorf("基准档参数与顶层不一致：%+v vs %+v", base.Params, rec.Params)
-	}
-	if base.DeltaGrowth != 0 || base.DeltaDiscount != 0 {
-		t.Errorf("基准档相对自身偏移应为 0：%+v", base)
-	}
-}
-
-// TestWaccWithEquityCostDetailFallback 债务成本不可用时的保守估计（FR-12）：
-// D>0 且 debtCapitalCost=nil → Rd_pre=Rf+2.0pp、DebtCostEstimated=true；D=0 不估计、WACC=Re。
-func TestWaccWithEquityCostDetailFallback(t *testing.T) {
+// TestValuationDiscountNegativeDebt 有息债务为负按 0 计并告警。
+func TestValuationDiscountNegativeDebt(t *testing.T) {
 	balance := map[int]model.ReportRow{
-		2024: row(map[string]float64{"SHORT_LOAN": 100, "TOTAL_EQUITY": 900, "TOTAL_ASSETS": 2000}),
-	}
-	income := map[int]model.ReportRow{}
-
-	d, ok := waccWithEquityCostDetail(balance, income, 2024, 8.0, true, 4.5)
-	if !ok {
-		t.Fatal("投入资本 >0 应返回 ok")
-	}
-	if !d.DebtCostEstimated {
-		t.Error("缺少债务成本时应标记 DebtCostEstimated")
-	}
-	if d.DebtCostPretax != 4.5 {
-		t.Errorf("Rd_pre=%.2f，期望 4.5", d.DebtCostPretax)
-	}
-	if d.AfterTaxDebtCost <= 0 {
-		t.Errorf("税后债务成本应 >0：%v", d.AfterTaxDebtCost)
-	}
-	want := 0.1*d.AfterTaxDebtCost + 0.9*8.0
-	if math.Abs(d.Wacc-want) > 1e-9 {
-		t.Errorf("WACC=%.6f，期望 %.6f", d.Wacc, want)
-	}
-
-	noDebt := map[int]model.ReportRow{2024: row(map[string]float64{"TOTAL_EQUITY": 900})}
-	d2, ok := waccWithEquityCostDetail(noDebt, income, 2024, 8.0, true, 4.5)
-	if !ok || d2.DebtCostEstimated {
-		t.Errorf("D=0 不应估计债务成本：%+v", d2)
-	}
-	if math.Abs(d2.Wacc-8.0) > 1e-12 {
-		t.Errorf("D=0 时 WACC 应等于 Re，实际 %v", d2.Wacc)
-	}
-}
-
-// TestWaccDetailMatchesLegacy waccWithEquityCost 与 detail 版本的 WACC 逐位一致。
-func TestWaccDetailMatchesLegacy(t *testing.T) {
-	balance := map[int]model.ReportRow{
-		2023: row(map[string]float64{"SHORT_LOAN": 80, "TOTAL_EQUITY": 800}),
-		2024: row(map[string]float64{"SHORT_LOAN": 120, "TOTAL_EQUITY": 900}),
-	}
-	income := map[int]model.ReportRow{
-		2024: row(map[string]float64{
-			"FE_INTEREST_EXPENSE": 40,
-			"INCOME_TAX":          22.5,
-			"TOTAL_PROFIT":        90,
+		2024: rowAt("2024-12-31", map[string]float64{
+			"TOTAL_EQUITY": 100e8, "SHORT_LOAN": -5e8,
 		}),
 	}
-	legacy := waccWithEquityCost(balance, income, 2024, 8.0)
-	detail, ok := waccWithEquityCostDetail(balance, income, 2024, 8.0, false, 0)
-	if !ok || legacy == nil {
-		t.Fatal("应可计算 WACC")
+	income := map[int]model.ReportRow{
+		2024: rowAt("2024-12-31", map[string]float64{"TOTAL_PROFIT": 10e8, "INCOME_TAX": 1e8}),
 	}
-	if *legacy != detail.Wacc {
-		t.Errorf("WACC 与旧实现不一致：旧=%v 新=%v", *legacy, detail.Wacc)
+	d := valuationDiscount(balance, income, 2024, "", 100e8, 0, false)
+	if d.DebtValue != 0 || d.DebtWeight != 0 {
+		t.Errorf("负债务应置 0：%+v", d)
 	}
-}
-
-// TestComposeGrowthAnchorWeights 三层锚权重：高可靠 0.45/0.45/0.10；仅历史 0.85/0/0.15；
-// 仅前瞻 0/0.85/0.15；都不足时全 0（FR-19）。
-func TestComposeGrowthAnchorWeights(t *testing.T) {
-	macro := macroAnchor{Value: 4.5, Basis: "dynamic_gdp"}
-	cases := []struct {
-		name                  string
-		hist                  float64
-		histOK                bool
-		fwd                   forwardAnchor
-		wantHist, wantFwd, wM float64
-		wantAnchorCount       int
-	}{
-		{"历史+高可靠前瞻", 10, true, forwardAnchor{Value: 12, Available: true, Reliability: "high"}, 0.45, 0.45, 0.10, 3},
-		{"仅历史", 10, true, forwardAnchor{}, 0.85, 0, 0.15, 2},
-		{"仅前瞻", 0, false, forwardAnchor{Value: 12, Available: true, Reliability: "medium"}, 0, 0.85, 0.15, 2},
-		{"均不足", 0, false, forwardAnchor{}, 0, 0, 0, 1},
+	if !strings.Contains(strings.Join(d.Warnings, "；"), "有息债务为负") {
+		t.Errorf("应告警负债务：%v", d.Warnings)
 	}
-	for _, c := range cases {
-		got := composeGrowthAnchor(c.hist, c.histOK, 0, c.fwd, macro)
-		if math.Abs(got.WHW-c.wantHist) > 1e-12 || math.Abs(got.WFwd-c.wantFwd) > 1e-12 ||
-			math.Abs(got.WMacro-c.wM) > 1e-12 {
-			t.Errorf("%s：权重=%.2f/%.2f/%.2f，期望 %.2f/%.2f/%.2f",
-				c.name, got.WHW, got.WFwd, got.WMacro, c.wantHist, c.wantFwd, c.wM)
-		}
-		if got.AnchorCount != c.wantAnchorCount {
-			t.Errorf("%s：锚数=%d，期望 %d", c.name, got.AnchorCount, c.wantAnchorCount)
-		}
-		if sum := got.WHW + got.WFwd + got.WMacro; sum > 0 && math.Abs(sum-1) > 1e-12 {
-			t.Errorf("%s：权重和=%.4f，期望 1", c.name, sum)
-		}
+	if d.DiscountBaseValue != d.EquityCost || d.DiscountBaseLabel != "WACC" {
+		t.Errorf("无债务时 WACC 应等于 Re：%+v", d)
 	}
 }
 
-// TestScoreSignalsMissingROE 缺 ROE 时 has_roe_score=false，分母只含 0.6+0.2。
-func TestScoreSignalsMissingROE(t *testing.T) {
-	got := scoreSignals(10, 5, true, nil)
-	if got.HasROE {
-		t.Error("roeVals 为空时 HasROE 应为 false")
-	}
-	want := (valModelWeightGrowth*got.ScoreGrowth + valModelWeightStability*got.ScoreStability) /
-		(valModelWeightGrowth + valModelWeightStability)
-	if math.Abs(got.Score-math.Round(want*100)/100) > 1e-9 {
-		t.Errorf("得分=%.4f，期望 %.4f", got.Score, want)
+// TestValuationDiscountNoBalance 缺资产负债表时回落默认 10%，不伪造对账。
+func TestValuationDiscountNoBalance(t *testing.T) {
+	d := valuationDiscount(nil, nil, 2024, "", 100e8, 0, false)
+	if d.DiscountRate != valDiscountFallback || d.DiscountReconcileAvailable ||
+		d.DiscountBaseLabel != "default" {
+		t.Errorf("缺表回落异常：%+v", d)
 	}
 }
 
-// TestDampedCandidateHalvesOnCycle 周期修正 ≥2pp 时离散度折减减半（FR-26）。
-func TestDampedCandidateHalvesOnCycle(t *testing.T) {
-	_, d := dampedCandidate(20, 20, 0)
-	_, dHalf := dampedCandidate(20, 20, 2.0)
-	if math.Abs(d-1.6) > 1e-12 {
-		t.Errorf("折减=%.4f，期望 1.6", d)
+// TestGrowthG1Rules g1 上限与终值收口规则。
+func TestGrowthG1Rules(t *testing.T) {
+	// A=20、fwd=12、SGR=15 → 上限 min(30, max(12,15)+2)=17。
+	if g1, constraint, _ := growthG1(20, 4.5, 12, 15, true, true); g1 != 17 || constraint != "upper" {
+		t.Errorf("上限规则 = %v/%s，期望 17/upper", g1, constraint)
 	}
-	if math.Abs(dHalf-d/2) > 1e-12 {
-		t.Errorf("周期修正 ≥2pp 应减半：%.4f vs %.4f", dHalf, d/2)
+	// A=10 正常落在 [g∞, 上限]。
+	if g1, constraint, _ := growthG1(10, 4.5, 9, 11, true, true); g1 != 10 || constraint != "none" {
+		t.Errorf("正常 g1 = %v/%s", g1, constraint)
+	}
+	// A 低于终值 → 按终值收口。
+	if g1, constraint, _ := growthG1(3, 4.5, 9, 11, true, true); g1 != 4.5 || constraint != "terminal" {
+		t.Errorf("终值收口 = %v/%s", g1, constraint)
+	}
+	// 上限低于终值 → 按终值收口。
+	if g1, constraint, _ := growthG1(20, 4.5, -1, 2, true, true); g1 != 4.5 || constraint != "cap_below_terminal" {
+		t.Errorf("上限低于终值 = %v/%s", g1, constraint)
 	}
 }
 
-// TestComputeScenarioBands 带宽：锚分歧 clamp [1.5,4.0]；无前瞻按 0.2×A 且不低于 1.5；
-// A<0 或零增长模型带宽为 0；前瞻 0% 仍是有效锚（FR-31）。
-func TestComputeScenarioBands(t *testing.T) {
-	cases := []struct {
-		name      string
-		A, histA  float64
-		delta     float64
-		histOK    bool
-		fwd       forwardAnchor
-		baseModel string
-		want      float64
-	}{
-		{"分歧8pp封顶4", 10, 6, 0, true, forwardAnchor{Value: 14, Available: true}, valModelTwoStage, 4.0},
-		{"分歧0.5pp下限1.5", 10, 6, 0, true, forwardAnchor{Value: 6.5, Available: true}, valModelTwoStage, 1.5},
-		{"无前瞻按0.2A", 5, 5, 0, true, forwardAnchor{}, valModelTwoStage, 1.5},
-		{"负增长带宽0", -2, -2, 0, true, forwardAnchor{}, valModelPerpetual, 0},
-		{"零增长模型带宽0", 5, 5, 0, true, forwardAnchor{}, valModelZero, 0},
-		{"前瞻0%参与分歧", 9, 5, 0, true, forwardAnchor{Value: 0, Available: true}, valModelTwoStage, 4.0},
+// TestConstructThreeStageStrictlyDecreasing 三阶段 n1=ceil、n2=floor、g2 严格递减。
+func TestConstructThreeStageStrictlyDecreasing(t *testing.T) {
+	p := constructThreeStage(20, 4.5, 15.5, 20, 15)
+	if p.Model != valModelThreeStage {
+		t.Fatalf("应为三阶段：%+v", p)
 	}
-	for _, c := range cases {
-		got := computeScenarioBands(c.A, c.histA, c.delta, c.histOK, c.fwd, c.baseModel)
-		if math.Abs(got.Growth-c.want) > 1e-12 {
-			t.Errorf("%s：band_g=%.2f，期望 %.2f", c.name, got.Growth, c.want)
+	total := p.N1 + p.N2
+	wantN1 := (total + 1) / 2
+	if p.N1 != wantN1 || p.N2 != total-wantN1 {
+		t.Errorf("n1/n2 = %d/%d，期望 %d/%d", p.N1, p.N2, wantN1, total-wantN1)
+	}
+	if !(p.G1 > p.G2 && p.G2 > p.GInf) {
+		t.Errorf("阶段增长率未严格递减：%v/%v/%v", p.G1, p.G2, p.GInf)
+	}
+	// g2 ≥ 折现率 → 三阶段无严格递减解，降级两阶段并告警。
+	p = constructThreeStage(20, 4.5, 15.5, 20, 9)
+	if p.Model != valModelTwoStage || !p.Degraded || p.Warning == "" {
+		t.Errorf("应降级两阶段：%+v", p)
+	}
+}
+
+// TestValuationPromptFactBlock 提示词只给事实块，不泄露三档/内部变量。
+func TestValuationPromptFactBlock(t *testing.T) {
+	balance, cashflow, income := recommendFixture()
+	rec := RecommendValuation(ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 100e8,
+	})
+	block := valuationPromptBlock(rec)
+	for _, want := range []string{
+		"【估值参数事实（只读，不得改动）】", "基期 FCF", "折现率", "增长参数",
+		"关键校验", "行业分类", "公司特定风险",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("事实块缺少 %q：\n%s", want, block)
 		}
-		if got.Discount != valScenarioBandDiscount || got.Terminal != valScenarioBandTerminal {
-			t.Errorf("%s：r/终值带宽错误：%+v", c.name, got)
+	}
+	for _, banned := range []string{
+		"三档", "scenario", "A_raw", "软上限", "包络", "WaccBaseline", "growth_weights",
+	} {
+		if strings.Contains(block, banned) {
+			t.Errorf("事实块不应含 %q：\n%s", banned, block)
 		}
 	}
 }
 
-// scenarioTestInput 构造一份可复用的确定性三档输入（A=8，宏观 4.5，SGR 10）。
-func scenarioTestInput() scenarioInput {
-	return scenarioInput{
-		A: 8, RawA: 8, Discount: 10, GInf: 2, Macro: 4.5, MacroBasis: "dynamic_gdp",
-		Dispersion: 20, Delta: 0, Fwd: forwardAnchor{Value: 7, Available: true},
-		SGR: 10, SGROK: true, Envelope: 5,
-		ROEVals: []float64{20}, StabilityAvailable: true, DownsideDispersion: 5,
-	}
-}
-
-// buildScenariosForTest 复现 recommendValuation 的基准推导，再调用 buildScenarios。
-func buildScenariosForTest(in scenarioInput, bands scenarioBands) []model.ValuationScenario {
-	gap := in.A - in.GInf
-	score := scoreSignals(in.A, in.DownsideDispersion, in.StabilityAvailable, in.ROEVals)
-	negType, _, _ := attributeNegativeGrowth(in.A, in.IsCyclical, in.Position, in.Delta, in.Fwd, in.StructuralMetrics)
-	mdl, _, _ := classifyGrowthModel(in.A, gap, score.Score, in.Insufficient, negType)
-	g1, _, _ := applyDownwardAdjustments(in.A, gap, in.Dispersion, in.Delta, in.Fwd, in.SGR, in.SGROK, in.Envelope)
-	path := constructGrowthPath(mdl, in.A, in.GInf, gap, g1, in.Discount)
-	return buildScenarios(in, bands, paramsFromPath(path), path, score.Score, negType)
-}
-
-// TestScenarioBoundaries 边界截断：乐观档 A 到 40 记 range；保守档 r 到 15 记 discount；
-// g∞ 受宏观约束记 gdp。基准 r=8 时乐观 r=7 是放宽后的正常值，不得误报 discount 截断。
-func TestScenarioBoundaries(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA = 29, 38
-	in.Discount = 8
-	in.GInf = 3
-	in.SGR = 0
-	in.SGROK = false
-	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	opt := scenes[2]
-	if opt.GrowthAnchor != 40 {
-		t.Errorf("乐观档 A 应截断到 40，实际 %v", opt.GrowthAnchor)
-	}
-	if math.Abs(opt.DeltaGrowth-11.0) > 1e-9 {
-		t.Errorf("截断后 DeltaGrowth 应为 11.0，实际 %v", opt.DeltaGrowth)
-	}
-	if !containsString(opt.CappedBy, "range") {
-		t.Errorf("A 触到乐观档上限 40 应记录 range：%v", opt.CappedBy)
-	}
-	if opt.DiscountRate != 7 || opt.DeltaDiscount != -1 {
-		t.Errorf("基准 r=8 时乐观档应为 7（下限放宽）：r=%v delta=%v", opt.DiscountRate, opt.DeltaDiscount)
-	}
-	if containsString(opt.CappedBy, "discount") {
-		t.Errorf("乐观档 r=7 未触下限，不应记录 discount：%v", opt.CappedBy)
-	}
-
-	// 保守档上界仍为 15：r=14.5 + 1.0 → 15（截断并记录 discount）。
-	inR := scenarioTestInput()
-	inR.Discount = 14.5
-	inR.GInf = 3
-	inR.Macro = 5
-	inR.SGR = 0
-	inR.SGROK = false
-	scenesR := buildScenariosForTest(inR, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	cons := scenesR[0]
-	if cons.DiscountRate != 15 || cons.DeltaDiscount != 0.5 || !containsString(cons.CappedBy, "discount") {
-		t.Errorf("保守档 r 应截断到 15 并记录 discount：r=%v delta=%v capped=%v",
-			cons.DiscountRate, cons.DeltaDiscount, cons.CappedBy)
-	}
-
-	in2 := scenarioTestInput()
-	in2.A, in2.RawA = 10, 10
-	in2.GInf = 3
-	in2.Macro = 3
-	in2.SGR = 0
-	in2.SGROK = false
-	scenes2 := buildScenariosForTest(in2, scenarioBands{Growth: 2, Discount: 1, Terminal: 0.5})
-	opt2 := scenes2[2]
-	if !containsString(opt2.CappedBy, "gdp") {
-		t.Errorf("乐观档终值应受宏观锚约束并记录 gdp：%v", opt2.CappedBy)
-	}
-}
-
-// TestScenarioOptimisticGrowthRelaxed 乐观档增长锚放宽：
-// rawA 超过基准上限 30 时，乐观档以 rawA+band_g 计并放宽到 40，从而真正高于基准；
-// 保守/基准档仍按已 clamp 的 A 与 [-5,30] 计算（逐字段不变）。
-func TestScenarioOptimisticGrowthRelaxed(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA = 30, 45
-	in.Discount = 10
-	in.GInf = 2
-	in.Macro = 4.5
-	in.SGR, in.SGROK = 10, true
-	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	cons, base, opt := scenes[0], scenes[1], scenes[2]
-
-	if base.GrowthAnchor != 30 || len(base.CappedBy) != 0 {
-		t.Errorf("基准档 A 应保持 30 且无约束：%v %v", base.GrowthAnchor, base.CappedBy)
-	}
-	if cons.GrowthAnchor != 26 {
-		t.Errorf("保守档 A 应仍按 clamp(30−4,−5,30)=26：%v", cons.GrowthAnchor)
-	}
-	if opt.GrowthAnchor != 40 {
-		t.Errorf("乐观档 A 应放宽到 40（clamp(45+4,−5,40)）：%v", opt.GrowthAnchor)
-	}
-	if opt.GrowthAnchor <= base.GrowthAnchor {
-		t.Errorf("乐观档 A 应高于基准：%v vs %v", opt.GrowthAnchor, base.GrowthAnchor)
-	}
-	if math.Abs(opt.DeltaGrowth-10) > 1e-9 {
-		t.Errorf("乐观档 DeltaGrowth 应为 40−30=10：%v", opt.DeltaGrowth)
-	}
-	if !containsString(opt.CappedBy, "range") || !strings.Contains(opt.Note, "[−5,40]") {
-		t.Errorf("乐观档触到 40 上限应记录 range 并标注 [−5,40]：%v / %s", opt.CappedBy, opt.Note)
-	}
-	if containsString(cons.CappedBy, "range") {
-		t.Errorf("保守档未触边界，不应记录 range：%v", cons.CappedBy)
-	}
-}
-
-// TestScenarioOptimisticDiscountRelaxed 乐观档折现率下限放宽到 7：
-// 基准 r=8（原下限）时乐观档可到 7；基准/保守档仍在 [8,15]。
-func TestScenarioOptimisticDiscountRelaxed(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA = 12, 12
-	in.Discount = 8
-	in.GInf = 2
-	in.Macro = 4.5
-	in.SGR, in.SGROK = 10, true
-	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	cons, base, opt := scenes[0], scenes[1], scenes[2]
-
-	if base.DiscountRate != 8 || cons.DiscountRate != 9 || opt.DiscountRate != 7 {
-		t.Errorf("折现率三档应为 9/8/7：%v/%v/%v", cons.DiscountRate, base.DiscountRate, opt.DiscountRate)
-	}
-	for _, s := range scenes {
-		if containsString(s.CappedBy, "discount") {
-			t.Errorf("%s 档未触边界，不应记录 discount：%v", s.Name, s.CappedBy)
-		}
-	}
-	if opt.DeltaDiscount != -1 {
-		t.Errorf("乐观档 DeltaDiscount 应为 −1：%v", opt.DeltaDiscount)
-	}
-}
-
-// TestScenarioOptimisticNoFalseCap 未触新边界时不得误报 range/discount。
-func TestScenarioOptimisticNoFalseCap(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA = 20, 20
-	in.Discount = 10
-	in.GInf = 2
-	in.Macro = 4.5
-	in.SGR, in.SGROK = 10, true
-	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	opt := scenes[2]
-	if opt.GrowthAnchor != 24 || opt.DiscountRate != 9 {
-		t.Errorf("乐观档 A/r 应为 24/9：%v/%v", opt.GrowthAnchor, opt.DiscountRate)
-	}
-	if containsString(opt.CappedBy, "range") || containsString(opt.CappedBy, "discount") {
-		t.Errorf("未触边界不应记录 range/discount：%v", opt.CappedBy)
-	}
-}
-
-// TestScenarioModelDiffers 三档可使用不同模型且得分逐档不同（FR-32）。
-func TestScenarioModelDiffers(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA = 20, 20
-	in.Discount = 15
-	in.GInf = 13
-	in.Macro = 14
-	in.SGR = 0
-	in.SGROK = false
-	in.Fwd = forwardAnchor{}
-	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	if scenes[0].Model == scenes[2].Model {
-		t.Errorf("保守/乐观档模型应可不同：%s vs %s", scenes[0].Model, scenes[2].Model)
-	}
-	if scenes[0].ModelScore == scenes[2].ModelScore {
-		t.Errorf("保守/乐观档模型得分应不同：%v vs %v", scenes[0].ModelScore, scenes[2].ModelScore)
-	}
-}
-
-// TestScenarioDegradesIndependently 单档三阶段无严格递减解时降为两阶段，且基准档不受影响。
-func TestScenarioDegradesIndependently(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA = 12, 12
-	in.Discount = 15
-	in.GInf = 8
-	in.Macro = 14
-	in.Fwd = forwardAnchor{Value: 4, Available: true}
-	in.SGR = 0
-	in.SGROK = false
-	in.ROEVals = []float64{25}
-	in.DownsideDispersion = 0 // 稳定性满分，使 A=12/gap=4 先分到三阶段
-
-	got := buildScenario(in, scenarioOffsets{Key: "conservative", Name: "保守"})
-	if got.Model != valModelTwoStage || !got.ModelDegraded {
-		t.Errorf("保守档应降级为两阶段，实际 model=%s degraded=%v", got.Model, got.ModelDegraded)
-	}
-
-	// 基准档单独构造一份有严格递减解的三阶段路径，验证不会被保守档的降级回写。
-	baseIn := in
-	baseIn.GInf = 2
-	basePath := constructGrowthPath(valModelThreeStage, 12, 2, 10, 11, 15)
-	baseScore := scoreSignals(baseIn.A, baseIn.DownsideDispersion, baseIn.StabilityAvailable, baseIn.ROEVals)
-	base := buildBaseScenario(baseIn, paramsFromPath(basePath), basePath, baseScore.Score, "")
-	if base.Model != valModelThreeStage || base.ModelDegraded {
-		t.Errorf("基准档不应被保守档的降级影响：model=%s degraded=%v", base.Model, base.ModelDegraded)
-	}
-}
-
-// TestApplyValuationRecommendationOverridesR15 AI 返回脏 scenarios/growth_weights/beta/价格字段，
-// 最终一律以后端 rec 为准；rationale 保留（FR-38/AC-25）。
-func TestApplyValuationRecommendationOverridesR15(t *testing.T) {
-	raw := `{"scores":[{"dimension":"盈利能力","score":88,"comment":""},{"dimension":"偿债能力","score":90,"comment":""},{"dimension":"现金获取能力","score":85,"comment":""},{"dimension":"经营效率","score":76,"comment":""},{"dimension":"成长能力","score":82,"comment":""}],"conclusion":"c","industry":{"name":"n"},"valuation":{"model":"zero","discount_rate":1,"beta":9,"scenarios":[{"key":"dirty","name":"脏","discount_rate":99}],"growth_weights":{"history":9,"forward":9,"macro":9},"growth_damping":99,"fcf_series":[{"year":1999,"operating_cash":1,"preservation_capex":1,"fcf":0}],"effective_tax_rate":99,"rationale":"大模型写的理由"}}`
+// TestApplyValuationRecommendationOverridesR19 AI 脏值被整体覆盖，仅保留清洗后的 rationale。
+func TestApplyValuationRecommendationOverridesR19(t *testing.T) {
+	balance, cashflow, income := recommendFixture()
+	rec := RecommendValuation(ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 100e8,
+	})
+	raw := `{
+		"scores":[{"dimension":"盈利能力","score":88,"comment":""},{"dimension":"偿债能力","score":90,"comment":""},
+		{"dimension":"现金获取能力","score":85,"comment":""},{"dimension":"经营效率","score":76,"comment":""},
+		{"dimension":"成长能力","score":82,"comment":""}],
+		"conclusion":"c","industry":{"name":"n"},
+		"valuation":{"model":"zero","discount_rate":1,"industry_type":"cyclical",
+		"company_risks":[{"type":"liquidity","severity":"high","note":"现金储备偏紧"}],
+		"rationale":"公司现金流稳健。折现率为 9.0%。"}
+	}`
 	res, err := ParseAIResult(raw)
 	if err != nil {
-		t.Fatalf("解析失败: %v", err)
+		t.Fatalf("解析失败：%v", err)
 	}
-	balance, cashflow, income := recommendFixture()
-	rec := RecommendValuation(balance, cashflow, income)
+	if len(res.Valuation.CompanyRisks) != 1 {
+		t.Fatalf("应解析出 1 条风险项：%+v", res.Valuation.CompanyRisks)
+	}
 	ApplyValuationRecommendation(&res, rec)
-
 	v := res.Valuation
-	if !reflect.DeepEqual(v.Scenarios, rec.Scenarios) {
-		t.Errorf("scenarios 未以后端为准：%+v", v.Scenarios)
+	if v.Model != rec.Model || v.DiscountRate != round1(rec.DiscountRate) {
+		t.Errorf("模型/折现率未覆盖：%+v", v)
 	}
-	if v.GrowthWeights != rec.GrowthWeights {
-		t.Errorf("growth_weights 未以后端为准：%+v", v.GrowthWeights)
+	if len(v.CompanyRisks) != 0 {
+		t.Errorf("AI 输入通道应清空：%+v", v.CompanyRisks)
 	}
-	if v.ScenarioBandSource != rec.ScenarioBandSource ||
-		math.Abs(v.ScenarioBandRaw-round2(rec.ScenarioBandRaw)) > 1e-12 {
-		t.Errorf("scenario_band_source/raw 未以后端为准：%q/%v", v.ScenarioBandSource, v.ScenarioBandRaw)
+	if v.Rationale != "公司现金流稳健。" {
+		t.Errorf("含数字句子应丢弃：%q", v.Rationale)
 	}
-	if v.Beta != rec.Beta || v.DiscountRate != rec.DiscountRate {
-		t.Errorf("beta/折现率未以后端为准：%v/%v", v.Beta, v.DiscountRate)
-	}
-	if math.Abs(v.GrowthDamping-round1(rec.GrowthDamping)) > 1e-12 {
-		t.Errorf("growth_damping 未按 1 位小数回填：%v", v.GrowthDamping)
-	}
-	if !reflect.DeepEqual(v.FCFSeries, rec.FCFSeries) {
-		t.Errorf("fcf_series 未以后端为准：%+v", v.FCFSeries)
-	}
-	if want := round2(rec.EffectiveTaxRate * 100); math.Abs(v.EffectiveTaxRate-want) > 1e-9 {
-		t.Errorf("effective_tax_rate 应为百分数 %.2f，实际 %v", want, v.EffectiveTaxRate)
-	}
-	if v.Rationale != "大模型写的理由" {
-		t.Errorf("rationale 应保留大模型文本，实际 %q", v.Rationale)
-	}
-}
 
-// TestValuationPromptScenarioSummary prompt 含三档摘要与「不得修改数字」句；
-// 前瞻不可用时不编造 0%（FR-40）。
-func TestValuationPromptScenarioSummary(t *testing.T) {
-	balance, cashflow, income := recommendFixture()
-	rec := RecommendValuation(balance, cashflow, income)
-	_, user := BuildAIPrompt(sampleAnalysis(), model.Quote{Name: "测试公司", Code: "600000"}, "low", nil, rec)
-
-	for _, want := range []string{
-		"三档参数（后端确定性计算，只能解释，不得生成或修改任何数字）",
-		"不得输出不同数值、概率或目标价",
-		"与单点输出一致",
-		"带宽来源：",
-		"g1=",
+	// JSON 契约：不再出现三档/旧字段。
+	buf, _ := json.Marshal(v)
+	for _, banned := range []string{
+		"scenario", "growth_weights", "wacc_baseline", `"risk_premium"`, "capex_coverage", "delta_nwc",
 	} {
-		if !strings.Contains(user, want) {
-			t.Errorf("prompt 缺少三档说明 %q", want)
+		if strings.Contains(string(buf), banned) {
+			t.Errorf("JSON 不应含旧字段 %q：%s", banned, buf)
 		}
-	}
-	if strings.Contains(user, "- 前瞻：不可用") {
-		t.Errorf("前瞻不可用不应输出伪造的 0%% 行：%s", user)
 	}
 }
 
-// TestScenarioDegenerateKeepsTerminal band_g=0（负增长/零增长）时增长与终值均不分档：
-// 三档 A、g∞、模型相同，DeltaGrowth=0，仅折现率不同；终值偏移不得产生 range 约束（Q8）。
-func TestScenarioDegenerateKeepsTerminal(t *testing.T) {
-	in := scenarioTestInput()
-	in.A, in.RawA, in.Discount, in.GInf, in.Macro = -2, -2, 10.5, 0, 4.5
-	in.SGR, in.SGROK = 0, false
-	in.IsCyclical, in.Position, in.Delta = true, -1, 1
-	in.Fwd, in.ROEVals = forwardAnchor{}, []float64{-3}
-	bands := computeScenarioBands(in.A, in.A, in.Delta, false, in.Fwd, valModelZero)
-	if bands.Growth != 0 || bands.Source != "degenerate" {
-		t.Fatalf("负增长应退化带宽：growth=%v source=%s", bands.Growth, bands.Source)
-	}
-	scenes := buildScenariosForTest(in, bands)
-
-	base := scenes[1]
-	for _, s := range []model.ValuationScenario{scenes[0], scenes[2]} {
-		if s.TerminalGrowth != base.TerminalGrowth {
-			t.Errorf("%s 档终值应保持 %v，实际 %v", s.Name, base.TerminalGrowth, s.TerminalGrowth)
-		}
-		if s.GrowthAnchor != base.GrowthAnchor {
-			t.Errorf("%s 档 A 应保持 %v，实际 %v", s.Name, base.GrowthAnchor, s.GrowthAnchor)
-		}
-		if s.Model != base.Model {
-			t.Errorf("%s 档模型应保持 %s，实际 %s", s.Name, base.Model, s.Model)
-		}
-		if s.DeltaGrowth != 0 {
-			t.Errorf("%s 档 DeltaGrowth 应为 0，实际 %v", s.Name, s.DeltaGrowth)
-		}
-		if containsString(s.CappedBy, "range") {
-			t.Errorf("%s 档不应因终值偏移产生 range：%v", s.Name, s.CappedBy)
-		}
-	}
-	if scenes[0].DiscountRate <= base.DiscountRate || scenes[2].DiscountRate >= base.DiscountRate {
-		t.Errorf("仍应仅折现率分档：%v/%v/%v",
-			scenes[0].DiscountRate, base.DiscountRate, scenes[2].DiscountRate)
-	}
-	if bands.Raw != 0 {
-		t.Errorf("无历史/前瞻锚时原始分歧应为 0，实际 %v", bands.Raw)
-	}
-}
-
-// TestScenarioJSONContract 对外契约：capped_by 为空也输出 []，delta=0 不省略；
-// applicable=false 仍返回 3 档；重复调用逐字段一致。
-func TestScenarioJSONContract(t *testing.T) {
+// TestRecommendValuationR19Deterministic 同输入多次推导完全一致，且关键口径闭合。
+func TestRecommendValuationR19Deterministic(t *testing.T) {
 	balance, cashflow, income := recommendFixture()
-	rec := RecommendValuation(balance, cashflow, income)
-
-	base := rec.Scenarios[1]
-	if base.CappedBy == nil || len(base.CappedBy) != 0 {
-		t.Errorf("基准档 capped_by 应为非 nil 空切片：%#v", base.CappedBy)
+	input := ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 100e8,
 	}
-	raw, err := json.Marshal(base)
-	if err != nil {
-		t.Fatalf("序列化情景失败：%v", err)
+	a := RecommendValuation(input)
+	b := RecommendValuation(input)
+	if !jsonEqual(a.Params, b.Params) || a.DiscountRate != b.DiscountRate ||
+		a.GrowthAnchor.Final != b.GrowthAnchor.Final || a.FCFBaseValue != b.FCFBaseValue {
+		t.Errorf("两次推导不一致：%+v / %+v", a, b)
 	}
-	for _, want := range []string{`"capped_by":[]`, `"delta_growth":0`, `"delta_discount":0`} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("情景 JSON 缺少 %s：%s", want, raw)
-		}
+	if a.GrowthAnchor.WeightOK && math.Abs(a.GrowthAnchor.WeightSum-1) > 1e-9 {
+		t.Errorf("权重合计应为 1：%+v", a.GrowthAnchor)
 	}
-	for _, s := range rec.Scenarios {
-		if s.CappedBy == nil {
-			t.Errorf("%s 档 capped_by 不得为 null", s.Name)
-		}
+	if a.DiscountRate < valDiscountRateMin || a.DiscountRate > valDiscountRateMax {
+		t.Errorf("r 越界：%v", a.DiscountRate)
 	}
-
-	// applicable=false（最新年经营现金流为负）仍输出 3 档。
-	*cashflow[len(cashflow)-1].Fields["NETCASH_OPERATE"] = -1
-	notApplicable := RecommendValuation(balance, cashflow, income)
-	if notApplicable.Applicable {
-		t.Fatal("最新年经营现金流为负应判为不适用")
-	}
-	if len(notApplicable.Scenarios) != 3 {
-		t.Errorf("不适用时仍应输出 3 档，实际 %d", len(notApplicable.Scenarios))
-	}
-
-	// 确定性：同一输入重复调用逐字段相同。
-	first := RecommendValuation(balance, cashflow, income)
-	second := RecommendValuation(balance, cashflow, income)
-	if !reflect.DeepEqual(first, second) {
-		t.Errorf("重复调用结果不一致：\n%+v\n%+v", first, second)
+	if a.BaseYear != 2024 {
+		t.Errorf("基期年 = %d，期望 2024", a.BaseYear)
 	}
 }
 
-// TestScenarioFCFDiscreteAnchors FR-38：Low/High 离散锚，
-// 保守=min(base,Low)、基准=base、乐观=max(base,High)，依据取实际生效的那个。
-func TestScenarioFCFDiscreteAnchors(t *testing.T) {
-	series := []model.FCFYearPoint{
-		{Year: 2020, FCF: 130e8},
-		{Year: 2021, FCF: 120e8},
-		{Year: 2022, FCF: 110e8},
-		{Year: 2023, FCF: 100e8},
-		{Year: 2024, FCF: 90e8},
-	}
-	anchor := newFCFScenarioAnchor(110e8, series, valFCFMedian)
-	if !anchor.Available {
-		t.Fatalf("非空且非 custom 的序列应可用于离散锚定：%+v", anchor)
-	}
-	if math.Abs(anchor.Low-90e8) > 1e-9 || math.Abs(anchor.High-130e8) > 1e-9 {
-		t.Fatalf("离散锚计算错误：%+v", anchor)
-	}
-
-	in := scenarioTestInput()
-	in.BaseFCF, in.FCFLow, in.FCFHigh = anchor.Base, anchor.Low, anchor.High
-	in.FCFAnchorOK, in.FCFMode = anchor.Available, valFCFMedian
-	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
-	if len(scenes) != 3 {
-		t.Fatalf("三档长度应为 3，实际 %d", len(scenes))
-	}
-
-	// 下降序列不再因「中位数/最近一年」逻辑 collapse：保守锚最低年、乐观锚最高年。
-	if math.Abs(scenes[0].BaseFCF-90e8) > 1e-9 || scenes[0].BaseFCFBasis != "近年最低" {
-		t.Errorf("保守档应取 min(110,90)=90 亿（近年最低），实际 %v / %q",
-			scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
-	}
-	if math.Abs(scenes[1].BaseFCF-110e8) > 1e-9 || scenes[1].BaseFCFBasis != "当前推荐" {
-		t.Errorf("基准档应保持推荐值 110 亿（当前推荐），实际 %v / %q",
-			scenes[1].BaseFCF/1e8, scenes[1].BaseFCFBasis)
-	}
-	if math.Abs(scenes[2].BaseFCF-130e8) > 1e-9 || scenes[2].BaseFCFBasis != "近年最高" {
-		t.Errorf("乐观档应取 max(110,130)=130 亿（近年最高），实际 %v / %q",
-			scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-}
-
-// TestScenarioFCFCycleClamp FR-38：强周期穿越低点/高点不做比例 clamp；
-// 非周期/稳定档位收口到 base × [0.75, 1.25]；序列极差过小视为无离散。
-func TestScenarioFCFCycleClamp(t *testing.T) {
-	bands := scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5}
-	newInput := func(base, low, high float64, strongCyclical bool) scenarioInput {
-		in := scenarioTestInput()
-		in.BaseFCF, in.FCFLow, in.FCFHigh = base, low, high
-		in.FCFAnchorOK, in.FCFMode, in.FCFStrongCyclical = true, valFCFMedian, strongCyclical
-		return in
-	}
-
-	// 强周期：base=100、Low=30、High=200 → 30/200，不做 ±25% clamp。
-	scenes := buildScenariosForTest(newInput(100e8, 30e8, 200e8, true), bands)
-	if scenes[0].BaseFCF != 30e8 || scenes[0].BaseFCFBasis != "近年最低" {
-		t.Errorf("强周期保守档应取 30 亿（近年最低），实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != 200e8 || scenes[2].BaseFCFBasis != "近年最高" {
-		t.Errorf("强周期乐观档应取 200 亿（近年最高），实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-
-	// 非周期且低点在 ±25% 内：base=100、Low=95、High=105 → 95/105。
-	scenes = buildScenariosForTest(newInput(100e8, 95e8, 105e8, false), bands)
-	if scenes[0].BaseFCF != 95e8 || scenes[0].BaseFCFBasis != "近年最低" {
-		t.Errorf("非周期保守档应取 95 亿（近年最低），实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != 105e8 || scenes[2].BaseFCFBasis != "近年最高" {
-		t.Errorf("非周期乐观档应取 105 亿（近年最高），实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-
-	// 非周期单年异常低点：Low=20、base=100 → 保守 clamp 到 75；乐观仍锚 High=105。
-	scenes = buildScenariosForTest(newInput(100e8, 20e8, 105e8, false), bands)
-	if scenes[0].BaseFCF != 75e8 || scenes[0].BaseFCFBasis != "非周期 clamp（±25%）" {
-		t.Errorf("非周期异常低点应 clamp 到 75 亿，实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != 105e8 || scenes[2].BaseFCFBasis != "近年最高" {
-		t.Errorf("非周期乐观档应取 105 亿（近年最高），实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-
-	// 非周期单年异常高点：High=300、base=100 → 乐观 clamp 到 125；保守仍锚 Low=95。
-	scenes = buildScenariosForTest(newInput(100e8, 95e8, 300e8, false), bands)
-	if scenes[0].BaseFCF != 95e8 || scenes[0].BaseFCFBasis != "近年最低" {
-		t.Errorf("非周期保守档应取 95 亿（近年最低），实际 %v / %q", scenes[0].BaseFCF/1e8, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != 125e8 || scenes[2].BaseFCFBasis != "非周期 clamp（±25%）" {
-		t.Errorf("非周期异常高点应 clamp 到 125 亿，实际 %v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-
-	// 无离散：|High−Low| ≤ base×5% → 三档同取 base，依据「无离散」。
-	scenes = buildScenariosForTest(newInput(100e8, 98e8, 103e8, false), bands)
-	for i, s := range scenes {
-		if s.BaseFCF != 100e8 {
-			t.Errorf("无离散第 %d 档应取基准 100 亿，实际 %v", i, s.BaseFCF/1e8)
-		}
-	}
-	if scenes[0].BaseFCFBasis != "无离散" || scenes[2].BaseFCFBasis != "无离散" {
-		t.Errorf("无离散依据应一致：%q / %q", scenes[0].BaseFCFBasis, scenes[2].BaseFCFBasis)
-	}
-
-	// base ≤ 0 也按无离散处理（避免除零），三档同取 base。
-	scenes = buildScenariosForTest(newInput(0, -5e8, 10e8, false), bands)
-	if scenes[0].BaseFCF != 0 || scenes[0].BaseFCFBasis != "无离散" || scenes[2].BaseFCFBasis != "无离散" {
-		t.Errorf("base 非正时应按无离散退回基准：%v / %q / %q",
-			scenes[0].BaseFCF, scenes[0].BaseFCFBasis, scenes[2].BaseFCFBasis)
-	}
-}
-
-// TestScenarioFCFAnchorGuards FR-38 守卫：Low/High ≤ 0 或序列不可用（含 custom）时退回 base。
-func TestScenarioFCFAnchorGuards(t *testing.T) {
-	const base = 120e8
-	bands := scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5}
-
-	newInput := func() scenarioInput {
-		in := scenarioTestInput()
-		in.BaseFCF, in.FCFAnchorOK, in.FCFMode = base, true, valFCFMedian
-		return in
-	}
-
-	// Low ≤ 0：保守档退回 base，乐观档仍可锚到正 High。
-	in := newInput()
-	in.FCFLow, in.FCFHigh = -5e8, 140e8
-	scenes := buildScenariosForTest(in, bands)
-	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "近年最低非正，回退基准" {
-		t.Errorf("最低值为非正时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != 140e8 || scenes[2].BaseFCFBasis != "近年最高" {
-		t.Errorf("最低值非正不应影响乐观档：%v / %q", scenes[2].BaseFCF/1e8, scenes[2].BaseFCFBasis)
-	}
-
-	// High ≤ 0：乐观档退回 base。
-	in = newInput()
-	in.FCFLow, in.FCFHigh = -10e8, -1e8
-	scenes = buildScenariosForTest(in, bands)
-	if scenes[2].BaseFCF != base || scenes[2].BaseFCFBasis != "近年最高非正，回退基准" {
-		t.Errorf("最高值非正时乐观档应退回基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
-	}
-
-	// fcf_series 为空：三档都取 base。
-	empty := newFCFScenarioAnchor(base, nil, valFCFLatest)
-	if empty.Available {
-		t.Fatalf("空序列不应可用于离散锚定：%+v", empty)
-	}
-	in = newInput()
-	in.FCFAnchorOK, in.FCFLow, in.FCFHigh, in.FCFMode = empty.Available, empty.Low, empty.High, valFCFLatest
-	scenes = buildScenariosForTest(in, bands)
-	for i, s := range scenes {
-		if s.BaseFCF != base {
-			t.Errorf("空序列第 %d 档应取基准 %v，实际 %v", i, base, s.BaseFCF)
-		}
-	}
-	if scenes[0].BaseFCFBasis != "无离散" || scenes[2].BaseFCFBasis != "无离散" {
-		t.Errorf("空序列依据应为「无离散」：%q / %q", scenes[0].BaseFCFBasis, scenes[2].BaseFCFBasis)
-	}
-
-	// custom：基期 FCF 由规则直接给出，不参与离散锚定。
-	custom := newFCFScenarioAnchor(base, []model.FCFYearPoint{{Year: 2022, FCF: 300e8}}, valFCFCustom)
-	in = newInput()
-	in.FCFAnchorOK, in.FCFLow, in.FCFHigh, in.FCFMode = custom.Available, custom.Low, custom.High, valFCFCustom
-	scenes = buildScenariosForTest(in, bands)
-	if scenes[0].BaseFCF != base || scenes[0].BaseFCFBasis != "无离散（自定义）" {
-		t.Errorf("custom 时保守档应退回基准：%v / %q", scenes[0].BaseFCF, scenes[0].BaseFCFBasis)
-	}
-	if scenes[2].BaseFCF != base || scenes[2].BaseFCFBasis != "无离散（自定义）" {
-		t.Errorf("custom 时乐观档应退回基准：%v / %q", scenes[2].BaseFCF, scenes[2].BaseFCFBasis)
-	}
-}
-
-// TestApplyValuationRecommendationCarriesScenarioFCF FR-38：三档 base_fcf 随 Scenarios 确定性回填，
-// 且 JSON 字段恒定输出。
-func TestApplyValuationRecommendationCarriesScenarioFCF(t *testing.T) {
-	balance, cashflow, income := recommendFixture()
-	rec := RecommendValuation(balance, cashflow, income)
-	if len(rec.Scenarios) != 3 {
-		t.Fatalf("三档长度应为 3，实际 %d", len(rec.Scenarios))
-	}
-
-	res := model.AIAnalysisResult{}
-	ApplyValuationRecommendation(&res, rec)
-	for i, want := range rec.Scenarios {
-		got := res.Valuation.Scenarios[i]
-		if got.BaseFCF != want.BaseFCF || got.BaseFCFBasis != want.BaseFCFBasis {
-			t.Errorf("第 %d 档 base_fcf 未回填：got %v/%q want %v/%q",
-				i, got.BaseFCF, got.BaseFCFBasis, want.BaseFCF, want.BaseFCFBasis)
-		}
-		if got.BaseFCFBasis == "" {
-			t.Errorf("第 %d 档 base_fcf_basis 不应为空", i)
-		}
-		raw, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("序列化失败：%v", err)
-		}
-		if !strings.Contains(string(raw), `"base_fcf":`) || !strings.Contains(string(raw), `"base_fcf_basis":`) {
-			t.Errorf("第 %d 档 JSON 缺少 base_fcf 字段：%s", i, raw)
-		}
-	}
-	if res.Valuation.Scenarios[1].BaseFCF != rec.FCFBaseValue {
-		t.Errorf("基准档 base_fcf 应等于 fcf_base_value：%v vs %v",
-			res.Valuation.Scenarios[1].BaseFCF, rec.FCFBaseValue)
-	}
-}
-
-func containsString(items []string, want string) bool {
-	for _, it := range items {
-		if it == want {
-			return true
-		}
-	}
-	return false
+func jsonEqual(a, b any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }

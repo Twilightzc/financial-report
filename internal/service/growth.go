@@ -15,9 +15,6 @@ const (
 	r18FadeRatePP           = 1.5  // 均值回归速度 pp/年
 	r18FadeMinYears         = 3    // 回归年限下限
 	r18FadeMaxYears         = 10   // 回归年限上限
-	r18EnvelopePP           = 5.0  // M1 包络（≥2 个独立锚）
-	r18SingleEnvelopePP     = 3.0  // M1 包络（仅 1 个独立锚）
-	r18SoftCapPP            = 5.0  // SGR/前瞻软上限 = max(SGR, A_fwd 或 A) + 5
 	r18CycleLambdaPP        = 10.0 // Δ_cycle = -clamp(pos × λ, ±cap)
 	r18CycleCapPP           = 6.0
 	r18CycleMinYears        = 3 // 周期位置至少 3 年
@@ -70,17 +67,9 @@ type forwardAnchor struct {
 	Warning      string
 }
 
-// compositeAnchor 复合锚 A 与 M1 包络。
-type compositeAnchor struct {
-	A            float64
-	RawA         float64 // clamp 前的原始复合锚（0.5 网格），供乐观档放宽上限时使用
-	Insufficient bool
-	Envelope     float64 // M1 包络：5 或 3（pp）
-	AnchorCount  int     // 有效独立锚数量（动态宏观才计数）
-	WHW          float64 // 历史锚权重 0–1
-	WFwd         float64 // 前瞻锚权重 0–1
-	WMacro       float64 // 宏观锚权重 0–1
-	Warning      string
+// growthAnchorWeights 历史/前瞻/宏观三锚权重（与需求文档权重表一致）。
+type growthAnchorWeights struct {
+	History, Forward, Macro float64
 }
 
 // structuralMetrics 结构性负增长判据所需的窗口指标。
@@ -123,7 +112,7 @@ func resolveMacroAnchor(gdp model.GDPAnchor) macroAnchor {
 	fallback := macroAnchor{
 		Value:   r18GDPFallbackPP,
 		Basis:   "fallback_constant",
-		Warning: "动态 GDP 数据不可用，宏观锚回退 4.5% 常量（fallback_constant）。",
+		Warning: "动态 GDP 数据不可用，宏观锚按 4.5% 常量。",
 	}
 	if !r18DynamicGDPEnabled || !gdp.Available {
 		return fallback
@@ -143,7 +132,7 @@ func resolveMacroAnchor(gdp model.GDPAnchor) macroAnchor {
 		return macroAnchor{
 			Value:   r18GDPFallbackPP,
 			Basis:   "fallback_constant",
-			Warning: "动态 GDP 连续两期异常，回退 4.5% 常量（fallback_constant）。",
+			Warning: "动态 GDP 连续两期异常，宏观锚按 4.5% 常量。",
 			// 与附录 B 文案逐字一致。
 
 		}
@@ -514,75 +503,80 @@ func consensusUnavailableWarning(f forwardAnchor) string {
 	}
 }
 
-// composeGrowthAnchor 三层锚按可靠度加权合成复合锚 A，并给出 M1 包络。
-func composeGrowthAnchor(hist float64, histOK bool, delta float64, fwd forwardAnchor, macro macroAnchor) compositeAnchor {
-	res := compositeAnchor{}
-	histAdj := hist
-	if histOK {
-		histAdj = hist + delta
-	}
-
-	wHist, wFwd, wMacro := 0.0, 0.0, 0.0
+// growthAnchorWeightsFor 按可用锚确定权重（历史 + 前瞻 / 仅历史 / 仅前瞻 / 都不可用）。
+func growthAnchorWeightsFor(histOK bool, fwd forwardAnchor) growthAnchorWeights {
 	switch {
 	case histOK && fwd.Available:
 		if fwd.Reliability == "high" {
-			wHist, wFwd, wMacro = 0.45, 0.45, 0.10
-		} else {
-			wHist, wFwd, wMacro = 0.55, 0.35, 0.10
+			return growthAnchorWeights{History: 0.45, Forward: 0.45, Macro: 0.10}
 		}
+		return growthAnchorWeights{History: 0.55, Forward: 0.35, Macro: 0.10}
 	case histOK:
-		wHist, wMacro = 0.85, 0.15
+		return growthAnchorWeights{History: 0.85, Macro: 0.15}
 	case fwd.Available:
-		wFwd, wMacro = 0.85, 0.15
+		return growthAnchorWeights{Forward: 0.85, Macro: 0.15}
+	default:
+		return growthAnchorWeights{}
 	}
-	res.WHW, res.WFwd, res.WMacro = wHist, wFwd, wMacro
+}
 
-	res.Insufficient = !histOK && !fwd.Available
-	if res.Insufficient {
-		res.A = 0
-		res.Warning = joinWarns([]string{
-			"可用同比增速样本不足（需至少 2 个年报且上年为正），基准增速按 0 计，模型退化为零增长",
-		})
-	} else {
-		raw := wHist*histAdj + wFwd*fwd.Value + wMacro*macro.Value
-		res.RawA = roundHalf(raw)
-		res.A = clampFloat(res.RawA, r18CompositeClampLo, r18CompositeClampHi)
-	}
-
-	res.AnchorCount = 0
+// buildGrowthAnchorTable 三层锚加权合成复合锚 A，并输出可逐行复算的构成表。
+// 恒满足：Σ(Value×Weight)=Raw；Raw+RoundingAdjustment+RangeAdjustment=Final。
+func buildGrowthAnchorTable(hist float64, histOK bool, delta float64, fwd forwardAnchor, macro macroAnchor) model.GrowthAnchorTable {
+	w := growthAnchorWeightsFor(histOK, fwd)
+	histBase := 0.0
+	histAdj := 0.0
 	if histOK {
-		res.AnchorCount++
+		histBase = round2(hist)
+		histAdj = round2(histBase + delta)
 	}
+	fwdValue := 0.0
 	if fwd.Available {
-		res.AnchorCount++
+		fwdValue = round2(fwd.Value)
 	}
-	if macro.Basis == "dynamic_gdp" {
-		res.AnchorCount++
-	}
-	res.Envelope = r18SingleEnvelopePP
-	if res.AnchorCount >= 2 {
-		res.Envelope = r18EnvelopePP
-	}
+	macroValue := round2(macro.Value)
 
-	warns := make([]string, 0, 3)
-	if res.Warning != "" {
-		warns = append(warns, res.Warning)
+	rows := []model.GrowthContribution{
+		{Key: "history", Name: "历史锚（含周期修正）", Value: histAdj, Weight: w.History, Available: histOK},
+		{Key: "forward", Name: "前瞻锚", Value: fwdValue, Weight: w.Forward, Available: fwd.Available},
+		{Key: "macro", Name: "宏观锚", Value: macroValue, Weight: w.Macro, Available: true},
 	}
-	if histOK && fwd.Available && oppositeSigns(histAdj, fwd.Value) {
-		warns = append(warns, "历史锚与前瞻锚方向相反，按权重合成；结果接近 0 时按负增长归因处理。")
+	raw := 0.0
+	weightSum := 0.0
+	for i := range rows {
+		rows[i].Contribution = round2(rows[i].Value * rows[i].Weight)
+		raw += rows[i].Contribution
+		weightSum += rows[i].Weight
+	}
+	raw = round2(raw)
+	weightSum = round2(weightSum)
+
+	table := model.GrowthAnchorTable{
+		Rows:      rows,
+		WeightSum: weightSum,
+		WeightOK:  math.Abs(weightSum-1) < 1e-9,
+		Raw:       raw,
+	}
+	// 历史、前瞻都不可用：权重全 0、A=0、零增长（权重合计视为通过）。
+	if !histOK && !fwd.Available {
+		table.WeightOK = true
+		table.Note = "可用同比增速样本不足，增长锚按 0 计。"
+		return table
+	}
+	table.Rounded = roundHalf(raw)
+	table.Final = clampFloat(table.Rounded, r18CompositeClampLo, r18CompositeClampHi)
+	table.RoundingAdjustment = round2(table.Rounded - table.Raw)
+	table.RangeAdjustment = round2(table.Final - table.Rounded)
+
+	notes := make([]string, 0, 2)
+	if histOK && fwd.Available && oppositeSigns(histAdj, fwdValue) {
+		notes = append(notes, "历史锚与前瞻锚方向相反，按权重合成。")
 	}
 	if !histOK && fwd.Available {
-		warns = append(warns, "历史增速样本不足，复合锚按前瞻+宏观合成。")
+		notes = append(notes, "历史增速样本不足，按前瞻锚与宏观锚合成。")
 	}
-	if !res.Insufficient && res.AnchorCount == 1 {
-		if histOK {
-			warns = append(warns, "仅历史锚可用（前瞻与动态 GDP 均不可用），g1 包络收窄为 A±3pp。")
-		} else {
-			warns = append(warns, "仅前瞻锚可用（历史与动态 GDP 均不可用），g1 包络收窄为 A±3pp。")
-		}
-	}
-	res.Warning = joinWarns(warns)
-	return res
+	table.Note = joinWarns(notes)
+	return table
 }
 
 // oppositeSigns 两个非零值是否异号（0 不构成方向）。
@@ -917,26 +911,48 @@ func capTerminalGrowth(raw, macro, discount, sgr float64, sgrOK bool) float64 {
 	return math.Max(0, floorHalf(g))
 }
 
-// terminalGrowth g∞ = max(0, floorHalf(min(macro, discount−1, SGR)))。
-func terminalGrowth(macro, discount, sgr float64, sgrOK bool) (g float64, warning string) {
+// terminalGrowth g∞ = max(0, floorHalf(min(macro, discount−1, SGR)))，并给出真正生效的约束。
+// constraint 取 macro / sgr / discount / zero（并列时按 sgr > discount > macro 取主约束）。
+func terminalGrowth(macro, discount, sgr float64, sgrOK bool) (g float64, constraint, note string) {
 	gRaw := math.Min(macro, discount-1.0)
 	if sgrOK {
 		gRaw = math.Min(gRaw, sgr)
 	}
-	g = capTerminalGrowth(math.Inf(1), macro, discount, sgr, sgrOK)
+	g = math.Max(0, floorHalf(gRaw))
+	if gRaw <= 0 {
+		return g, "zero", "终值按 0。"
+	}
 
-	switch {
-	case gRaw < 0:
-		return g, "终值上限为负，按 0 处理。"
-	case sgrOK && sgr <= macro+1e-9 && sgr <= discount-1+1e-9:
-		return g, fmt.Sprintf("终值受长期内生增速 SGR %.2f%% 约束，向下取整至 %.2f%%。", sgr, g)
-	case discount-1 <= macro+1e-9 && (!sgrOK || discount-1 <= sgr+1e-9):
-		return g, fmt.Sprintf("终值受折现率−1pp（%.2f%%）约束，向下取整至 %.2f%%。", discount-1, g)
+	type source struct {
+		key string
+		val float64
 	}
-	if !sgrOK {
-		return g, "长期内生增速 SGR 不可用，终值未施加 SGR 约束。"
+	sources := []source{{key: "discount", val: discount - 1.0}, {key: "macro", val: macro}}
+	if sgrOK {
+		// 主约束优先级 sgr > discount > macro：sgr 放最前，比较时同值取先出现者。
+		sources = []source{{key: "sgr", val: sgr}, {key: "discount", val: discount - 1.0}, {key: "macro", val: macro}}
 	}
-	return g, ""
+	primary := sources[0]
+	ties := make([]string, 0, 2)
+	for _, s := range sources[1:] {
+		switch {
+		case s.val < primary.val-1e-9:
+			primary = s
+			ties = ties[:0]
+		case math.Abs(s.val-primary.val) <= 1e-9:
+			ties = append(ties, s.key)
+		}
+	}
+	names := map[string]string{"sgr": "长期内生增速 SGR", "discount": "折现率−1pp", "macro": "宏观锚"}
+	note = fmt.Sprintf("终值受%s约束，向下取整至 %.2f%%。", names[primary.key], g)
+	if len(ties) > 0 {
+		tieNames := make([]string, 0, len(ties))
+		for _, k := range ties {
+			tieNames = append(tieNames, names[k])
+		}
+		note += "与" + strings.Join(tieNames, "、") + "相同。"
+	}
+	return g, primary.key, note
 }
 
 // sustainableGrowthR18 SGR = ROE × 留存率（ROE 已是 %）。
@@ -1038,87 +1054,39 @@ func classifyGrowthModel(A, gap, score float64, insufficient bool, negType strin
 	}
 }
 
-// dampedCandidate 离散度折减（含周期高点减半），返回折减后候选值与实际折减幅度。
-func dampedCandidate(A, dispersion, delta float64) (candidate, d float64) {
-	if A <= 0 {
-		return A, 0
-	}
-	factor := clampFloat(dispersion*valGrowthDampingPerPP, 0, valGrowthDampingMax)
-	d = math.Min(r18EnvelopePP, A*factor)
-	if math.Abs(delta) >= 2.0 {
-		d /= 2 // 周期高点不重复惩罚
-	}
-	return A - d, d
-}
-
-// applyDownwardAdjustments A → g1：离散度折减 + SGR/前瞻软上限 + M1 包络。
-// 返回生效 g1、软上限 cap 与可解释的调整说明（周期项由调用方按位置补充）。
-func applyDownwardAdjustments(A, gap, dispersion, delta float64,
-	fwd forwardAnchor, sgr float64, sgrOK bool, envelope float64) (g1, cap float64, adjustment string) {
-	_ = gap // gap 只用于模型分档；保留参数以固定签名。
-
-	candidate, d := dampedCandidate(A, dispersion, delta)
-
-	base := A
-	if fwd.Available {
-		base = fwd.Value
-	}
-	capRaw := base + r18SoftCapPP
-	if sgrOK {
-		capRaw = math.Max(base, sgr) + r18SoftCapPP
-	}
-	cap = math.Min(30.0, capRaw)
-
-	g1 = math.Min(candidate, cap)
-	g1 = roundHalf(g1)
-	if g1 > cap {
-		g1 = floorHalf(cap)
-	}
-	lower := A - envelope
-	if g1 < lower {
-		g1 = lower
-	}
-
-	// 按 §6.11.3 顺序拼接：离散度 → 软上限（生效/未触发）→ 包络（收口/未触发）。
-	parts := make([]string, 0, 4)
-	if d > 0 {
-		if math.Abs(delta) >= 2.0 {
-			parts = append(parts, fmt.Sprintf(
-				"增速离散度 %.1fpp → 折减减半至 %.1fpp（周期修正≥2pp）", dispersion, d))
-		} else {
-			parts = append(parts, fmt.Sprintf("增速离散度 %.1fpp → 折减 %.1fpp", dispersion, d))
-		}
-	}
+// growthG1 由复合锚 A 得到 g1 与唯一上限约束。
+// capBase = min(30, max(前瞻/ SGR) + 2)；g1 = floorHalf(clamp(A, g∞, capBase))。
+func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constraint, note string) {
+	capBase := 30.0
 	switch {
-	case cap < lower: // 冲突场景：实际按包络下限收口，下一行会写明唯一主导原因。
-		parts = append(parts, fmt.Sprintf("SGR/前瞻软上限 %.1f%% 已触发", cap))
-	case cap < candidate:
-		parts = append(parts, fmt.Sprintf(
-			"SGR/前瞻软上限 %.1f%% 生效，g1 由 %.1f%% 收口至 %.1f%%", cap, candidate, math.Min(candidate, cap)))
-	default:
-		parts = append(parts, fmt.Sprintf("SGR/前瞻软上限 %.1f%% 未触发", cap))
+	case fwdOK && sgrOK:
+		capBase = math.Min(30.0, math.Max(fwd, sgr)+2.0)
+	case fwdOK:
+		capBase = math.Min(30.0, fwd+2.0)
+	case sgrOK:
+		capBase = math.Min(30.0, sgr+2.0)
 	}
+	if capBase < gInf {
+		return gInf, "cap_below_terminal", "上限低于终值，g1 按终值收口。"
+	}
+	g1 = floorHalf(clampFloat(A, gInf, capBase))
 	switch {
-	case cap < lower:
-		parts = append(parts, fmt.Sprintf(
-			"软上限 %.1f%% 低于复合锚 A−%.0fpp 包络下限 %.1f%%，按包络下限收口（唯一主导原因：SGR/前瞻软上限）。",
-			cap, envelope, lower))
-	case candidate < lower:
-		parts = append(parts, fmt.Sprintf(
-			"离散度折减后 %.1f%% 低于 A−%.0fpp 包络下限，按 %.1f%% 收口。", candidate, envelope, lower))
+	case g1 < A-1e-9:
+		return g1, "upper", "g1 受前瞻/SGR +2pp 上限约束。"
+	case A < gInf-1e-9:
+		return g1, "terminal", "g1 按终值收口。"
 	default:
-		parts = append(parts, fmt.Sprintf("A−%.0fpp 包络未触发", envelope))
+		return g1, "none", ""
 	}
-	return g1, cap, joinWarns(parts)
 }
 
 // constructGrowthPath 按模型构造 0.5pp 网格路径；无严格递减解时 three→two→perpetual→zero 降级。
-func constructGrowthPath(model string, A, gInf, gap, g1, discount float64) growthPath {
+func constructGrowthPath(model string, A, gInf, g1, discount float64) growthPath {
 	switch model {
 	case valModelTwoStage:
-		return constructTwoStage(A, gInf, gap, g1, discount, false, "")
+		return constructTwoStage(A, gInf, 0, g1, discount, false, "")
 	case valModelThreeStage:
-		return constructThreeStage(A, gInf, gap, g1, discount)
+		return constructThreeStage(A, gInf, 0, g1, discount)
 	case valModelPerpetual:
 		return constructPerpetual(A, gInf, false, "")
 	default:
@@ -1142,11 +1110,12 @@ func constructPerpetual(A, gInf float64, degraded bool, warning string) growthPa
 }
 
 // constructTwoStage 两阶段：g1 > g∞ 才成立，否则降为永续。
-func constructTwoStage(A, gInf, gap, g1, discount float64, degraded bool, warning string) growthPath {
+// 第三参数为兼容占位（历史调用传 A−g∞），年限始终按 g1−g∞ 计算。
+func constructTwoStage(A, gInf, _ float64, g1, discount float64, degraded bool, warning string) growthPath {
 	path := growthPath{
 		Model:    valModelTwoStage,
 		G1:       g1,
-		N1:       fadeYears(gap),
+		N1:       fadeYears(g1 - gInf),
 		G2:       gInf,
 		GInf:     gInf,
 		Degraded: degraded,
@@ -1164,33 +1133,25 @@ func constructTwoStage(A, gInf, gap, g1, discount float64, degraded bool, warnin
 	return degradedPath
 }
 
-// constructThreeStage 三阶段：n1=ceil(n/2)、n2=floor(n/2)，g2 先取平滑解再取 g∞+1 兜底。
-func constructThreeStage(A, gInf, gap, g1, discount float64) growthPath {
-	nTotal := fadeYears(gap)
+// constructThreeStage 三阶段：n1=ceil(nTotal/2)、n2=nTotal−n1，g2=roundHalf((g1+g∞)/2)。
+// 年限按 g1−g∞ 均值回归；第三参数为兼容占位。无严格递减解时降级两阶段。
+func constructThreeStage(A, gInf, _ float64, g1, discount float64) growthPath {
+	nTotal := fadeYears(g1 - gInf)
 	n1 := (nTotal + 1) / 2
-	n2 := nTotal / 2
-
-	candidates := []float64{
-		math.Min(roundHalf(gInf+gap/2), discount-0.5),
-		gInf + 1.0,
-	}
-	for _, g2 := range candidates {
-		if g1 > g2 && g2 > gInf && g2 < discount {
-			return growthPath{
-				Model:  valModelThreeStage,
-				G1:     g1,
-				N1:     n1,
-				G2:     g2,
-				N2:     n2,
-				GInf:   gInf,
-				NTotal: nTotal,
-			}
+	n2 := nTotal - n1
+	g2 := roundHalf((g1 + gInf) / 2)
+	if g1 > g2 && g2 > gInf && g2 < discount {
+		return growthPath{
+			Model:  valModelThreeStage,
+			G1:     g1,
+			N1:     n1,
+			G2:     g2,
+			N2:     n2,
+			GInf:   gInf,
+			NTotal: nTotal,
 		}
 	}
-	fallbackG2 := candidates[0]
-	path := constructTwoStage(A, gInf, gap, g1, discount, true, fmt.Sprintf(
-		"三阶段参数无严格递减解（g1=%.2f, g2=%.2f），降为两阶段。", g1, fallbackG2))
-	return path
+	return constructTwoStage(A, gInf, 0, g1, discount, true, "阶段参数无严格递减解，已降级为两阶段。")
 }
 
 // verifyC4a 硬约束：g∞ ≤ SGR（可用时）且 g∞ < 折现率。

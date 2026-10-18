@@ -103,10 +103,11 @@ func TestComputeGDPTTM(t *testing.T) {
 }
 
 func TestResolveMacroAnchor(t *testing.T) {
-	// 数据不可用 → 回退 4.5% 常量。
+	// 数据不可用 → 宏观锚按 4.5% 常量；告警文案不得暴露内部枚举。
 	m := resolveMacroAnchor(model.GDPAnchor{})
-	if m.Value != r18GDPFallbackPP || m.Basis != "fallback_constant" || !strings.Contains(m.Warning, "fallback_constant") {
-		t.Errorf("缺数据应回退 4.5%%：%+v", m)
+	if m.Value != r18GDPFallbackPP || m.Basis != "fallback_constant" ||
+		!strings.Contains(m.Warning, "4.5% 常量") || strings.Contains(m.Warning, "fallback_constant") {
+		t.Errorf("缺数据应按 4.5%% 常量：%+v", m)
 	}
 
 	// 正常路径：TTM 同比 10% → 0.5pp 网格 10.0，as_of=最新季末。
@@ -218,48 +219,63 @@ func TestResolveConsensus(t *testing.T) {
 	}
 }
 
-func TestComposeGrowthAnchor(t *testing.T) {
+func TestBuildGrowthAnchorTable(t *testing.T) {
 	macroDynamic := macroAnchor{Value: 4.5, Basis: "dynamic_gdp", AsOf: "2026-06-30"}
 	macroFallback := macroAnchor{Value: 4.5, Basis: "fallback_constant"}
 
-	// 历史 + 前瞻(high) + 动态宏观：0.45/0.45/0.10。
-	c := composeGrowthAnchor(10, true, 0, forwardAnchor{Available: true, Reliability: "high", Value: 20}, macroDynamic)
-	if c.A != 14 || c.Insufficient || c.Envelope != 5 || c.AnchorCount != 3 {
-		t.Errorf("三层锚 = %+v，期望 A=14/envelope=5/anchors=3", c)
+	// 历史 + 前瞻(high) + 动态宏观：0.45/0.45/0.10 → 4.5+9.0+0.45=13.95 → 14.0。
+	tab := buildGrowthAnchorTable(10, true, 0,
+		forwardAnchor{Available: true, Reliability: "high", Value: 20}, macroDynamic)
+	if tab.Final != 14 || tab.Raw != 13.95 || !tab.WeightOK || tab.WeightSum != 1 {
+		t.Fatalf("三层锚 = %+v，期望 raw=13.95/final=14/weight=1", tab)
 	}
-	// 前瞻(medium)：0.55/0.35/0.10 → 0.55×10+0.35×20+0.10×4.5=13.0。
-	if c := composeGrowthAnchor(10, true, 0, forwardAnchor{Available: true, Reliability: "medium", Value: 20}, macroDynamic); c.A != 13 {
-		t.Errorf("medium 权重 A = %v，期望 13", c.A)
+	if tab.RoundingAdjustment != 0.05 || tab.RangeAdjustment != 0 {
+		t.Errorf("对账项 = %+.2f/%+.2f", tab.RoundingAdjustment, tab.RangeAdjustment)
 	}
-	// 仅历史锚 + 回退宏观：0.85/0.15 → 9.0；包络收窄为 3。
-	c = composeGrowthAnchor(10, true, 0, forwardAnchor{}, macroFallback)
-	if c.A != 9 || c.Envelope != 3 || c.AnchorCount != 1 || !strings.Contains(c.Warning, "仅历史锚") {
-		t.Errorf("仅历史锚 = %+v，期望 A=9/envelope=3", c)
+	for _, row := range tab.Rows {
+		if row.Contribution != round2(row.Value*row.Weight) {
+			t.Errorf("贡献行不可复算：%+v", row)
+		}
 	}
-	// 仅前瞻锚 + 回退宏观：0.85/0.15。
-	if c := composeGrowthAnchor(0, false, 0, forwardAnchor{Available: true, Reliability: "high", Value: 20}, macroFallback); c.A != 17.5 || !strings.Contains(c.Warning, "仅前瞻锚") {
-		t.Errorf("仅前瞻锚 = %+v，期望 A=17.5", c)
+	// 前瞻(medium)：0.55/0.35/0.10 → 5.5+7.0+0.45=12.95 → 13.0。
+	if tab := buildGrowthAnchorTable(10, true, 0,
+		forwardAnchor{Available: true, Reliability: "medium", Value: 20}, macroDynamic); tab.Final != 13 {
+		t.Errorf("medium 权重 A = %v，期望 13", tab.Final)
 	}
-	// 周期修正只作用于历史锚：A=0.85×(10−3)+0.15×4.5=6.625 → 6.5。
-	if c := composeGrowthAnchor(10, true, -3, forwardAnchor{}, macroFallback); c.A != 6.5 {
-		t.Errorf("历史锚周期修正后 A = %v，期望 6.5", c.A)
+	// 仅历史锚 + 回退宏观：0.85/0.15 → 8.5+0.675=9.175 → 9.0。
+	tab = buildGrowthAnchorTable(10, true, 0, forwardAnchor{}, macroFallback)
+	if tab.Final != 9 || tab.WeightSum != 1 || tab.WeightOK != true {
+		t.Errorf("仅历史锚 = %+v，期望 A=9/weight=1", tab)
+	}
+	// 仅前瞻锚 + 回退宏观：0.85/0.15 → 17+0.675=17.675 → 17.5。
+	tab = buildGrowthAnchorTable(0, false, 0,
+		forwardAnchor{Available: true, Reliability: "high", Value: 20}, macroFallback)
+	if tab.Final != 17.5 || !strings.Contains(tab.Note, "历史增速样本不足") {
+		t.Errorf("仅前瞻锚 = %+v，期望 A=17.5", tab)
+	}
+	// 周期修正只作用于历史锚：0.85×(10−3)+0.15×4.5=6.625 → 6.5。
+	if tab := buildGrowthAnchorTable(10, true, -3, forwardAnchor{}, macroFallback); tab.Final != 6.5 {
+		t.Errorf("历史锚周期修正后 A = %v，期望 6.5", tab.Final)
 	}
 	// 方向相反告警。
-	c = composeGrowthAnchor(10, true, 0, forwardAnchor{Available: true, Reliability: "medium", Value: -2}, macroDynamic)
-	if !strings.Contains(c.Warning, "方向相反") {
-		t.Errorf("异号应告警：%q", c.Warning)
+	tab = buildGrowthAnchorTable(10, true, 0,
+		forwardAnchor{Available: true, Reliability: "medium", Value: -2}, macroDynamic)
+	if !strings.Contains(tab.Note, "方向相反") {
+		t.Errorf("异号应告警：%q", tab.Note)
 	}
-	// 样本不足 → insufficient + A=0。
-	c = composeGrowthAnchor(0, false, 0, forwardAnchor{}, macroFallback)
-	if !c.Insufficient || c.A != 0 || !strings.Contains(c.Warning, "样本不足") {
-		t.Errorf("样本不足 = %+v", c)
+	// 样本不足 → A=0、权重校验通过。
+	tab = buildGrowthAnchorTable(0, false, 0, forwardAnchor{}, macroFallback)
+	if tab.Final != 0 || !tab.WeightOK || !strings.Contains(tab.Note, "样本不足") {
+		t.Errorf("样本不足 = %+v", tab)
 	}
 	// 收口 [-5,30]。
-	if c := composeGrowthAnchor(100, true, 0, forwardAnchor{Available: true, Reliability: "high", Value: 100}, macroDynamic); c.A != 30 {
-		t.Errorf("上溢应收口 30，实际 %v", c.A)
+	if tab := buildGrowthAnchorTable(100, true, 0,
+		forwardAnchor{Available: true, Reliability: "high", Value: 100}, macroDynamic); tab.Final != 30 {
+		t.Errorf("上溢应收口 30，实际 %v", tab.Final)
 	}
-	if c := composeGrowthAnchor(-50, true, 0, forwardAnchor{Available: true, Reliability: "high", Value: -50}, macroDynamic); c.A != -5 {
-		t.Errorf("下溢应收口 -5，实际 %v", c.A)
+	if tab := buildGrowthAnchorTable(-50, true, 0,
+		forwardAnchor{Available: true, Reliability: "high", Value: -50}, macroDynamic); tab.Final != -5 {
+		t.Errorf("下溢应收口 -5，实际 %v", tab.Final)
 	}
 }
 
@@ -502,34 +518,38 @@ func TestFadeYears(t *testing.T) {
 
 func TestTerminalGrowth(t *testing.T) {
 	cases := []struct {
-		name     string
-		macro    float64
-		discount float64
-		sgr      float64
-		sgrOK    bool
-		want     float64
-		words    string
+		name       string
+		macro      float64
+		discount   float64
+		sgr        float64
+		sgrOK      bool
+		want       float64
+		constraint string
+		words      string
 	}{
-		{"宏观锚最低", 4.5, 10, 6.8, true, 4.5, ""},
-		{"SGR 约束", 7, 8, 6.8, true, 6.5, "SGR"},
-		{"折现率约束", 7, 6.5, 9, true, 5.5, "折现率"},
-		{"SGR 不可用", 7, 10, 0, false, 7, "SGR 不可用"},
-		{"折现率下限", 4.5, 4.2, 0, false, 3, "折现率"},
-		{"上限为负", -1, 10, 0, false, 0, "终值上限为负"},
-		{"网格向下取整", 4.7, 10, 0, false, 4.5, "SGR 不可用"},
+		{"宏观锚最低", 4.5, 10, 6.8, true, 4.5, "macro", "宏观锚"},
+		{"SGR 约束", 7, 8, 6.8, true, 6.5, "sgr", "SGR"},
+		{"折现率约束", 7, 6.5, 9, true, 5.5, "discount", "折现率"},
+		{"SGR 不可用", 7, 10, 0, false, 7, "macro", "宏观锚"},
+		{"折现率下限", 4.5, 4.2, 0, false, 3, "discount", "折现率"},
+		{"上限为负", -1, 10, 0, false, 0, "zero", "终值按 0"},
+		{"网格向下取整", 4.7, 10, 0, false, 4.5, "macro", "向下取整"},
 	}
 	for _, c := range cases {
-		got, w := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK)
+		got, constraint, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK)
 		if got != c.want {
 			t.Errorf("%s：g∞ = %v，期望 %v", c.name, got, c.want)
 		}
-		if c.words != "" && !strings.Contains(w, c.words) {
-			t.Errorf("%s：warning = %q 应含 %q", c.name, w, c.words)
+		if constraint != c.constraint {
+			t.Errorf("%s：constraint = %q，期望 %q", c.name, constraint, c.constraint)
+		}
+		if c.words != "" && !strings.Contains(note, c.words) {
+			t.Errorf("%s：note = %q 应含 %q", c.name, note, c.words)
 		}
 	}
 	// g∞ 永不低于 0 且 < 折现率。
 	for _, d := range []float64{8, 10, 15} {
-		g, _ := terminalGrowth(10, d, 0, false)
+		g, _, _ := terminalGrowth(10, d, 0, false)
 		if g < 0 || g >= d {
 			t.Errorf("discount=%v 时 g∞=%v 越界", d, g)
 		}
@@ -606,15 +626,17 @@ func TestDividendForYear(t *testing.T) {
 	}
 }
 
-// TestRecommendWarningIncludesForwardAnchorFailure 前瞻锚失败/基准年不一致的 Warning 必须进入最终 Warning。
+// TestRecommendWarningIncludesForwardAnchorFailure 前瞻锚失败/基准年不一致的提示必须进入最终 Warnings。
 func TestRecommendWarningIncludesForwardAnchorFailure(t *testing.T) {
 	balance, cashflow, income := recommendFixture()
+	input := func(snap model.GrowthSnapshot) ValuationRecommendInput {
+		return ValuationRecommendInput{Balance: balance, Cashflow: cashflow, Income: income, Snapshot: snap}
+	}
 
 	// 显式接入快照但一致预期不可用（仅有请求日期）。
-	rec := RecommendValuationWithSnapshot(balance, cashflow, income, "",
-		model.GrowthSnapshot{RequestDate: "2026-10-17"})
-	if !strings.Contains(rec.Warning, "一致预期不可用") {
-		t.Errorf("无一致预期时 Warning 应包含降级说明，实际 %q", rec.Warning)
+	rec := RecommendValuation(input(model.GrowthSnapshot{RequestDate: "2026-10-17"}))
+	if !strings.Contains(strings.Join(rec.Warnings, "；"), "一致预期不可用") {
+		t.Errorf("无一致预期时 Warnings 应包含降级说明，实际 %q", rec.Warnings)
 	}
 
 	// 一致预期基准年（2023）与基期年（2024）不一致。
@@ -626,63 +648,90 @@ func TestRecommendWarningIncludesForwardAnchorFailure(t *testing.T) {
 			{Year: 2024, Mark: "E", NetProfit: 120, Revenue: 1100},
 		},
 	}
-	rec = RecommendValuationWithSnapshot(balance, cashflow, income, "",
-		model.GrowthSnapshot{RequestDate: "2026-10-17", Consensus: cons})
-	if !strings.Contains(rec.Warning, "基准年 2023 与基期年 2024 不一致") {
-		t.Errorf("基准年不一致时 Warning 应包含原因，实际 %q", rec.Warning)
+	rec = RecommendValuation(input(model.GrowthSnapshot{RequestDate: "2026-10-17", Consensus: cons}))
+	if !strings.Contains(strings.Join(rec.Warnings, "；"), "基准年 2023 与基期年 2024 不一致") {
+		t.Errorf("基准年不一致时 Warnings 应包含原因，实际 %q", rec.Warnings)
 	}
 	if rec.GrowthForwardOK {
 		t.Error("基准年不一致时前瞻锚不应可用")
 	}
 
 	// 零值快照（旧调用）不产生一致预期噪声。
-	if rec := RecommendValuation(balance, cashflow, income); strings.Contains(rec.Warning, "一致预期不可用") {
-		t.Errorf("零值快照不应提示一致预期不可用，实际 %q", rec.Warning)
+	if rec := RecommendValuation(input(model.GrowthSnapshot{})); strings.Contains(strings.Join(rec.Warnings, "；"), "一致预期不可用") {
+		t.Errorf("零值快照不应提示一致预期不可用，实际 %q", rec.Warnings)
 	}
 }
 
-// TestApplyValuationRecommendationR18 确定性回填：R18 字段全量复制、rationale 保留、
-// 一致预期未取到时清空快照字段（不透传脏值）。
-func TestApplyValuationRecommendationR18(t *testing.T) {
-	rec := sampleRecommendation()
+// TestApplyValuationRecommendationR19 确定性回填：R19 字段全量复制、AI 输入通道清空、
+// rationale 清洗后保留，全部被清洗时按模型补默认句。
+func TestApplyValuationRecommendationR19(t *testing.T) {
+	rec := recommendedStub()
 	var res model.AIAnalysisResult
-	res.Valuation.Rationale = "AI 原文"
+	res.Valuation.Rationale = "公司现金流稳定、行业地位稳固。增长中枢为 8.5%。"
+	res.Valuation.CompanyRisks = []model.CompanyRiskItem{{Type: "liquidity", Severity: "high"}}
 	ApplyValuationRecommendation(&res, rec)
 
 	v := res.Valuation
-	if v.GrowthHistory != 12.5 || v.GrowthForward != 14 || v.GrowthMacro != 4.5 ||
-		v.GrowthMacroBasis != "dynamic_gdp" || v.GDPAsOf != "2026-06-30" ||
-		v.GrowthComposite != 12.5 || v.GrowthNormalized != 12.5 || v.GrowthCycleAdjust != -3.2 ||
-		v.CyclePosition != 0.32 || v.CyclePositionLabel != "高位" || v.CycleBasis == "" ||
-		v.NegativeGrowthType != "none" || v.NegativeGrowthBasis == "" ||
-		v.ConsensusAsOf != "2026-09-21" || v.ConsensusInstitutions != 30 ||
-		v.ConsensusYears != 3 || v.ConsensusReliability != "high" ||
-		v.GrowthFadeYears != 6 || v.SGRRole != "long_run_reference" ||
-		v.RetentionBasis != "payout" || v.GrowthAdjustment != "无向下调整" {
-		t.Errorf("R18 字段未完整回填：%+v", v)
+	if v.Model != valModelTwoStage || v.DiscountRate != 9.0 || v.FCFBaseValue != 12.34e8 ||
+		v.GrowthAnchor.Final != 8.5 || v.CapexCheck.Ratio != 0.9 || v.FCFProfitCheck.Ratio != 1.25 ||
+		v.CompanyRiskPremium != 0.5 || len(v.CompanyRiskItems) != 1 ||
+		v.EffectiveTaxRate != 15 || !v.DiscountReconcileAvailable {
+		t.Errorf("R19 字段未完整回填：%+v", v)
 	}
-	if v.Rationale != "AI 原文" {
-		t.Errorf("rationale 应保留原文，实际 %q", v.Rationale)
+	if len(v.CompanyRisks) != 0 {
+		t.Errorf("AI 输入通道应清空，实际 %+v", v.CompanyRisks)
+	}
+	if v.Rationale != "公司现金流稳定、行业地位稳固。" {
+		t.Errorf("含数字的句子应整句丢弃，实际 %q", v.Rationale)
 	}
 
-	// 前瞻不可用 + 未取到一致预期 → forward/consensus 字段清空。
-	rec = sampleRecommendation()
-	rec.GrowthForwardOK = false
-	rec.ConsensusFetched = false
-	rec.ConsensusAsOf = "2020-01-01"
-	rec.ConsensusInstitutions = 99
-	rec.ConsensusYears = 9
-	rec.ConsensusReliability = "high"
-	var res2 model.AIAnalysisResult
-	res2.Valuation.GrowthForward = 88
-	res2.Valuation.ConsensusAsOf = "2020-01-01"
+	// 全部句子带数字 → 按模型补默认句。
+	res2 := model.AIAnalysisResult{}
+	res2.Valuation.Rationale = "增长率为 8.5%。折现率为 9.0%。"
 	ApplyValuationRecommendation(&res2, rec)
-	v = res2.Valuation
-	if v.GrowthForward != 0 || v.ConsensusAsOf != "" || v.ConsensusInstitutions != 0 ||
-		v.ConsensusYears != 0 || v.ConsensusReliability != "" {
-		t.Errorf("不可用前瞻/未取到一致预期时应清空：%+v", v)
+	if res2.Valuation.Rationale != rationaleFallback(rec.Model) ||
+		containsDigitOrPercent(res2.Valuation.Rationale) {
+		t.Errorf("默认句不合规：%q", res2.Valuation.Rationale)
 	}
-	if v.GrowthHistory != 12.5 || v.GrowthComposite != 12.5 {
-		t.Errorf("其它 R18 字段仍应回填：%+v", v)
+}
+
+// recommendedStub 构造一份覆盖关键字段的确定性推荐结果（仅用于 Apply 回填测试）。
+func recommendedStub() model.ValuationRecommendation {
+	return model.ValuationRecommendation{
+		Model: valModelTwoStage, ModelName: "两阶段增长模型",
+		ModelReason:  "增长锚高于长期终值，适用两阶段。",
+		DiscountRate: 9.0, Params: []model.AIValuationParam{
+			{Key: "g1", Label: "高增长期增长率", Value: 8.5},
+			{Key: "n1", Label: "高增长期年数", Value: 4},
+			{Key: "g2", Label: "永续增长率", Value: 4.5},
+		},
+		Applicable: true,
+		EquityCost: 9.6, EquityWeight: 0.8249, DebtWeight: 0.1751,
+		DebtCostPretax: 2.82, AfterTaxDebtCost: 2.4, EffectiveTaxRate: 0.15,
+		DiscountBaseValue: 8.98, DiscountBaseLabel: "WACC", DiscountRounded: 9.0,
+		DiscountRoundingAdjustment: 0.02, DiscountRangeAdjustment: 0,
+		DiscountReconcileAvailable: true, EquityValue: 100e8, DebtValue: 20e8,
+		EquitySource: "market_cap", Beta: 1.0, BetaBasis: "industry_classification",
+		IndustryType: valIndustryGeneral, IndustryTypeName: "一般行业",
+		CompanyRiskItems:   []model.CompanyRiskItem{{Type: "liquidity", Label: "流动性", Severity: "medium", Premium: 0.5}},
+		CompanyRiskPremium: 0.5,
+		GrowthAnchor:       model.GrowthAnchorTable{Raw: 8.45, Rounded: 8.5, Final: 8.5, WeightSum: 1, WeightOK: true},
+		GrowthHistoryBase:  8.2, GrowthHistoryAdjusted: 8.2, GrowthForward: 9.0, GrowthForwardOK: true,
+		GrowthMacro: 4.5, GrowthMacroBasis: "dynamic_gdp", GDPAsOf: "2026-06-30",
+		GrowthTerminal: 4.5, TerminalConstraint: "macro",
+		FCFBaseValue: 12.34e8, FCFBaseBeforeRD: 12.0e8, RDExpansion: 0.34e8,
+		FCFMode: valFCFAverage, FCFModeName: valFCFModeNames[valFCFAverage], FCFYears: 3,
+		FCFWindowStart: 2022, FCFWindowEnd: 2024, AdjustRD: true, RDRatio: 6.0,
+		FCFNote: "近 3 年平均值（2022–2024）；已加回研发扩张 0.34 亿元。",
+		CapexCheck: model.CapexCoverageDetail{
+			Available: true, Ratio: 0.9, Numerator: 9e8, Denominator: 10e8,
+			WindowStart: 2022, WindowEnd: 2024, Mode: valFCFAverage, Note: "口径",
+		},
+		FCFProfitCheck: model.FCFProfitDetail{
+			Available: true, Ratio: 1.25, FCF: 12.34e8, Profit: 9.87e8,
+			ProfitBasis: "parent", Mode: valFCFAverage,
+			WindowStart: 2022, WindowEnd: 2024, Years: 3, Note: "口径",
+		},
+		BaseYear: 2024,
 	}
 }

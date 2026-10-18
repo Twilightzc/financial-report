@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -141,11 +140,15 @@ func (h *Handler) computeAIAnalysis(
 
 	analysis := service.ComputeAnalysis(balance, cashflow, income, startYear, endYear)
 
-	// 估值参数由后端按财报数据确定性推导（R7）：与年份范围、分析模式无关，保证多次分析结果一致。
-	// ① 预推导（industryType=""）：β 走波动兜底，用于组装 prompt。
-	// 预推导与终态重算共用同一份增长快照，保证两次结果可归因。
+	// 估值参数由后端按财报数据确定性推导（R19）：与年份范围、分析模式无关，保证多次分析结果一致。
+	// ① 预推导（IndustryType 为空、无公司风险项）：β 走波动兜底，用于组装只读事实块。
+	// 预推导与终态重算共用同一份增长快照 / 市值，保证两次结果可归因。
 	snap := <-growthCh
-	rec := service.RecommendValuationWithSnapshot(balance, cashflow, income, "", snap)
+	input := service.ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income,
+		Snapshot: snap, MarketCap: quote.MarketCap,
+	}
+	rec := service.RecommendValuation(input)
 
 	// 主营构成（业务板块及营收占比）用于喂给大模型做业务板块分析；拉取失败不影响主流程。
 	segments, _ := h.c.FetchSegmentIncome(code)
@@ -162,30 +165,17 @@ func (h *Handler) computeAIAnalysis(
 	if err != nil {
 		return nil, err
 	}
-	// ② 终态重算：先取出 AI 的行业分类原始串（Apply 会覆盖该字段），据此重解析 β 并重算 r / g∞ / Params。
-	industryRaw := result.Valuation.IndustryType
-	rec = service.RecommendValuationWithSnapshot(balance, cashflow, income, industryRaw, snap)
+	// ② 终态重算：先取出 AI 的行业分类与公司风险项（Apply 会覆盖并清空该输入通道），据此重算全部参数。
+	input.IndustryType = result.Valuation.IndustryType
+	input.CompanyRisks = result.Valuation.CompanyRisks
+	rec = service.RecommendValuation(input)
 
-	// ③ 用确定性参数覆盖大模型返回的估值字段（含把 IndustryType 归一化回填），仅保留其 rationale。
+	// ③ 用确定性参数覆盖大模型返回的估值字段（含把 IndustryType 归一化回填），仅保留清洗后的 rationale。
 	service.ApplyValuationRecommendation(&result, rec)
-	log.Printf("AI 估值参数确定性推荐: code=%s 基期年=%d 行业类型=%s β=%.1f(%s) 基准增速=%.2f%%（营收=%.2f%% 净利润=%.2f%% FCF=%.2f%% 极差=%.2f） 得分=%.2f 波动=%v 模型=%s（降级=%v） 折现率=%.1f%% SGR=%.2f%% 留存率=%.2f FCF强周期=%v(CV=%.2f 翻转=%d 窗口=%d) 风险点=%d 研发调整=%v 研发费用率=%.2f%% 扩张=%.2f亿 一致性(基期年=%d Capex覆盖=%.2f ΔNWC/FCF=%.2f FCF/净利润=%.2f)",
-		code, rec.BaseYear, rec.IndustryType, rec.Beta, rec.BetaBasis, rec.BaseGrowth,
-		rec.GrowthRevenue, rec.GrowthProfit, rec.GrowthFCF, rec.GrowthDispersion, rec.ModelScore,
-		rec.Volatile, rec.Model, rec.ModelDegraded, rec.DiscountRate, rec.SGR, rec.RetentionRate,
-		rec.FCFCyclical, rec.FCFCV, rec.FCFSignChanges, rec.FCFWindowYears,
-		rec.RiskPoints, rec.AdjustRD, rec.RDRatio, rec.RDExpansion/1e8,
-		rec.BaseYear, rec.CapexCoverage, rec.DeltaNWCRatio, rec.FCFProfitRatio)
-	forwardLog := "不可用"
-	if rec.GrowthForwardOK {
-		forwardLog = fmt.Sprintf("%.2f%%", rec.GrowthForward)
-	}
-	log.Printf("AI 增长锚: code=%s 复合锚=%.2f%%（历史=%.2f%% 前瞻=%s 宏观=%.2f%%/%s） 终值=%.2f%% 软上限=%.2f%% 回归年数=%d 周期=%s(%+.2f,Δ=%+.1f,pp) 负增长=%s 一致预期=%v(%d家/%d年/%s) 留存口径=%s 调整=%s scenarios=%d band_g=%.1f model=%s",
-		code, rec.GrowthComposite, rec.GrowthHistory, forwardLog, rec.GrowthMacro, rec.GrowthMacroBasis,
-		rec.GrowthTerminal, rec.GrowthCap, rec.GrowthFadeYears,
-		rec.CyclePositionLabel, rec.CyclePosition, rec.GrowthCycleAdjust, rec.NegativeGrowthType,
-		rec.ConsensusFetched, rec.ConsensusInstitutions, rec.ConsensusYears, rec.ConsensusReliability,
-		rec.RetentionBasis, rec.GrowthAdjustment,
-		len(rec.Scenarios), rec.ScenarioBandGrowth, rec.Model)
+	log.Printf("AI 估值参数: code=%s 基期=%d 模型=%s r=%.1f%% A=%.1f%% FCF=%.2f亿 Capex=%.2f FCF/NP=%.2f RP=%.2f 风险项=%d",
+		code, rec.BaseYear, rec.Model, rec.DiscountRate, rec.GrowthAnchor.Final,
+		rec.FCFBaseValue/1e8, rec.CapexCheck.Ratio, rec.FCFProfitCheck.Ratio,
+		rec.CompanyRiskPremium, len(rec.CompanyRiskItems))
 
 	// ★R17：汇合（正常情况下 LLM 耗时已覆盖两个 2s 请求，此处近零等待）。
 	board := <-leaderCh

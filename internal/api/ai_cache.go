@@ -17,6 +17,9 @@ const (
 	// 变化在 10 分钟内自然反映，不跨交易日返回旧结果。
 	aiCacheTTL = 10 * time.Minute
 	aiCacheMax = 64 // 条目上限，满则先清过期、仍满整体清空
+
+	// aiCacheSchema 结果结构版本：R19 重构后旧缓存（含三档字段）不再复用。
+	aiCacheSchema = "r19"
 )
 
 // aiCacheKey 缓存 key：三个维度均会改变最终分析结果，必须全部参与。
@@ -24,6 +27,7 @@ const (
 // 在计算时确定）与「显式指定 0/0」（rangeOK=true，随后按非法年份返回 400）——两者语义与
 // 结果不同，若共用 key 会互相污染缓存。
 type aiCacheKey struct {
+	Schema         string // 结果结构版本（R19：Schema=r19）
 	Code           string // 6 位股票代码
 	Reasoning      string // low / medium / high（已归一化）
 	StartYear      int
@@ -69,6 +73,7 @@ func newAIResultCache() *aiResultCache {
 // aiCacheKeyFor 只做参数映射，不做 IO。
 func aiCacheKeyFor(code, reasoning string, startYear, endYear int, rangeSpecified bool) aiCacheKey {
 	return aiCacheKey{
+		Schema:         aiCacheSchema,
 		Code:           code,
 		Reasoning:      reasoning,
 		StartYear:      startYear,

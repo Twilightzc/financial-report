@@ -348,15 +348,11 @@ const app = createApp({
     const aiLoading = ref(false);
     const aiError = ref('');
     const aiResult = ref(null);
-    // R15/P1：套用到估值时可选的档位 key（conservative/base/optimistic），默认基准。
-    // 旧响应/旧缓存无 scenarios 时不渲染选择器，套用逻辑回退顶层基准字段。
-    const aiApplyScenario = ref('base');
     const aiElapsed = ref(null); // 最近一次 AI 分析耗时（秒，1 位小数；加载中/缓存命中/失败为 null）
     const aiRadarRef = ref(null);
     const aiReasoning = ref('high'); // 分析模式：low 简洁 / medium 标准 / high 详细（默认详细）
     // R15：估值卡片内长文本/逐年明细的展开态（换股票或重新分析时复位）。
     const aiFCFSeriesOpen = ref(false);
-    const aiFCFRationaleOpen = ref(false);
     const aiCache = new Map(); // AI 分析结果缓存（code|年份|模式 → 结果，同条件复用避免重复消耗 token）
 
     // R17 相关公司（行业龙头 + 产业链/合作公司）
@@ -1216,10 +1212,8 @@ const app = createApp({
       if (cached) {
         // 同条件已分析过，直接复用结果，不重复调用大模型（没有新的请求耗时可展示）
         aiResult.value = cached;
-        aiApplyScenario.value = 'base'; // 新分析结果默认套用基准档
         aiElapsed.value = null;
         aiFCFSeriesOpen.value = false;
-        aiFCFRationaleOpen.value = false;
         await renderRadarAfterRender();
         return;
       }
@@ -1229,7 +1223,6 @@ const app = createApp({
       aiResult.value = null;
       aiElapsed.value = null;
       aiFCFSeriesOpen.value = false;
-      aiFCFRationaleOpen.value = false;
       try {
         const params = [];
         if (analysisStartYear.value && analysisEndYear.value) {
@@ -1245,7 +1238,6 @@ const app = createApp({
         }
         aiCache.set(cacheKey, json.data);
         aiResult.value = json.data;
-        aiApplyScenario.value = 'base'; // 新分析结果默认套用基准档
         // 成功后展示本次请求耗时（秒，1 位小数）；加载态与失败态保持 null。
         aiElapsed.value = Number(((nowMs() - startedAt) / 1000).toFixed(1));
         await renderRadarAfterRender();
@@ -1394,10 +1386,6 @@ const app = createApp({
     // FR-7/FR-8：研发调整开关单向联动 —— 推荐为 true 时打开；
     // false / 字段缺失时保持用户当前选择（不主动关闭）。
     // 用 === true 严格判断：旧响应 / 缓存无该字段时为 undefined → 保持现状；字符串脏数据也不会误开。
-    function resolveAdjustRD(current, recommended) {
-      return recommended === true ? true : current;
-    }
-
     // R12 自定义基期自由现金流前端校验：合法返回空串，非法返回中文提示（与后端 ParseCustomFCF 同口径）。
     // 「非数字」「≤2 位小数」由 el-input-number(:precision=2) 控件约束；粘贴/绕过的极端输入由后端兜底。
     function validateCustomFCF(v, unit) {
@@ -1429,7 +1417,7 @@ const app = createApp({
       };
     }
 
-    // 纯函数：顶层基准推荐 → 估值表单参数（旧响应/无 scenarios 时回退使用）。
+    // 纯函数：估值推荐 → 估值表单参数。
     function aiValuationToFormParams(v) {
       const p = aiParamsToForm(v.params);
       const mode = v.fcf_mode || null;
@@ -1437,39 +1425,12 @@ const app = createApp({
         model: v.model || null,
         discount: v.discount_rate != null ? v.discount_rate : null,
         g: p.g, g1: p.g1, n1: p.n1, g2: p.g2, n2: p.n2, g3: p.g3,
-        // R13：一并套用基期自由现金流选择（FR-6，改动 R12 边界）。
-        // fcf_mode 缺失（旧响应/缓存）时为 null，applyValuationFormParams 会保持当前选择。
         fcfMode: mode,
         fcfYears: (mode && ['average', 'median', 'trim_mean'].includes(mode) && v.fcf_years)
           ? Math.round(v.fcf_years) : null,
         fcfCustomValue: v.fcf_custom_value != null ? v.fcf_custom_value : null,
         fcfCustomUnit: v.fcf_custom_unit || null,
       };
-    }
-
-    // 纯函数：单档情景 → 估值表单参数（P1 逐档套用）。
-    // 基期 FCF 取该档 base_fcf（元），按「自定义 + 亿」写入表单（四舍五入 2 位，与 fcf_custom_value
-    // 展示口径一致）；缺失/非正，或换算为亿后四舍五入为 0（< 50 万元）时返回 null，
-    // 由调用方回退顶层 FCF 字段（顶层口径可精确复算），避免写入 0 触发自定义 FCF 校验失败。
-    function scenarioToFormParams(s) {
-      if (!s) return null;
-      const p = aiParamsToForm(s.params);
-      const out = {
-        model: s.model || null,
-        discount: s.discount_rate != null ? s.discount_rate : null,
-        g: p.g, g1: p.g1, n1: p.n1, g2: p.g2, n2: p.n2, g3: p.g3,
-        fcfMode: null,
-        fcfYears: null,
-        fcfCustomValue: null,
-        fcfCustomUnit: null,
-      };
-      const rounded = Math.round((s.base_fcf / VAL_FCF_UNIT_FACTOR.yi) * 100) / 100;
-      if (rounded > 0) {
-        out.fcfMode = 'custom';
-        out.fcfCustomUnit = 'yi';
-        out.fcfCustomValue = rounded;
-      }
-      return out;
     }
 
     // 把表单参数写回 ref；null 表示该项无推荐值，保持用户当前选择。
@@ -1494,28 +1455,14 @@ const app = createApp({
     }
 
     // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
-    // 有 scenarios 时按所选档（默认基准）套用；无 scenarios（旧响应/旧缓存）回退顶层基准字段。
     function applyAIValuation(v) {
       if (!v || !v.model) return;
-      const scenarios = Array.isArray(v.scenarios) ? v.scenarios : [];
-      const picked = scenarios.find(s => s.key === aiApplyScenario.value) || null;
-      const topForm = aiValuationToFormParams(v);
-      const form = picked ? scenarioToFormParams(picked) : topForm;
-      // 该档无可用 base_fcf（旧缓存缺字段/非正/换算为 0）时沿用顶层 FCF 选择，保持与旧套用一致。
-      if (picked && form.fcfMode == null) {
-        form.fcfMode = topForm.fcfMode;
-        form.fcfYears = topForm.fcfYears;
-        form.fcfCustomValue = topForm.fcfCustomValue;
-        form.fcfCustomUnit = topForm.fcfCustomUnit;
-      }
-      applyValuationFormParams(form);
+      applyValuationFormParams(aiValuationToFormParams(v));
       // ref 写入同步生效，紧随其后的 fetchValuation() 读到的已是新值，故开关与请求参数一致。
-      // adjust_rd 三档共用，始终取顶层推荐（见技术设计 20.7.1）。
-      valAdjustRD.value = resolveAdjustRD(valAdjustRD.value, v.adjust_rd);
+      // 与卡片完全一致：推荐关闭时必须关闭，否则表单 FCF 会多算研发加回。
+      valAdjustRD.value = v.adjust_rd === true;
       fetchValuation('ai'); // R16 FR-1：AI 套用为主动动作，记录来源标记 ai
-      ElementPlus.ElMessage.success(picked
-        ? `已按${picked.name}档套用参数并计算`
-        : '已套用 AI 推荐的估值参数并计算');
+      ElementPlus.ElMessage.success('已应用估值参数');
     }
 
     // R18：从 AI 估值 params 中取参数值（不存在返回 null，供模板守卫）。
@@ -1524,116 +1471,72 @@ const app = createApp({
       return p ? p.value : null;
     }
 
-    // R15 整合版：展示格式化 helper（不改 fmtNum，避免影响既有指标）。
+    // R19：展示格式化 helper（不改 fmtNum，避免影响既有指标）。
     const fmtRate = v => (v == null || isNaN(v)) ? '' : Number(v).toFixed(2);   // 9.00%
-    const fmtPct1 = v => (v == null || isNaN(v)) ? '' : Number(v).toFixed(1);   // 10.0%
-    const fmtPP = v => (v == null || isNaN(v)) ? '' : Number(v).toFixed(1);     // 1.0pp
-    const fmtW = v => (v == null || isNaN(v)) ? '' : Number(v).toFixed(2);      // 0.45
-    const fmtScore = v => (v == null || isNaN(v)) ? '' : Number(v).toFixed(2);  // 67.75
     // fmtYi 已被既有指标占用（返回带「亿/万」的文本），此处用 fmtYiPlain 表示纯亿元数值。
     const fmtYiPlain = v => (v == null || isNaN(v)) ? '' : (Number(v) / 1e8).toFixed(2);
 
-    // 带符号的 pp 展示（三档相对基准）。
-    function signedPP(v) {
-      if (v == null || isNaN(v)) return '';
+    // 带符号的 pp 展示（对账调整项，2 位小数）。
+    function signedPP2(v) {
+      if (v == null || isNaN(v)) return '0.00pp';
       const n = Number(v);
-      return (n > 0 ? '+' : '') + n.toFixed(1) + 'pp';
+      return (n > 0 ? '+' : '') + n.toFixed(2) + 'pp';
     }
 
-    // 三档情景：g1/g2 按各档自己的模型参数取（无则返回 null，模板显示「—」）。
-    function scenarioG1(s) {
-      const g1 = paramValue(s, 'g1');
-      return g1 != null ? g1 : paramValue(s, 'g');
-    }
-    function scenarioG2(s) {
-      const g2 = paramValue(s, 'g2');
-      return g2 != null ? g2 : paramValue(s, 'g3');
-    }
-    function scenarioDelta(s) {
-      return 'ΔA ' + signedPP(s.delta_growth) + ' / Δr ' + signedPP(s.delta_discount);
-    }
-    function scenarioCapLabels(caps) {
-      const map = { gdp: 'GDP', sgr: 'SGR', discount: '折现率', range: '区间' };
-      return (caps || []).map(k => map[k] || k).join(' · ');
-    }
-    // FR-31：带宽来源说明（原始分歧 → clamp 后带宽）；退化时明确「仅折现率分档」。
-    function scenarioBandText(v) {
-      const band = fmtPP(v.scenario_band_growth);
-      const raw = fmtPP(v.scenario_band_raw);
-      if (v.scenario_band_source === 'degenerate') {
-        return '增长带宽 0（负增长/零增长，仅折现率分档）';
+    // 折现率对账行：全部数值来自后端展示字段，手工可复算。
+    function discountLines(v) {
+      const pct = x => fmtRate(x) + '%';
+      const weightPct = x => (Number(x || 0) * 100).toFixed(2) + '%';
+      const lines = [];
+      let re = `Re = ${pct(v.risk_free_rate)} + ${fmtRate(v.beta)}×${pct(v.equity_risk_premium)}`;
+      if (v.company_risk_premium > 0) re += ` + ${pct(v.company_risk_premium)}`;
+      lines.push(re + ` = ${pct(v.equity_cost)}`);
+      if (v.debt_weight > 0) {
+        lines.push(`Rd（税后）= ${pct(v.debt_cost_pretax)} × (1−${pct(v.effective_tax_rate)}) = ${pct(v.after_tax_debt_cost)}`);
       }
-      if (v.scenario_band_source === 'fallback') {
-        return '带宽来源：历史/前瞻无有效分歧，按 0.2×A 回退 ' + raw + 'pp → ' + band + 'pp';
+      const source = v.weight_note ? `（${v.weight_note}）` : '';
+      lines.push(`E/V = ${weightPct(v.equity_weight)}，D/V = ${weightPct(v.debt_weight)}${source}`);
+      if (v.debt_weight > 0) {
+        lines.push(`WACC = ${weightPct(v.equity_weight)}×${pct(v.equity_cost)} + ${weightPct(v.debt_weight)}×${pct(v.after_tax_debt_cost)} = ${pct(v.discount_base_value)}`);
+      } else {
+        lines.push(`WACC = Re = ${pct(v.discount_base_value)}（无有息债务）`);
       }
-      return '带宽来源：历史与前瞻分歧 ' + raw + 'pp → 收窄到 ' + band + 'pp（区间 1.5–4.0pp）';
+      lines.push(`取整 0.5pp：${signedPP2(v.discount_rounding_adjustment)} → ${pct(v.discount_rounded)}`);
+      lines.push(`区间约束 [8.0,15.0]：${signedPP2(v.discount_range_adjustment)} → r = ${pct(v.discount_rate)}`);
+      return lines;
     }
 
-    // 复合锚贡献表：只读后端权重，不前端猜权重（旧响应缺 growth_weights 时整表不渲染）。
-    function growthAnchorRows(v) {
-      const w = v.growth_weights || {};
-      const histBase = v.growth_history == null ? 0 : Number(v.growth_history);
-      const adjust = v.growth_cycle_adjust == null ? 0 : Number(v.growth_cycle_adjust);
-      const rows = [
-        { name: '历史（周期修正后）', value: histBase + adjust, weight: Number(w.history || 0), available: true },
-        { name: '前瞻', value: v.growth_forward, weight: Number(w.forward || 0), available: v.growth_forward != null },
-        { name: '宏观', value: v.growth_macro, weight: Number(w.macro || 0), available: v.growth_macro != null },
-      ];
-      return rows.map(r => ({
-        ...r,
-        contribution: r.available && r.value != null ? Number(r.value) * r.weight : null,
-      }));
+    // 复合锚构成表：直接使用后端可加总行，前端不再自行算权重/贡献。
+    function anchorTable(v) {
+      return (v && v.growth_anchor) || {};
+    }
+    function anchorRows(v) {
+      const rows = anchorTable(v).rows;
+      return Array.isArray(rows) ? rows : [];
     }
 
-    // 实际归一化分母（缺项时不把 0.2 计入），供得分表展示。
-    function scoreDenominator(v) {
-      let d = 0;
-      if (v.score_growth != null) d += 0.6;
-      if (v.has_stability_score === true) d += 0.2;
-      if (v.has_roe_score === true) d += 0.2;
-      return d;
+    // 公司特定风险项：治理结构 +1.00pp；客户集中 +0.50pp。
+    function riskItemsText(items) {
+      return (items || [])
+        .filter(x => x && x.label)
+        .map(x => `${x.label} +${fmtRate(x.premium)}pp`)
+        .join('；');
     }
 
-    // 模型得分贡献表：缺项按剩余权重归一化（后端 has_* 显式标记，不用 0 分冒充）。
-    function scoreRows(v) {
-      const rows = [
-        { name: '增速 Sg', score: v.score_growth, weight: 0.6, available: v.score_growth != null },
-        { name: '稳定性 Sst', score: v.score_stability, weight: 0.2, available: v.has_stability_score === true },
-        { name: 'ROE Sroe', score: v.score_roe, weight: 0.2, available: v.has_roe_score === true },
-      ];
-      const total = rows.reduce((s, r) => s + (r.available ? r.weight : 0), 0);
-      return rows.map(r => ({
-        ...r,
-        normalizedWeight: r.available && total > 0 ? r.weight / total : 0,
-        contribution: r.available && total > 0 && r.score != null ? Number(r.score) * r.weight / total : null,
-      }));
+    // 关键校验：可用时显示「比值（窗口）」，不可用显示「不适用：原因」。
+    function checkText(c) {
+      if (!c) return '不适用';
+      if (!c.available) return '不适用：' + (c.reason || '数据不足');
+      const win = c.window_start && c.window_end
+        ? (c.window_start === c.window_end ? `${c.window_start}` : `${c.window_start}–${c.window_end}`)
+        : '';
+      return fmtRate(c.ratio) + (win ? `（${win}）` : '');
     }
 
     // 基期 FCF：取 fcf_series 最近一年（升序末项）。
     function fcfLatestPoint(v) {
       const arr = v.fcf_series || [];
       return arr.length ? arr[arr.length - 1] : null;
-    }
-    // 选中模式下的基期 FCF 说明（与最近一年分量分行展示，避免把中位数写成 X−Y）。
-    function fcfSelectionText(v) {
-      const value = fmtYiPlain(v.fcf_base_value);
-      if (v.fcf_mode === 'custom') {
-        return '自定义 ' + fmtNum(v.fcf_custom_value) + (fcfUnitLabel(v.fcf_custom_unit) || '') + ' = ' + value + ' 亿元';
-      }
-      if (v.fcf_mode === 'latest') return '最近一年 = ' + value + ' 亿元';
-      const years = (v.fcf_window_start > 0 && v.fcf_window_end > 0)
-        ? '（' + v.fcf_window_start + '–' + v.fcf_window_end + '）' : '';
-      return '近 ' + (v.fcf_years || '') + ' 年' + years + ' ' + (v.fcf_mode_name || '') + ' = ' + value + ' 亿元';
-    }
-
-    // R18：一致预期可靠度枚举 → 中文（未知值返回空串，旧响应不报错）。
-    function reliabilityLabel(v) {
-      return { high: '高可靠', medium: '中可靠', unavailable: '不可用' }[v] || '';
-    }
-
-    // R18：留存率口径 → 中文。
-    function retentionBasisLabel(v) {
-      return { payout: '分红口径', equity_growth: '权益增长近似', unavailable: '不可用' }[v] || '';
     }
 
     function changeRange() {
@@ -1898,19 +1801,16 @@ const app = createApp({
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
-      aiLoading, aiError, aiResult, aiApplyScenario, aiElapsed, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
-      aiFCFSeriesOpen, aiFCFRationaleOpen,
+      aiLoading, aiError, aiResult, aiElapsed, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
+      aiFCFSeriesOpen,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
       companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessCompanies,
       jumpToLeader, openAICompany, isSixDigitCode,
-      radarAxisName, buildRadarOption, resolveAdjustRD, validateCustomFCF, fcfUnitLabel,
+      radarAxisName, buildRadarOption, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
-      // R18：增长假设组的三层锚/留存率口径展示辅助（模板直接调用，须在 setup 返回中暴露）
-      paramValue, reliabilityLabel, retentionBasisLabel,
-      // R15：整齐的率/权重/得分格式化，以及三档情景、权重贡献表、FCF 分解展示辅助
-      fmtRate, fmtPct1, fmtPP, fmtW, fmtScore, fmtYiPlain,
-      signedPP, scenarioG1, scenarioG2, scenarioDelta, scenarioCapLabels, scenarioBandText,
-      growthAnchorRows, scoreRows, scoreDenominator, fcfLatestPoint, fcfSelectionText,
+      // R19：估值参数六块展示辅助（模型参数取值、增长锚表、折现率勾稽、校验与 FCF 逐年明细）
+      paramValue, fmtRate, fmtYiPlain,
+      signedPP2, discountLines, anchorTable, anchorRows, riskItemsText, checkText, fcfLatestPoint,
       history, querySearch, handleSelect, clearHistory,
       searchHint, SEARCH_DEBOUNCE_MS, normalizeQueryInput, guessMarket, marketLabelOf, fetchSearch,
       // R16 估值历史记录（抽屉、记录操作与展示格式化）
@@ -2698,204 +2598,115 @@ const app = createApp({
                 <p class="ai-company-hint" v-if="companyHint">{{ companyHint }}</p>
                 <!-- 防御：旧缓存/异常响应若无 valuation，跳过整组渲染而不是让根组件渲染抛错（白屏） -->
                 <div class="ai-section" v-if="aiResult.valuation">
-                  <div class="ai-section-title">估值模型推荐</div>
-                  <div class="ai-valuation" style="flex-direction:column;align-items:stretch;gap:12px">
-                    <!-- 组一：模型结论（结论前置，操作入口与不适用原因就近展示） -->
-                    <div>
-                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">模型结论</div>
-                      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                        <span class="ai-model">{{ aiResult.valuation.model_name }}</span>
-                      </div>
+                  <div class="ai-section-title">估值参数（适中基准）</div>
+                  <div class="ai-valuation ai-val-params" style="flex-direction:column;align-items:stretch;gap:12px">
+                    <!-- 一、模型 -->
+                    <div class="ai-val-block">
+                      <div class="ai-val-head">模型</div>
+                      <div class="ai-v"><span class="ai-model">{{ aiResult.valuation.model_name }}</span><template v-if="aiResult.valuation.model_reason"> · {{ aiResult.valuation.model_reason }}</template></div>
                       <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false" style="margin-top:6px"
-                                :title="aiResult.valuation.inapplicable_reason || '现金流贴现法不适用'" />
+                                :title="(aiResult.valuation.inapplicable_reason || '现金流贴现法不适用')" />
                     </div>
-                    <!-- 组二：折现率（WACC 七步：Re → 资本结构 → 税后 Rd → WACC → 风险溢价/收口） -->
-                    <div>
-                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">折现率</div>
-                      <!-- 新响应：equity_cost 存在时按 WACC 分步展示；旧缓存缺字段时逐行降级 -->
-                      <template v-if="aiResult.valuation.equity_cost != null">
-                        <div class="ai-v">股权成本 Re = Rf 2.50% + β {{ fmtRate(aiResult.valuation.beta) }} × ERP 5.50% = {{ fmtRate(aiResult.valuation.equity_cost) }}%</div>
-                        <div class="ai-v" v-if="aiResult.valuation.debt_weight != null || aiResult.valuation.equity_weight != null">资本结构：<template v-if="aiResult.valuation.debt_weight != null">有息债务（wD {{ fmtPct1(aiResult.valuation.debt_weight * 100) }}%）</template><template v-if="aiResult.valuation.debt_weight != null && aiResult.valuation.equity_weight != null"> / </template><template v-if="aiResult.valuation.equity_weight != null">股东权益（wE {{ fmtPct1(aiResult.valuation.equity_weight * 100) }}%）</template></div>
-                        <div class="ai-v" v-if="aiResult.valuation.debt_cost_pretax != null && aiResult.valuation.after_tax_debt_cost != null">税后债务成本 = {{ fmtRate(aiResult.valuation.debt_cost_pretax) }}% × (1 − {{ fmtRate(aiResult.valuation.effective_tax_rate) }}%) = {{ fmtRate(aiResult.valuation.after_tax_debt_cost) }}%</div>
-                        <div class="ai-v" v-if="aiResult.valuation.wacc_baseline != null && aiResult.valuation.debt_weight != null && aiResult.valuation.after_tax_debt_cost != null && aiResult.valuation.equity_cost != null">WACC = {{ fmtPct1(aiResult.valuation.debt_weight * 100) }}% × {{ fmtRate(aiResult.valuation.after_tax_debt_cost) }}% + {{ fmtPct1(aiResult.valuation.equity_weight * 100) }}% × {{ fmtRate(aiResult.valuation.equity_cost) }}% = {{ fmtRate(aiResult.valuation.wacc_baseline) }}%</div>
-                        <div class="ai-v" v-else-if="aiResult.valuation.wacc_baseline != null && aiResult.valuation.debt_weight == null">WACC = Re = {{ fmtRate(aiResult.valuation.wacc_baseline) }}%（无有息债务）</div>
-                        <div class="ai-v" v-if="aiResult.valuation.discount_rate != null">+ 风险溢价 {{ fmtPP(aiResult.valuation.risk_premium || 0) }}pp → {{ fmtRate((aiResult.valuation.wacc_baseline || 0) + (aiResult.valuation.risk_premium || 0)) }}% → 收口 {{ fmtRate(aiResult.valuation.discount_rate) }}%（区间 8%–15%，0.5pp 网格）</div>
-                        <el-alert v-if="aiResult.valuation.debt_cost_estimated === true" type="warning" :closable="false" style="margin-top:6px"
-                                  title="债务成本不可用，按 Rf+2.0pp 保守估计" />
-                      </template>
-                      <!-- 旧响应兜底：保持原有单行展示 -->
-                      <div class="ai-v" v-else>折现率 {{ fmtNum(aiResult.valuation.discount_rate) }}%<template v-if="aiResult.valuation.wacc_baseline != null">（WACC 基线 {{ fmtNum(aiResult.valuation.wacc_baseline) }}%<template v-if="aiResult.valuation.risk_premium"> + 风险溢价 {{ fmtNum(aiResult.valuation.risk_premium) }}%</template>）</template></div>
-                      <div class="ai-v" v-if="aiResult.valuation.industry_type_name || aiResult.valuation.beta"><template v-if="aiResult.valuation.industry_type_name">行业类型 {{ aiResult.valuation.industry_type_name }}</template><template v-if="aiResult.valuation.industry_type_name && aiResult.valuation.beta"> · </template><template v-if="aiResult.valuation.beta">β {{ fmtNum(aiResult.valuation.beta) }}（{{ aiResult.valuation.beta_tier }}）</template></div>
-                    </div>
-                    <!-- 组三：增长假设（基准增速 → 模型打分/SGR → 模型参数 → 口径说明） -->
-                    <div>
-                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">增长假设</div>
-                      <div class="ai-v" v-if="aiResult.valuation.base_growth != null">基准增速 {{ fmtNum(aiResult.valuation.base_growth) }}%<template v-if="aiResult.valuation.growth_revenue != null || aiResult.valuation.growth_profit != null">（营收 {{ fmtNum(aiResult.valuation.growth_revenue) }}%<template v-if="aiResult.valuation.growth_profit != null"> / 净利润 {{ fmtNum(aiResult.valuation.growth_profit) }}%</template><template v-if="!aiResult.valuation.growth_fcf_excluded && aiResult.valuation.growth_fcf != null"> / FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}%</template>，按可用项等权）</template><template v-if="aiResult.valuation.growth_fcf_excluded">；FCF {{ fmtNum(aiResult.valuation.growth_fcf) }}% 未计入：{{ aiResult.valuation.growth_fcf_exclude_reason }}</template></div>
-                      <!-- 复合锚贡献表：权重由后端给出，前端只做 值×权重 展示（旧响应无 growth_weights 时回退单行） -->
-                      <template v-if="aiResult.valuation.growth_weights && aiResult.valuation.growth_composite != null">
-                        <table class="ai-weight-table">
-                          <thead><tr><th>锚</th><th>值</th><th>权重</th><th>贡献</th></tr></thead>
-                          <tbody>
-                            <tr v-for="row in growthAnchorRows(aiResult.valuation)" :key="row.name">
-                              <td>{{ row.name }}</td>
-                              <td>{{ row.available && row.value != null ? fmtRate(row.value) + '%' : '不可用' }}</td>
-                              <td>{{ fmtW(row.weight) }}</td>
-                              <td>{{ row.contribution != null ? fmtRate(row.contribution) + 'pp' : '—' }}</td>
-                            </tr>
-                            <tr class="ai-weight-total">
-                              <td>合计</td>
-                              <td>复合锚 A {{ fmtRate(aiResult.valuation.growth_composite) }}%</td>
-                              <td>{{ fmtW((aiResult.valuation.growth_weights.history || 0) + (aiResult.valuation.growth_weights.forward || 0) + (aiResult.valuation.growth_weights.macro || 0)) }}</td>
-                              <td>{{ fmtRate(aiResult.valuation.growth_composite) }}pp</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                        <div class="ai-v" v-if="aiResult.valuation.consensus_fetched">前瞻锚：{{ aiResult.valuation.consensus_institutions }} 家机构，{{ reliabilityLabel(aiResult.valuation.consensus_reliability) }}，截至 {{ aiResult.valuation.consensus_as_of }}<template v-if="aiResult.valuation.growth_macro_basis === 'dynamic_gdp'"> · 宏观锚：动态 GDP，截至 {{ aiResult.valuation.gdp_as_of }}</template><template v-else> · 宏观锚：回退常量</template></div>
-                      </template>
-                      <div class="ai-v" v-else-if="aiResult.valuation.growth_composite != null">
-                        三层锚：历史 {{ fmtNum(aiResult.valuation.growth_history) }}%<template v-if="aiResult.valuation.growth_cycle_adjust">（周期修正 {{ fmtNum(aiResult.valuation.growth_cycle_adjust) }}pp → 生效 {{ fmtNum((aiResult.valuation.growth_history || 0) + (aiResult.valuation.growth_cycle_adjust || 0)) }}%）</template> · 前瞻 <template v-if="aiResult.valuation.growth_forward != null">{{ fmtNum(aiResult.valuation.growth_forward) }}%（{{ aiResult.valuation.consensus_institutions }} 家机构，{{ reliabilityLabel(aiResult.valuation.consensus_reliability) }}，截至 {{ aiResult.valuation.consensus_as_of }}）</template><template v-else>不可用</template> · 宏观 {{ fmtNum(aiResult.valuation.growth_macro) }}%<template v-if="aiResult.valuation.growth_macro_basis === 'dynamic_gdp'">（动态 GDP，截至 {{ aiResult.valuation.gdp_as_of }}）</template><template v-else>（回退常量）</template> → 复合锚 {{ fmtNum(aiResult.valuation.growth_composite) }}%
+                    <!-- 二、基期 FCF -->
+                    <div class="ai-val-block">
+                      <div class="ai-val-head">基期 FCF</div>
+                      <div class="ai-v">{{ fmtYiPlain(aiResult.valuation.fcf_base_value) }} 亿元 · {{ aiResult.valuation.fcf_note }}</div>
+                      <div v-if="fcfLatestPoint(aiResult.valuation)" class="ai-v ai-val-muted">
+                        最近一年：经营现金流净额 {{ fmtYiPlain(fcfLatestPoint(aiResult.valuation).operating_cash) }} 亿元 − 保全性资本支出 {{ fmtYiPlain(fcfLatestPoint(aiResult.valuation).preservation_capex) }} 亿元 = {{ fmtYiPlain(fcfLatestPoint(aiResult.valuation).fcf) }} 亿元（{{ fcfLatestPoint(aiResult.valuation).year }} 年）
                       </div>
-                      <div class="ai-v" v-if="aiResult.valuation.cycle_position != null && aiResult.valuation.cycle_position !== 0">
-                        周期位置 {{ aiResult.valuation.cycle_position_label }} {{ fmtNum(aiResult.valuation.cycle_position) }} → 历史锚修正 {{ fmtNum(aiResult.valuation.growth_cycle_adjust) }}pp（{{ aiResult.valuation.cycle_basis }}）
-                      </div>
-                      <div class="ai-v" v-if="aiResult.valuation.negative_growth_type === 'structural' || aiResult.valuation.negative_growth_type === 'cyclical'">
-                        负增长归因：<template v-if="aiResult.valuation.negative_growth_type === 'structural'">结构性负增长，按零增长处理</template><template v-else>周期性负增长，按低永续处理（g={{ fmtNum(paramValue(aiResult.valuation, 'g')) }}%）</template>；正常化 A={{ fmtNum(aiResult.valuation.growth_normalized) }}%（{{ aiResult.valuation.negative_growth_basis }}）
-                      </div>
-                      <!-- 模型得分贡献表：缺项按剩余权重归一化，缺失信号不显示 0 分 -->
-                      <template v-if="aiResult.valuation.score_growth != null">
-                        <table class="ai-weight-table">
-                          <thead><tr><th>模型打分信号</th><th>得分</th><th>权重（归一后）</th><th>贡献</th></tr></thead>
-                          <tbody>
-                            <tr v-for="row in scoreRows(aiResult.valuation)" :key="row.name">
-                              <td>{{ row.name }}</td>
-                              <td>{{ row.available ? fmtScore(row.score) : '未计入' }}</td>
-                              <td>{{ row.available ? fmtW(row.normalizedWeight) : '按剩余权重归一化' }}</td>
-                              <td>{{ row.contribution != null ? fmtScore(row.contribution) : '—' }}</td>
-                            </tr>
-                            <tr class="ai-weight-total">
-                              <td>模型得分</td>
-                              <td>{{ fmtScore(aiResult.valuation.model_score) }}</td>
-                              <td colspan="2">→ {{ aiResult.valuation.model_name }}<template v-if="aiResult.valuation.growth_downside_dispersion > 0">（稳定性按下行波动 {{ fmtNum(aiResult.valuation.growth_downside_dispersion) }} pp 计）</template> · 归一化分母 {{ fmtW(scoreDenominator(aiResult.valuation)) }} · 阈值：三阶段 ≥70 / 两阶段 ≥45</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </template>
-                      <div class="ai-v" v-if="aiResult.valuation.model_score || aiResult.valuation.sgr"><template v-if="aiResult.valuation.model_score && aiResult.valuation.score_growth == null">模型得分 {{ fmtNum(aiResult.valuation.model_score) }}<template v-if="aiResult.valuation.growth_downside_dispersion > 0">（稳定性按下行波动 {{ fmtNum(aiResult.valuation.growth_downside_dispersion) }} pp 计）</template></template><template v-if="aiResult.valuation.model_score && aiResult.valuation.score_growth == null && aiResult.valuation.sgr"> · </template><template v-if="aiResult.valuation.sgr">长期内生增速参考 {{ fmtNum(aiResult.valuation.sgr) }}%<template v-if="aiResult.valuation.retention_rate != null">（留存率 {{ fmtNum(aiResult.valuation.retention_rate * 100) }}%<template v-if="aiResult.valuation.retention_basis">，{{ retentionBasisLabel(aiResult.valuation.retention_basis) }}</template>）</template></template></div>
-                      <div class="ai-v" v-if="aiResult.valuation.params && aiResult.valuation.params.length"><span>模型参数</span><span v-for="p in aiResult.valuation.params" :key="p.key" style="margin-left:10px">{{ p.label }} {{ fmtNum(p.value) }}</span></div>
-                      <div class="ai-v" v-if="aiResult.valuation.params && aiResult.valuation.params.length">
-                        最终路径：<template v-if="aiResult.valuation.model === 'perpetual'">永续 g {{ fmtNum(paramValue(aiResult.valuation, 'g')) }}%</template><template v-else-if="aiResult.valuation.model === 'two_stage'">g1 {{ fmtNum(paramValue(aiResult.valuation, 'g1')) }}%（回归 {{ aiResult.valuation.growth_fade_years || paramValue(aiResult.valuation, 'n1') }} 年）→ g∞ {{ fmtNum(paramValue(aiResult.valuation, 'g2')) }}%</template><template v-else-if="aiResult.valuation.model === 'three_stage'">g1 {{ fmtNum(paramValue(aiResult.valuation, 'g1')) }}%（{{ paramValue(aiResult.valuation, 'n1') }} 年）→ g2 {{ fmtNum(paramValue(aiResult.valuation, 'g2')) }}%（{{ paramValue(aiResult.valuation, 'n2') }} 年）→ g∞ {{ fmtNum(paramValue(aiResult.valuation, 'g3')) }}%</template><template v-else>零增长</template>
-                        <template v-if="aiResult.valuation.growth_fade_years"> · 回归年限 {{ aiResult.valuation.growth_fade_years }} 年</template>
-                      </div>
-                      <!-- g1 调整四步：数值取后端字段，文案统一由 growth_adjustment 给出 -->
-                      <div class="ai-v ai-g1-steps" v-if="aiResult.valuation.growth_terminal != null">
-                        <div>① 离散度折减：{{ aiResult.valuation.growth_damping > 0 ? fmtPP(aiResult.valuation.growth_damping) + 'pp' : '未触发' }}</div>
-                        <div>② 软上限：{{ fmtRate(aiResult.valuation.growth_cap) }}%<template v-if="aiResult.valuation.growth_cap > 0 && scenarioG1(aiResult.valuation) != null && scenarioG1(aiResult.valuation) >= aiResult.valuation.growth_cap - 1e-9">（已触发）</template><template v-else>（未触发）</template></div>
-                        <div>③ 包络：A ± {{ fmtPP(aiResult.valuation.growth_envelope) }}pp</div>
-                        <div>④ g1 = {{ scenarioG1(aiResult.valuation) != null ? fmtRate(scenarioG1(aiResult.valuation)) + '%' : '—' }}</div>
-                      </div>
-                      <div class="ai-v" v-if="aiResult.valuation.growth_terminal != null">
-                        终值 g∞ = min(宏观 {{ fmtRate(aiResult.valuation.growth_macro) }}%、r−1 {{ fmtRate((aiResult.valuation.discount_rate || 0) - 1) }}%<template v-if="aiResult.valuation.sgr">、SGR {{ fmtRate(aiResult.valuation.sgr) }}%</template>) → 向下取整 0.5pp = {{ fmtRate(aiResult.valuation.growth_terminal) }}%
-                      </div>
-                      <div class="ai-v" v-if="aiResult.valuation.growth_fade_years != null">
-                        回归年限：n_total = clamp(round((A − g∞) / 1.5), 3, 10) = {{ aiResult.valuation.growth_fade_years }} 年<template v-if="paramValue(aiResult.valuation, 'n1') != null"> · n1 = {{ fmtNum(paramValue(aiResult.valuation, 'n1')) }} 年</template><template v-if="paramValue(aiResult.valuation, 'n2') != null"> · n2 = {{ fmtNum(paramValue(aiResult.valuation, 'n2')) }} 年</template>
-                      </div>
-                      <p class="ai-text" v-if="aiResult.valuation.growth_adjustment">增长调整：{{ aiResult.valuation.growth_adjustment }}</p>
-                      <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
-                    </div>
-                    <!-- 组四：基期现金流（逐年恒等式 → 选中口径 → 周期判定 → 口径说明/逐年明细） -->
-                    <div>
-                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">基期现金流</div>
-                      <!-- 公式行：取 fcf_series 最近一年，三项严格满足 X − Y = Z -->
-                      <div class="ai-v" v-if="fcfLatestPoint(aiResult.valuation)">
-                        FCF = 经营现金流净额 {{ fmtYiPlain(fcfLatestPoint(aiResult.valuation).operating_cash) }} 亿 − 保全性资本支出 {{ fmtYiPlain(fcfLatestPoint(aiResult.valuation).preservation_capex) }} 亿 = {{ fmtYiPlain(fcfLatestPoint(aiResult.valuation).fcf) }} 亿（{{ fcfLatestPoint(aiResult.valuation).year }} 年）
-                      </div>
-                      <!-- 选中值行：median/trim_mean 不能按最近一年的分量复现，故与公式行分开展示 -->
-                      <div class="ai-v" v-if="aiResult.valuation.fcf_base_value != null">推荐基期 FCF：{{ fcfSelectionText(aiResult.valuation) }}</div>
-                      <div class="ai-v" v-else>基期自由现金流 {{ aiResult.valuation.fcf_mode_name }}<template v-if="aiResult.valuation.fcf_years">（{{ aiResult.valuation.fcf_years }}年）</template><template v-if="aiResult.valuation.fcf_mode === 'custom'">；自定义值 {{ fmtNum(aiResult.valuation.fcf_custom_value) }}{{ fcfUnitLabel(aiResult.valuation.fcf_custom_unit) }}</template></div>
-                      <p class="ai-text" v-if="aiResult.valuation.fcf_formula_note">{{ aiResult.valuation.fcf_formula_note }}</p>
-                      <el-alert v-if="aiResult.valuation.capex_coverage > 1.3" type="warning" :closable="false" style="margin:6px 0"
-                                title="购建长期资产现金明显高于保全性资本支出（覆盖率 > 1.3），当前基期 FCF 未扣扩张性资本开支。" />
-                      <el-alert v-if="aiResult.valuation.fcf_profit_ratio > 1.5" type="warning" :closable="false" style="margin:6px 0"
-                                title="FCF 中位数为净利润的 1.5 倍以上，请关注折旧摊销、减值与营运资本变动带来的现金含量差异。" />
-                      <div class="ai-v" v-if="aiResult.valuation.fcf_cyclical">FCF 强周期（变异系数 {{ fmtNum(aiResult.valuation.fcf_cv) }}，正负交替 {{ aiResult.valuation.fcf_sign_changes }} 次），基期按 {{ aiResult.valuation.fcf_window_years }} 年去极值平均</div>
-                      <div class="ai-v" v-else-if="aiResult.valuation.fcf_growth_veto">FCF 波动较大（变异系数 {{ fmtNum(aiResult.valuation.fcf_cv) }}，正负交替 {{ aiResult.valuation.fcf_sign_changes }} 次），但 {{ aiResult.valuation.growth_veto_basis }}，按成长性豁免不判强周期；基期 FCF 判定窗口 {{ aiResult.valuation.fcf_window_years }} 年</div>
-                      <div class="ai-v" v-else-if="aiResult.valuation.fcf_window_years">基期 FCF 判定窗口 {{ aiResult.valuation.fcf_window_years }} 年</div>
-                      <p class="ai-text ai-clamp-2" :class="{ 'ai-clamp-off': aiFCFRationaleOpen }" v-if="aiResult.valuation.fcf_rationale">基期自由现金流：{{ aiResult.valuation.fcf_rationale }}</p>
-                      <el-button v-if="aiResult.valuation.fcf_rationale && aiResult.valuation.fcf_rationale.length > 80" text size="small"
-                                 @click="aiFCFRationaleOpen = !aiFCFRationaleOpen">{{ aiFCFRationaleOpen ? '收起说明' : '展开说明' }}</el-button>
                       <div v-if="aiResult.valuation.fcf_series && aiResult.valuation.fcf_series.length" class="ai-fcf-series">
                         <el-button text size="small" @click="aiFCFSeriesOpen = !aiFCFSeriesOpen">{{ aiFCFSeriesOpen ? '收起逐年明细' : '展开逐年明细（' + aiResult.valuation.fcf_series.length + ' 年）' }}</el-button>
                         <table v-if="aiFCFSeriesOpen" class="ai-weight-table">
                           <thead><tr><th>年份</th><th>经营现金流净额（亿）</th><th>保全性资本支出（亿）</th><th>FCF（亿）</th></tr></thead>
                           <tbody>
                             <tr v-for="p in aiResult.valuation.fcf_series" :key="p.year">
-                              <td>{{ p.year }}</td>
-                              <td>{{ fmtYiPlain(p.operating_cash) }}</td>
-                              <td>{{ fmtYiPlain(p.preservation_capex) }}</td>
-                              <td>{{ fmtYiPlain(p.fcf) }}</td>
+                              <td data-label="年份">{{ p.year }}</td>
+                              <td data-label="经营现金流净额（亿）">{{ fmtYiPlain(p.operating_cash) }}</td>
+                              <td data-label="保全性资本支出（亿）">{{ fmtYiPlain(p.preservation_capex) }}</td>
+                              <td data-label="FCF（亿）">{{ fmtYiPlain(p.fcf) }}</td>
                             </tr>
                           </tbody>
                         </table>
                       </div>
                     </div>
-                    <!-- 组五：说明（推导类提示统一弱化为小字，仅保留结论） -->
-                    <div>
-                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">说明</div>
-                      <p class="ai-text" v-if="aiResult.valuation.adjust_rd">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，且研发投入同比扩张{{ fmtNum((aiResult.valuation.rd_expansion || 0) / 1e8) }} 亿元，建议开启研发调整。</p>
-                      <p class="ai-text" v-else-if="aiResult.valuation.rd_ratio > 5">研发费用率 {{ fmtNum(aiResult.valuation.rd_ratio) }}%，但研发投入同比未扩张（或上年数据缺失），不建议开启研发调整。</p>
-                      <p class="ai-text" v-if="aiResult.valuation.volatile">增速波动较大：高增长期增长率按离散度折减（最多 5pp，且不突破复合锚 A−5pp 包络）；模型稳定性分只按下行波动计算。</p>
-                      <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" style="margin:6px 0" />
-                      <p class="ai-text" v-if="aiResult.valuation.base_year">基期年 {{ aiResult.valuation.base_year }}<template v-if="aiResult.valuation.capex_coverage"> · Capex 覆盖率 {{ fmtNum(aiResult.valuation.capex_coverage) }}</template><template v-if="aiResult.valuation.fcf_profit_ratio"> · FCF/净利润 {{ fmtNum(aiResult.valuation.fcf_profit_ratio) }}</template></p>
-                      <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
-                    </div>
-                    <!-- 组六：三档情景总结（单档参数分析之后的收口区块；「套用到估值」与总结同区块，
-                         默认套用基准档，可切换保守/乐观逐档套用，逻辑见 applyAIValuation） -->
-                    <div>
-                      <div class="ai-scenario-head">
-                        <div class="ai-section-title" style="font-size:13px;margin-bottom:0">{{ aiResult.valuation.scenarios && aiResult.valuation.scenarios.length ? '三档情景总结' : '参数总结' }}</div>
-                        <div class="ai-scenario-actions">
-                          <!-- 旧响应/旧缓存无 scenarios 时不渲染选择器，套用按钮回退顶层基准字段 -->
-                          <el-radio-group v-if="aiResult.valuation.scenarios && aiResult.valuation.scenarios.length"
-                                          v-model="aiApplyScenario" size="small">
-                            <el-radio-button v-for="s in aiResult.valuation.scenarios" :key="s.key" :value="s.key">{{ s.name }}</el-radio-button>
-                          </el-radio-group>
-                          <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
-                        </div>
-                      </div>
-                      <template v-if="aiResult.valuation.scenarios && aiResult.valuation.scenarios.length">
-                        <div class="ai-v ai-scenario-band" v-if="aiResult.valuation.scenario_band_source">{{ scenarioBandText(aiResult.valuation) }}</div>
-                        <table class="ai-scenario-table">
-                          <thead>
-                            <tr>
-                              <th>指标</th>
-                              <th v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.name }}</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <tr><th>基期 FCF（亿）</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtYiPlain(s.base_fcf) }}<template v-if="s.base_fcf_basis">（{{ s.base_fcf_basis }}）</template></td></tr>
-                            <tr><th>折现率</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.discount_rate) }}%</td></tr>
-                            <tr><th>模型</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></td></tr>
-                            <tr><th>复合锚 A</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.growth_anchor) }}%</td></tr>
-                            <tr><th>g1</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }}</td></tr>
-                            <tr><th>g2</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioG2(s) != null ? fmtRate(scenarioG2(s)) + '%' : '—' }}</td></tr>
-                            <tr><th>g∞</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.terminal_growth) }}%</td></tr>
-                            <tr><th>得分</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtScore(s.model_score) }}</td></tr>
-                            <tr><th>相对基准</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioDelta(s) }}</td></tr>
-                            <tr><th>说明</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></td></tr>
-                          </tbody>
-                        </table>
-                        <div class="ai-scenario-cards">
-                          <div v-for="s in aiResult.valuation.scenarios" :key="s.key" class="ai-scenario-card" :class="{ 'scenario-base': s.key === 'base' }">
-                            <div class="ai-scenario-card-title">{{ s.name }}<span v-if="s.key === aiApplyScenario" class="ai-scenario-badge">当前套用</span></div>
-                            <div class="ai-v">基期 FCF {{ fmtYiPlain(s.base_fcf) }} 亿<template v-if="s.base_fcf_basis"> · {{ s.base_fcf_basis }}</template></div>
-                            <div class="ai-v">折现率 {{ fmtRate(s.discount_rate) }}% · 模型 {{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></div>
-                            <div class="ai-v">A {{ fmtRate(s.growth_anchor) }}% · g1 {{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }} · g∞ {{ fmtRate(s.terminal_growth) }}%</div>
-                            <div class="ai-v">得分 {{ fmtScore(s.model_score) }} · {{ scenarioDelta(s) }}</div>
-                            <div class="ai-v ai-scenario-note">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></div>
-                          </div>
-                        </div>
-                        <p class="ai-text">三档的基期 FCF 按分年序列离散锚定：保守取近年最低、乐观取近年最高；强周期股穿越周期、稳定股按 ±25% clamp 防异常年。后端不输出逐档股价；点「套用到估值」时，按所选档把该档折现率、增长参数与基期 FCF（自定义口径）写回估值表单，默认基准档与上方参数一致。增长参数相同时仅折现率分档；乐观档的增长锚上限放宽到 40%、折现率下限放宽到 7%，不与基准档共用「适中」边界。</p>
+                    <!-- 三、折现率 -->
+                    <div class="ai-val-block">
+                      <div class="ai-val-head">折现率</div>
+                      <template v-if="aiResult.valuation.discount_reconcile_available">
+                        <div class="ai-v ai-val-line" v-for="line in discountLines(aiResult.valuation)" :key="line">{{ line }}</div>
                       </template>
+                      <template v-else>
+                        <div class="ai-v">
+                          基准（{{ aiResult.valuation.discount_base_label === 'WACC' ? 'WACC' : (aiResult.valuation.discount_base_label === 'Re' ? 'Re' : '默认值') }}）{{ fmtRate(aiResult.valuation.discount_base_value) }}% ·
+                          取整 {{ signedPP2(aiResult.valuation.discount_rounding_adjustment) }} → {{ fmtRate(aiResult.valuation.discount_rounded) }}% ·
+                          区间约束 {{ signedPP2(aiResult.valuation.discount_range_adjustment) }} → r = {{ fmtRate(aiResult.valuation.discount_rate) }}%
+                        </div>
+                      </template>
+                      <div class="ai-v ai-val-muted" v-if="aiResult.valuation.discount_note">{{ aiResult.valuation.discount_note }}</div>
+                      <div class="ai-v">
+                        公司特定风险：<template v-if="aiResult.valuation.company_risk_items && aiResult.valuation.company_risk_items.length">{{ riskItemsText(aiResult.valuation.company_risk_items) }}</template><template v-else>未叠加公司特定风险溢价</template>
+                      </div>
+                      <div class="ai-v ai-val-muted" v-if="aiResult.valuation.company_risk_note">{{ aiResult.valuation.company_risk_note }}</div>
+                    </div>
+                    <!-- 四、增长参数 -->
+                    <div class="ai-val-block">
+                      <div class="ai-val-head">增长参数</div>
+                      <table class="ai-weight-table ai-anchor-table">
+                        <thead><tr><th>构成</th><th>锚值</th><th>权重</th><th>贡献</th></tr></thead>
+                        <tbody>
+                          <tr v-for="row in anchorRows(aiResult.valuation)" :key="row.key">
+                            <td data-label="构成">{{ row.name }}</td>
+                            <td data-label="锚值">{{ row.available ? fmtRate(row.value) + '%' : '不适用' }}</td>
+                            <td data-label="权重">{{ row.available ? fmtRate(row.weight) : '—' }}</td>
+                            <td data-label="贡献">{{ row.available ? fmtRate(row.contribution) + 'pp' : '—' }}</td>
+                          </tr>
+                          <tr class="ai-weight-total">
+                            <td data-label="构成">加权合计</td>
+                            <td colspan="2" data-label="权重">权重合计 {{ fmtRate(anchorTable(aiResult.valuation).weight_sum) }}</td>
+                            <td data-label="贡献">{{ fmtRate(anchorTable(aiResult.valuation).raw) }}%</td>
+                          </tr>
+                          <tr>
+                            <td data-label="构成">0.5pp 取整</td>
+                            <td colspan="3" data-label="调整">{{ signedPP2(anchorTable(aiResult.valuation).rounding_adjustment) }} → {{ fmtRate(anchorTable(aiResult.valuation).rounded) }}%</td>
+                          </tr>
+                          <tr>
+                            <td data-label="构成">区间约束 [−5.0, 30.0]</td>
+                            <td colspan="3" data-label="调整">{{ signedPP2(anchorTable(aiResult.valuation).range_adjustment) }} → 最终 A = {{ fmtRate(anchorTable(aiResult.valuation).final) }}%</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                      <div class="ai-v ai-val-muted" v-if="anchorTable(aiResult.valuation).note">{{ anchorTable(aiResult.valuation).note }}</div>
+                      <div class="ai-v" v-if="aiResult.valuation.growth_cycle_note">{{ aiResult.valuation.growth_cycle_note }}</div>
+                      <div class="ai-v" v-if="aiResult.valuation.g1_note">{{ aiResult.valuation.g1_note }}</div>
+                      <div class="ai-v" v-if="aiResult.valuation.terminal_note">{{ aiResult.valuation.terminal_note }}</div>
+                      <div class="ai-v" v-if="aiResult.valuation.negative_growth_note">{{ aiResult.valuation.negative_growth_note }}</div>
+                      <div class="ai-v" v-if="aiResult.valuation.model === 'zero'">零增长，无增长参数</div>
+                      <div class="ai-v" v-else-if="aiResult.valuation.model === 'perpetual'">
+                        A {{ fmtRate(anchorTable(aiResult.valuation).final) }}% · 永续 g {{ fmtRate(paramValue(aiResult.valuation, 'g')) }}%
+                      </div>
+                      <div class="ai-v" v-else-if="aiResult.valuation.model === 'two_stage'">
+                        A {{ fmtRate(anchorTable(aiResult.valuation).final) }}% · g1 {{ fmtRate(paramValue(aiResult.valuation, 'g1')) }}%（{{ paramValue(aiResult.valuation, 'n1') }} 年）· g∞ {{ fmtRate(aiResult.valuation.growth_terminal) }}%
+                      </div>
+                      <div class="ai-v" v-else>
+                        A {{ fmtRate(anchorTable(aiResult.valuation).final) }}% · g1 {{ fmtRate(paramValue(aiResult.valuation, 'g1')) }}%（{{ paramValue(aiResult.valuation, 'n1') }} 年）· g2 {{ fmtRate(paramValue(aiResult.valuation, 'g2')) }}%（{{ paramValue(aiResult.valuation, 'n2') }} 年）· g∞ {{ fmtRate(aiResult.valuation.growth_terminal) }}%
+                      </div>
+                    </div>
+                    <!-- 五、关键校验 -->
+                    <div class="ai-val-block">
+                      <div class="ai-val-head">关键校验</div>
+                      <div class="ai-v">净资本支出/保全性资本支出：{{ checkText(aiResult.valuation.capex_check) }}</div>
+                      <div class="ai-v ai-val-muted" v-if="aiResult.valuation.capex_check && aiResult.valuation.capex_check.note">{{ aiResult.valuation.capex_check.note }}</div>
+                      <div class="ai-v">基期 FCF/净利润：{{ checkText(aiResult.valuation.fcf_profit_check) }}</div>
+                      <div class="ai-v ai-val-muted" v-if="aiResult.valuation.fcf_profit_check && aiResult.valuation.fcf_profit_check.note">{{ aiResult.valuation.fcf_profit_check.note }}</div>
+                    </div>
+                    <!-- 六、一句话结论 -->
+                    <div class="ai-val-block">
+                      <div class="ai-val-head">一句话结论</div>
+                      <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
+                      <p class="ai-text ai-val-warn" v-for="w in (aiResult.valuation.warnings || [])" :key="w">提示：{{ w }}</p>
+                      <div class="ai-val-actions">
+                        <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">应用参数到估值表单</el-button>
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -236,9 +236,9 @@ func TestAssessFCFGrowthReliability(t *testing.T) {
 	years := []int{2021, 2022, 2023, 2024, 2025}
 	lumpy := map[int]float64{2021: 0.5e8, 2022: 1.0e8, 2023: 2.5e8, 2024: -1.77e8, 2025: 10.94e8}
 
-	// 原始强周期 → 未计入，原因含「变异系数」。
+	// 原始强周期 → 未计入，原因含「序列波动」。
 	term := assessFCFGrowth(lumpy, years, true, fcfCycle{Evaluated: true, RawCyclical: true, CV: 1.61, SignChanges: 2})
-	if !term.Available || term.Included || !strings.Contains(term.Reason, "变异系数") {
+	if !term.Available || term.Included || !strings.Contains(term.Reason, "序列波动") {
 		t.Errorf("原始强周期应剔除 FCF：%+v", term)
 	}
 
@@ -252,7 +252,7 @@ func TestAssessFCFGrowthReliability(t *testing.T) {
 	// 仅 1 个有效同比点 → 未计入。
 	onePoint := map[int]float64{2023: 1e8, 2024: 2e8}
 	term = assessFCFGrowth(onePoint, []int{2023, 2024}, true, fcfCycle{})
-	if !term.Available || term.Included || !strings.Contains(term.Reason, "有效同比点仅 1 个") {
+	if !term.Available || term.Included || !strings.Contains(term.Reason, "有效同比点不足") {
 		t.Errorf("单点同比应剔除 FCF：%+v", term)
 	}
 
@@ -276,29 +276,17 @@ func TestAssessFCFGrowthReliability(t *testing.T) {
 	}
 }
 
-// U5：基准增速两项等权与「未计入」口径说明。
+// U5：基准增速按可用分项等权（缺项不补 0）。
 func TestBaseGrowthWeighting(t *testing.T) {
 	x, k := weightedGrowth(40.29, true, 25.89, true, -45.90, false)
 	if k != 2 || !approxEq(x, (40.29+25.89)/2, 1e-9) {
 		t.Errorf("FCF 未计入时应按 2 项等权：X=%v k=%d", x, k)
 	}
-	note := buildBaseGrowthNote([]int{2022, 2023, 2024, 2025}, 2,
-		[]string{"营收 40.29%", "净利润 25.89%"},
-		[]string{"营收：同比去极值中位数", "净利润：同比去极值中位数"},
-		nil,
-		"FCF -45.90% 未计入（序列不稳定：变异系数 1.61、正负交替 2 次）")
-	for _, want := range []string{"按 2 项等权", "FCF -45.90% 未计入", "变异系数 1.61"} {
-		if !strings.Contains(note, want) {
-			t.Errorf("口径说明缺少「%s」：%s", want, note)
-		}
-	}
-	if strings.Contains(note, "FCF样本不足") || strings.Contains(note, "三项等权") {
-		t.Errorf("未计入不得写成样本不足/三项等权：%s", note)
-	}
-
-	// 三项均可用且稳定 → k=3 不变。
 	if x3, k3 := weightedGrowth(10, true, 20, true, 30, true); k3 != 3 || !approxEq(x3, 20, 1e-9) {
 		t.Errorf("三项齐全时应为 k=3：X=%v k=%d", x3, k3)
+	}
+	if _, k0 := weightedGrowth(10, false, 20, false, 30, false); k0 != 0 {
+		t.Errorf("全不可用时 k 应为 0，实际 %d", k0)
 	}
 }
 
@@ -328,117 +316,106 @@ func TestScoreSignalsDownside(t *testing.T) {
 	}
 }
 
-// U7：睿创型成长公司端到端——不被误判为永续/强周期，FCF 不计入 X。
+// U7：睿创型成长公司端到端——不被误判为强周期，FCF 不计入历史锚。
 func TestRecommendValuationGrowthCompany(t *testing.T) {
 	balance, cashflow, income := p5GrowthFixture()
-	rec := RecommendValuation(balance, cashflow, income)
+	rec := RecommendValuation(ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 100e8,
+	})
 
 	if rec.Model != valModelTwoStage && rec.Model != valModelThreeStage {
-		t.Errorf("成长公司不应落到 %s（X=%v score=%v）", rec.Model, rec.BaseGrowth, rec.ModelScore)
+		t.Errorf("成长公司不应落到 %s（A=%v score=%v）", rec.Model, rec.GrowthAnchor.Final, rec.ModelScore)
 	}
-	if !rec.FCFGrowthVeto || rec.FCFCyclical || !rec.FCFRawCyclical {
-		t.Errorf("成长性否决联动不符：veto=%v cyclical=%v raw=%v", rec.FCFGrowthVeto, rec.FCFCyclical, rec.FCFRawCyclical)
+	if rec.FCFCyclical {
+		t.Errorf("成长性否决后不应判强周期：CV=%v", rec.FCFCV)
 	}
-	if rec.FCFWindowYears != valFCFYearsGrowth {
-		t.Errorf("成长性否决后窗口应为 %d 年，实际 %d", valFCFYearsGrowth, rec.FCFWindowYears)
+	if !rec.GrowthFCFOK {
+		t.Errorf("FCF 增速应可算：ok=%v value=%v", rec.GrowthFCFOK, rec.GrowthFCF)
 	}
-	if !rec.GrowthFCFOK || rec.GrowthFCFIncluded || rec.GrowthFCFExcludeReason == "" {
-		t.Errorf("FCF 应可算但未计入 X：ok=%v included=%v reason=%q",
-			rec.GrowthFCFOK, rec.GrowthFCFIncluded, rec.GrowthFCFExcludeReason)
+	// FCF 波动过大不计入历史锚 → 历史锚基数 = 营收/净利润两项等权均值。
+	if want := round2((rec.GrowthRevenue + rec.GrowthProfit) / 2); !approxEq(rec.GrowthHistoryBase, want, 0.01) {
+		t.Errorf("历史锚基数应为营收/净利润两项均值 %.2f，实际 %.2f", want, rec.GrowthHistoryBase)
 	}
-	if rec.GrowthDownsideDispersion <= 0 {
-		t.Errorf("净利润下行 12%% 时下行离散度应 >0，实际 %v", rec.GrowthDownsideDispersion)
+	// 仅历史锚可用（0.85）+ 宏观锚（0.15）：0.85×31.63 + 0.15×4.50 ≈ 27.5。
+	if rec.GrowthAnchor.Final < 27.4 || rec.GrowthAnchor.Final > 27.6 {
+		t.Errorf("A=%v 超出设计验收范围 [27.4, 27.6]", rec.GrowthAnchor.Final)
 	}
-	if want := (rec.GrowthRevenue + rec.GrowthProfit) / 2; !approxEq(rec.BaseGrowth, want, 1e-9) {
-		t.Errorf("X 应为营收/净利润两项均值 %v，实际 %v", want, rec.BaseGrowth)
-	}
-	if rec.BaseGrowth < 28.90 || rec.BaseGrowth > 33.09 {
-		t.Errorf("X=%v 超出设计验收范围 [28.90, 33.09]", rec.BaseGrowth)
-	}
-	if !strings.Contains(rec.BaseGrowthNote, "按 2 项等权") || !strings.Contains(rec.BaseGrowthNote, "未计入") ||
-		strings.Contains(rec.BaseGrowthNote, "FCF样本不足") {
-		t.Errorf("口径说明不符：%s", rec.BaseGrowthNote)
-	}
-	if !strings.Contains(rec.FCFRationale, "成长性豁免") {
-		t.Errorf("基期 FCF 口径应说明成长性豁免：%s", rec.FCFRationale)
+	if rec.GrowthDispersion <= 0 {
+		t.Errorf("净利润下行 12%% 时离散度应 >0，实际 %v", rec.GrowthDispersion)
 	}
 }
 
 // U8：真周期股不被成长性否决，仍走 trim_mean + 10 年。
 func TestRecommendValuationCyclical(t *testing.T) {
 	balance, cashflow, income := p5CyclicalFixture()
-	rec := RecommendValuation(balance, cashflow, income)
+	rec := RecommendValuation(ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 3000e8,
+	})
 
-	if rec.FCFGrowthVeto {
-		t.Errorf("中远海控型真周期股不应被成长性否决：%s", rec.GrowthVetoBasis)
+	if !rec.FCFCyclical {
+		t.Errorf("中远海控型真周期股应判周期：CV=%v 翻转=%d", rec.FCFCV, rec.FCFSignChanges)
 	}
-	if !rec.FCFRawCyclical || !rec.FCFCyclical {
-		t.Errorf("真周期股原始/生效判据均应为真：raw=%v cyclical=%v", rec.FCFRawCyclical, rec.FCFCyclical)
+	if rec.FCFMode != valFCFTrimMean || rec.FCFYears != valFCFYearsCyclical {
+		t.Errorf("真周期股应取 %d 年 trim_mean：mode=%s years=%d",
+			valFCFYearsCyclical, rec.FCFMode, rec.FCFYears)
 	}
-	if rec.FCFWindowYears != valFCFYearsCyclical || rec.FCFMode != valFCFTrimMean || rec.FCFYears != valFCFYearsCyclical {
-		t.Errorf("真周期股应取 %d 年 trim_mean：mode=%s years=%d window=%d",
-			valFCFYearsCyclical, rec.FCFMode, rec.FCFYears, rec.FCFWindowYears)
+	if !rec.GrowthFCFOK {
+		t.Errorf("周期股 FCF 增速应可算：ok=%v value=%v", rec.GrowthFCFOK, rec.GrowthFCF)
 	}
-	if !rec.GrowthFCFOK || rec.GrowthFCFIncluded || !strings.Contains(rec.GrowthFCFExcludeReason, "变异系数") {
-		t.Errorf("周期股 FCF 增速应按原始判据剔除：ok=%v included=%v reason=%q",
-			rec.GrowthFCFOK, rec.GrowthFCFIncluded, rec.GrowthFCFExcludeReason)
+	// 强周期 FCF 不计入历史锚 → 历史锚基数 = 营收/净利润两项等权均值。
+	if want := round2((rec.GrowthRevenue + rec.GrowthProfit) / 2); !approxEq(rec.GrowthHistoryBase, want, 0.01) {
+		t.Errorf("历史锚基数应为营收/净利润两项均值 %.2f，实际 %.2f", want, rec.GrowthHistoryBase)
 	}
 }
 
-// U9：稳定公司不受影响（FCF 计入、3 年窗口、模型/参数不变）。
+// U9：稳定公司不受影响（FCF 计入、latest、模型/参数正常）。
 func TestRecommendValuationStableUnaffected(t *testing.T) {
 	balance, cashflow, income := p5StableFixture()
-	rec := RecommendValuation(balance, cashflow, income)
+	rec := RecommendValuation(ValuationRecommendInput{
+		Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 5000e8,
+	})
 
-	if rec.FCFGrowthVeto || rec.FCFRawCyclical || rec.FCFCyclical {
-		t.Errorf("稳定公司不应触发周期/否决：%+v", rec)
+	if rec.FCFCyclical {
+		t.Errorf("稳定公司不应触发周期：%+v", rec.FCFCV)
 	}
-	if !rec.GrowthFCFIncluded || rec.GrowthFCFExcludeReason != "" {
-		t.Errorf("稳定公司 FCF 应计入 X：included=%v reason=%q", rec.GrowthFCFIncluded, rec.GrowthFCFExcludeReason)
+	if rec.FCFMode != valFCFLatest {
+		t.Errorf("稳定公司基期 FCF 应取 latest，实际 mode=%s", rec.FCFMode)
 	}
-	if rec.FCFWindowYears != valFCFYearsStable || rec.FCFMode != valFCFLatest {
-		t.Errorf("稳定公司窗口应为 %d 年 latest，实际 window=%d mode=%s",
-			valFCFYearsStable, rec.FCFWindowYears, rec.FCFMode)
+	// 历史锚 12.00（权重 0.85）+ 宏观锚 4.50（权重 0.15）→ 加权合计 10.875 → 取整 11.0。
+	if !approxEq(rec.GrowthAnchor.Final, 11, 0.01) {
+		t.Errorf("稳定公司复合锚应为 11%%，实际 %v", rec.GrowthAnchor.Final)
 	}
-	if !approxEq(rec.BaseGrowth, 12, 1e-9) || rec.Model != valModelTwoStage {
-		t.Errorf("稳定公司基准增速/模型不符：X=%v model=%s", rec.BaseGrowth, rec.Model)
-	}
-	if !strings.Contains(rec.BaseGrowthNote, "按 3 项等权") {
-		t.Errorf("三项均计入时应为 3 项等权：%s", rec.BaseGrowthNote)
+	if rec.Model == valModelZero {
+		t.Errorf("稳定增长公司不应落到零增长：%+v", rec)
 	}
 }
 
-// U10：prompt 与 ApplyValuationRecommendation 的新字段。
+// U10：prompt 事实块与 Apply 的 R19 字段。
 func TestValuationPromptNoiseFix(t *testing.T) {
-	rec := sampleRecommendation()
-	rec.GrowthFCFOK = true
-	rec.GrowthFCFIncluded = false
-	rec.GrowthFCFExcludeReason = "序列不稳定：变异系数 1.61、正负交替 2 次"
-	rec.FCFCV = 1.61
-	rec.FCFSignChanges = 2
-	rec.FCFRawCyclical = true
-	rec.FCFGrowthVeto = true
-	rec.FCFCyclical = false
-	rec.FCFWindowYears = valFCFYearsGrowth
-	rec.GrowthVetoBasis = "营收 CAGR 37.19%、最小同比 21.27%、强增长年 4/4、毛利率极差 11.80pp"
-
+	rec := recommendedStub()
 	block := valuationPromptBlock(rec)
-	for _, want := range []string{"FCF 未计入", "成长性豁免命中", "下行波动 5.00 pp", "按 2 项等权"} {
+	for _, want := range []string{
+		"【估值参数事实（只读，不得改动）】", "基期 FCF：12.34 亿元",
+		"净资本支出/保全性资本支出 0.90（2022–2024）",
+		"FCF/归母净利润 1.25（2022–2024）", "公司特定风险",
+	} {
 		if !strings.Contains(block, want) {
-			t.Errorf("prompt 缺少「%s」：%s", want, block)
+			t.Errorf("prompt 缺少「%s」：\n%s", want, block)
 		}
 	}
-	if strings.Contains(block, "三项等权") {
-		t.Errorf("FCF 未计入时不得出现「三项等权」：%s", block)
+	for _, banned := range []string{"三档", "A_raw", "软上限", "包络", "growth_weights"} {
+		if strings.Contains(block, banned) {
+			t.Errorf("prompt 不应含「%s」：\n%s", banned, block)
+		}
 	}
 
 	var res model.AIAnalysisResult
 	ApplyValuationRecommendation(&res, rec)
 	v := res.Valuation
-	if !v.GrowthFCFExcluded || v.GrowthFCFExcludeReason != rec.GrowthFCFExcludeReason ||
-		v.GrowthDownsideDispersion != rec.GrowthDownsideDispersion ||
-		!v.FCFCyclicalRaw || !v.FCFGrowthVeto || v.GrowthVetoBasis != rec.GrowthVetoBasis {
-		t.Errorf("6 个新字段未正确回填：%+v", v)
+	if v.FCFBaseValue != rec.FCFBaseValue || v.GrowthAnchor.Final != rec.GrowthAnchor.Final ||
+		v.CapexCheck.Ratio != rec.CapexCheck.Ratio || v.FCFProfitCheck.Ratio != rec.FCFProfitCheck.Ratio ||
+		v.CompanyRiskPremium != rec.CompanyRiskPremium || !v.DiscountReconcileAvailable {
+		t.Errorf("R19 字段未正确回填：%+v", v)
 	}
 
 	blob, err := json.Marshal(v)
@@ -446,8 +423,8 @@ func TestValuationPromptNoiseFix(t *testing.T) {
 		t.Fatalf("序列化失败：%v", err)
 	}
 	for _, key := range []string{
-		`"growth_fcf_excluded":true`, `"growth_fcf_exclude_reason":`, `"growth_downside_dispersion":`,
-		`"fcf_cyclical_raw":true`, `"fcf_growth_veto":true`, `"growth_veto_basis":`,
+		`"fcf_base_value":`, `"capex_check":`, `"fcf_profit_check":`,
+		`"growth_anchor":`, `"discount_reconcile_available":true`,
 	} {
 		if !strings.Contains(string(blob), key) {
 			t.Errorf("JSON 缺少 %s：%s", key, blob)
@@ -455,16 +432,19 @@ func TestValuationPromptNoiseFix(t *testing.T) {
 	}
 }
 
-// U11：同一输入连调 3 次逐位一致（含新字段）。
+// U11：同一输入连调 3 次逐位一致。
 func TestRecommendValuationNoiseFixIdempotent(t *testing.T) {
 	fixtures := map[string]func() ([]model.ReportRow, []model.ReportRow, []model.ReportRow){
 		"growth": p5GrowthFixture, "cyclical": p5CyclicalFixture, "stable": p5StableFixture,
 	}
 	for name, fixture := range fixtures {
 		balance, cashflow, income := fixture()
-		first := RecommendValuation(balance, cashflow, income)
+		input := ValuationRecommendInput{
+			Balance: balance, Cashflow: cashflow, Income: income, MarketCap: 1000e8,
+		}
+		first := RecommendValuation(input)
 		for i := 0; i < 2; i++ {
-			if got := RecommendValuation(balance, cashflow, income); !reflect.DeepEqual(got, first) {
+			if got := RecommendValuation(input); !reflect.DeepEqual(got, first) {
 				t.Fatalf("%s：第 %d 次调用与首次不一致", name, i+2)
 			}
 		}
