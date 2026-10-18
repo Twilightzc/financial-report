@@ -841,6 +841,10 @@ td.num, .val, .yoy {
 .ai-val-line { overflow-wrap: anywhere; }
 .ai-val-warn { color: var(--warn, var(--brand-bright)); }
 .ai-val-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+/* 计算明细折叠区：主视图只留结论性参数，推导/对账/校验表格默认收起。 */
+.ai-val-detail-body { margin-top: 8px; }
+.ai-val-subhead { font-size: 12px; font-weight: 700; color: var(--ink-2); margin: 10px 0 2px; }
+.ai-val-detail-body > .ai-val-subhead:first-child { margin-top: 0; }
 
 .ai-weight-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px; table-layout: fixed; }
 .ai-weight-table th, .ai-weight-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; vertical-align: top; overflow-wrap: anywhere; }
@@ -849,7 +853,6 @@ td.num, .val, .yoy {
 .ai-weight-table tbody th { color: var(--muted); font-weight: 600; }
 .ai-weight-total td { font-weight: 700; color: var(--ink); background: var(--surface-2); }
 
-.ai-fcf-series { margin-top: 4px; }
 .ai-clamp-2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .ai-clamp-off { display: block; -webkit-line-clamp: unset; overflow: visible; }
 
