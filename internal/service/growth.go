@@ -73,6 +73,7 @@ type forwardAnchor struct {
 // compositeAnchor 复合锚 A 与 M1 包络。
 type compositeAnchor struct {
 	A            float64
+	RawA         float64 // clamp 前的原始复合锚（0.5 网格），供乐观档放宽上限时使用
 	Insufficient bool
 	Envelope     float64 // M1 包络：5 或 3（pp）
 	AnchorCount  int     // 有效独立锚数量（动态宏观才计数）
@@ -544,7 +545,8 @@ func composeGrowthAnchor(hist float64, histOK bool, delta float64, fwd forwardAn
 		})
 	} else {
 		raw := wHist*histAdj + wFwd*fwd.Value + wMacro*macro.Value
-		res.A = clampFloat(roundHalf(raw), r18CompositeClampLo, r18CompositeClampHi)
+		res.RawA = roundHalf(raw)
+		res.A = clampFloat(res.RawA, r18CompositeClampLo, r18CompositeClampHi)
 	}
 
 	res.AnchorCount = 0

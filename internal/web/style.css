@@ -576,7 +576,12 @@ td.num, .val, .yoy {
 .ai-weight-table tbody th { color: var(--muted); font-weight: 600; }
 .ai-weight-total td { font-weight: 700; color: var(--ink); background: #fafbfc; }
 
+.ai-scenario-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 4px;
+}
 .ai-scenario-band { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+.ai-elapsed { color: var(--muted); font-size: 12px; }
 .ai-scenario-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px; table-layout: fixed; }
 .ai-scenario-table th, .ai-scenario-table td { padding: 6px 8px; border: 1px solid var(--line); text-align: right; vertical-align: top; }
 .ai-scenario-table thead th { color: var(--ink); background: #f6f7f9; text-align: center; }

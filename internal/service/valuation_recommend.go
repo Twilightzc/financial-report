@@ -503,7 +503,7 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	fcfAnchor := newFCFScenarioAnchor(baseFCF, fcfSeries, fcfRec.Mode)
 	bands := computeScenarioBands(A, x, delta, k > 0, fwd, pr.Model)
 	scenInput := scenarioInput{
-		A: A, Discount: discount, GInf: gInf,
+		A: A, RawA: comp.RawA, Discount: discount, GInf: gInf,
 		Macro: macro.Value, MacroBasis: macro.Basis,
 		Dispersion: dispersion, Delta: delta, Fwd: fwd,
 		SGR: sgr, SGROK: sgrOK, Envelope: envelope,
@@ -1727,9 +1727,15 @@ func recommendDiscountRate(balanceByYear, incomeByYear map[int]model.ReportRow, 
 
 // clampDiscountRate 折现率收口：四舍五入到 0.5 网格后 clamp 到 [8, 15]（先取网格再截断，边界唯一）。
 func clampDiscountRate(raw float64) float64 {
+	return clampDiscountRateFloor(raw, valDiscountRateMin)
+}
+
+// clampDiscountRateFloor 折现率收口到 0.5 网格后按 [floor, 15] 截断。
+// 乐观档用更低的 floor（7）体现「更乐观」，基准/保守档仍走 clampDiscountRate 的 [8,15]。
+func clampDiscountRateFloor(raw, floor float64) float64 {
 	r := math.Round(raw/valDiscountRateStep) * valDiscountRateStep
-	if r < valDiscountRateMin {
-		return valDiscountRateMin
+	if r < floor {
+		return floor
 	}
 	if r > valDiscountRateMax {
 		return valDiscountRateMax
@@ -1849,12 +1855,16 @@ func uniqueYears(years []int) []int {
 
 // 三档带宽常量与算法版本（Q1/Q7/Q8）。
 const (
-	valScenarioMethod            = "anchor_disagreement_v1"
-	valScenarioBandDiscount      = 1.0  // 折现率带宽 pp（固定，不随公司缩放）
-	valScenarioBandTerminal      = 0.5  // 终值增长率带宽 pp
-	valScenarioBandGrowthMin     = 1.5  // 增长率带宽下限 pp
-	valScenarioBandGrowthMax     = 4.0  // 增长率带宽上限 pp
-	valScenarioFallbackBandRatio = 0.20 // 无历史/前瞻分歧时按 0.2×A 生成最小带宽
+	valScenarioMethod        = "anchor_disagreement_v1"
+	valScenarioBandDiscount  = 1.0 // 折现率带宽 pp（固定，不随公司缩放）
+	valScenarioBandTerminal  = 0.5 // 终值增长率带宽 pp
+	valScenarioBandGrowthMin = 1.5 // 增长率带宽下限 pp
+	valScenarioBandGrowthMax = 4.0 // 增长率带宽上限 pp
+	// 乐观档放宽：增长锚以未截断的原始复合锚为基准、上限放宽到 40；
+	// 折现率下限放宽到 7。保守/基准档边界不变（[-5,30] / [8,15]）。
+	valScenarioOptimisticAnchorMax   = 40.0
+	valScenarioOptimisticDiscountMin = 7.0
+	valScenarioFallbackBandRatio     = 0.20 // 无历史/前瞻分歧时按 0.2×A 生成最小带宽
 )
 
 // round1 / round2 展示口径舍入（计算链继续用未舍入值）。
@@ -1883,6 +1893,7 @@ type scenarioOffsets struct {
 // 基准档不复用本结构重算，因此不需要 Base* 字段。
 type scenarioInput struct {
 	A                  float64 // 基准复合锚，已 clamp 到 [-5,30]
+	RawA               float64 // 未截断的原始复合锚（0.5 网格），乐观档以此为基准并放宽上限到 40
 	Discount           float64 // 基准折现率（%，0.5 网格）
 	GInf               float64 // 基准终值增长率（%）
 	Macro              float64 // 宏观锚值（%），始终参与终值约束（含 fallback 常量）
@@ -1999,10 +2010,22 @@ func negTypeForJSON(t string) string {
 	return t
 }
 
+// scenarioBounds 单档收口边界（base 档不调用）：
+// 乐观档以未截断的 RawA 为增长锚基准、上限放宽到 40，折现率下限放宽到 7，
+// 避免高增长股的乐观档因基准档已触 [−5,30]/[8,15] 上限而 collapse 成与基准相同；
+// 保守档与基准档仍用已 clamp 的 A 与 [−5,30]/[8,15]（基准档输出逐字段不变）。
+func scenarioBounds(in scenarioInput, off scenarioOffsets) (baseA, aLo, aHi, rLo float64) {
+	if off.Key == "optimistic" {
+		return in.RawA, r18CompositeClampLo, valScenarioOptimisticAnchorMax, valScenarioOptimisticDiscountMin
+	}
+	return in.A, r18CompositeClampLo, r18CompositeClampHi, valDiscountRateMin
+}
+
 // buildScenario 单档确定性重算（base 档不要调用它：直接复用基准变量，见 buildBaseScenario）。
 func buildScenario(in scenarioInput, off scenarioOffsets) model.ValuationScenario {
-	A_s := clampFloat(in.A+off.DA, r18CompositeClampLo, r18CompositeClampHi)
-	r_s := clampDiscountRate(in.Discount + off.DR)
+	baseA, aLo, aHi, rLo := scenarioBounds(in, off)
+	A_s := clampFloat(baseA+off.DA, aLo, aHi)
+	r_s := clampDiscountRateFloor(in.Discount+off.DR, rLo)
 	gInf_s := capTerminalGrowth(in.GInf+off.DGInf, in.Macro, r_s, in.SGR, in.SGROK)
 	gap_s := A_s - gInf_s
 
@@ -2117,14 +2140,15 @@ func buildScenarios(in scenarioInput, bands scenarioBands, pr paramResult,
 // off 必须显式传入：不要用 A_s − in.A 反推，浮点误差会把「无截断」误判为截断。
 func scenarioCappedBy(in scenarioInput, off scenarioOffsets, A_s, r_s float64) []string {
 	hit := map[string]bool{}
-	rawA := in.A + off.DA
+	baseA, _, _, _ := scenarioBounds(in, off)
+	rawA := baseA + off.DA
 	rawR := in.Discount + off.DR
 	rawG := in.GInf + off.DGInf
 	if math.Abs(rawA-A_s) > 1e-9 {
-		hit["range"] = true // A 被 [-5,30] 截断
+		hit["range"] = true // A 被该档区间截断（保守/基准 [-5,30]，乐观 [-5,40]）
 	}
 	if math.Abs(rawR-r_s) > 1e-9 {
-		hit["discount"] = true // r 被 [8,15] 截断
+		hit["discount"] = true // r 被该档区间截断（基准/保守 [8,15]，乐观 [7,15]）
 	}
 	if rawG < 0 {
 		hit["range"] = true // g∞ 为负被 max(0) 抬到 0
@@ -2201,8 +2225,9 @@ func buildScenarioNote(off scenarioOffsets, in scenarioInput, A_s, r_s, gInf_s, 
 				parts = append(parts, "终值受折现率−1.0pp 约束")
 			}
 		case "range":
-			if math.Abs(in.A+off.DA-A_s) > 1e-9 {
-				parts = append(parts, "复合锚受 [−5,30] 区间约束")
+			baseA, aLo, aHi, _ := scenarioBounds(in, off)
+			if math.Abs(baseA+off.DA-A_s) > 1e-9 {
+				parts = append(parts, "复合锚受 "+scenarioRangeLabel(aLo, aHi)+" 区间约束")
 			}
 			if in.GInf+off.DGInf < 0 {
 				parts = append(parts, "终值按 0 处理")
@@ -2238,6 +2263,11 @@ func buildScenarioNote(off scenarioOffsets, in scenarioInput, A_s, r_s, gInf_s, 
 		}
 	}
 	return joinWarns(parts)
+}
+
+// scenarioRangeLabel 单档复合锚收口区间文案（负号用 unicode −，与既有 note 一致）。
+func scenarioRangeLabel(lo, hi float64) string {
+	return strings.ReplaceAll(fmt.Sprintf("[%g,%g]", lo, hi), "-", "−")
 }
 
 // deltaText 把实际差值写成「X上移/下移 Y.Ypp」；差值为 0 时写「X不变」。

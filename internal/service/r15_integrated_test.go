@@ -331,7 +331,7 @@ func TestComputeScenarioBands(t *testing.T) {
 // scenarioTestInput 构造一份可复用的确定性三档输入（A=8，宏观 4.5，SGR 10）。
 func scenarioTestInput() scenarioInput {
 	return scenarioInput{
-		A: 8, Discount: 10, GInf: 2, Macro: 4.5, MacroBasis: "dynamic_gdp",
+		A: 8, RawA: 8, Discount: 10, GInf: 2, Macro: 4.5, MacroBasis: "dynamic_gdp",
 		Dispersion: 20, Delta: 0, Fwd: forwardAnchor{Value: 7, Available: true},
 		SGR: 10, SGROK: true, Envelope: 5,
 		ROEVals: []float64{20}, StabilityAvailable: true, DownsideDispersion: 5,
@@ -349,31 +349,49 @@ func buildScenariosForTest(in scenarioInput, bands scenarioBands) []model.Valuat
 	return buildScenarios(in, bands, paramsFromPath(path), path, score.Score, negType)
 }
 
-// TestScenarioBoundaries 边界截断：A 到 30 记 range；r 到 8 记 discount；g∞ 受宏观约束记 gdp。
+// TestScenarioBoundaries 边界截断：乐观档 A 到 40 记 range；保守档 r 到 15 记 discount；
+// g∞ 受宏观约束记 gdp。基准 r=8 时乐观 r=7 是放宽后的正常值，不得误报 discount 截断。
 func TestScenarioBoundaries(t *testing.T) {
 	in := scenarioTestInput()
-	in.A = 29
+	in.A, in.RawA = 29, 38
 	in.Discount = 8
 	in.GInf = 3
 	in.SGR = 0
 	in.SGROK = false
 	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
 	opt := scenes[2]
-	if opt.GrowthAnchor != 30 {
-		t.Errorf("乐观档 A 应截断到 30，实际 %v", opt.GrowthAnchor)
+	if opt.GrowthAnchor != 40 {
+		t.Errorf("乐观档 A 应截断到 40，实际 %v", opt.GrowthAnchor)
 	}
-	if math.Abs(opt.DeltaGrowth-1.0) > 1e-9 {
-		t.Errorf("截断后 DeltaGrowth 应为 1.0，实际 %v", opt.DeltaGrowth)
+	if math.Abs(opt.DeltaGrowth-11.0) > 1e-9 {
+		t.Errorf("截断后 DeltaGrowth 应为 11.0，实际 %v", opt.DeltaGrowth)
 	}
 	if !containsString(opt.CappedBy, "range") {
-		t.Errorf("A 截断应记录 range：%v", opt.CappedBy)
+		t.Errorf("A 触到乐观档上限 40 应记录 range：%v", opt.CappedBy)
 	}
-	if opt.DeltaDiscount != 0 || !containsString(opt.CappedBy, "discount") {
-		t.Errorf("r=8 乐观档应被截断并记录 discount：delta=%v capped=%v", opt.DeltaDiscount, opt.CappedBy)
+	if opt.DiscountRate != 7 || opt.DeltaDiscount != -1 {
+		t.Errorf("基准 r=8 时乐观档应为 7（下限放宽）：r=%v delta=%v", opt.DiscountRate, opt.DeltaDiscount)
+	}
+	if containsString(opt.CappedBy, "discount") {
+		t.Errorf("乐观档 r=7 未触下限，不应记录 discount：%v", opt.CappedBy)
+	}
+
+	// 保守档上界仍为 15：r=14.5 + 1.0 → 15（截断并记录 discount）。
+	inR := scenarioTestInput()
+	inR.Discount = 14.5
+	inR.GInf = 3
+	inR.Macro = 5
+	inR.SGR = 0
+	inR.SGROK = false
+	scenesR := buildScenariosForTest(inR, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
+	cons := scenesR[0]
+	if cons.DiscountRate != 15 || cons.DeltaDiscount != 0.5 || !containsString(cons.CappedBy, "discount") {
+		t.Errorf("保守档 r 应截断到 15 并记录 discount：r=%v delta=%v capped=%v",
+			cons.DiscountRate, cons.DeltaDiscount, cons.CappedBy)
 	}
 
 	in2 := scenarioTestInput()
-	in2.A = 10
+	in2.A, in2.RawA = 10, 10
 	in2.GInf = 3
 	in2.Macro = 3
 	in2.SGR = 0
@@ -385,10 +403,89 @@ func TestScenarioBoundaries(t *testing.T) {
 	}
 }
 
+// TestScenarioOptimisticGrowthRelaxed 乐观档增长锚放宽：
+// rawA 超过基准上限 30 时，乐观档以 rawA+band_g 计并放宽到 40，从而真正高于基准；
+// 保守/基准档仍按已 clamp 的 A 与 [-5,30] 计算（逐字段不变）。
+func TestScenarioOptimisticGrowthRelaxed(t *testing.T) {
+	in := scenarioTestInput()
+	in.A, in.RawA = 30, 45
+	in.Discount = 10
+	in.GInf = 2
+	in.Macro = 4.5
+	in.SGR, in.SGROK = 10, true
+	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
+	cons, base, opt := scenes[0], scenes[1], scenes[2]
+
+	if base.GrowthAnchor != 30 || len(base.CappedBy) != 0 {
+		t.Errorf("基准档 A 应保持 30 且无约束：%v %v", base.GrowthAnchor, base.CappedBy)
+	}
+	if cons.GrowthAnchor != 26 {
+		t.Errorf("保守档 A 应仍按 clamp(30−4,−5,30)=26：%v", cons.GrowthAnchor)
+	}
+	if opt.GrowthAnchor != 40 {
+		t.Errorf("乐观档 A 应放宽到 40（clamp(45+4,−5,40)）：%v", opt.GrowthAnchor)
+	}
+	if opt.GrowthAnchor <= base.GrowthAnchor {
+		t.Errorf("乐观档 A 应高于基准：%v vs %v", opt.GrowthAnchor, base.GrowthAnchor)
+	}
+	if math.Abs(opt.DeltaGrowth-10) > 1e-9 {
+		t.Errorf("乐观档 DeltaGrowth 应为 40−30=10：%v", opt.DeltaGrowth)
+	}
+	if !containsString(opt.CappedBy, "range") || !strings.Contains(opt.Note, "[−5,40]") {
+		t.Errorf("乐观档触到 40 上限应记录 range 并标注 [−5,40]：%v / %s", opt.CappedBy, opt.Note)
+	}
+	if containsString(cons.CappedBy, "range") {
+		t.Errorf("保守档未触边界，不应记录 range：%v", cons.CappedBy)
+	}
+}
+
+// TestScenarioOptimisticDiscountRelaxed 乐观档折现率下限放宽到 7：
+// 基准 r=8（原下限）时乐观档可到 7；基准/保守档仍在 [8,15]。
+func TestScenarioOptimisticDiscountRelaxed(t *testing.T) {
+	in := scenarioTestInput()
+	in.A, in.RawA = 12, 12
+	in.Discount = 8
+	in.GInf = 2
+	in.Macro = 4.5
+	in.SGR, in.SGROK = 10, true
+	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
+	cons, base, opt := scenes[0], scenes[1], scenes[2]
+
+	if base.DiscountRate != 8 || cons.DiscountRate != 9 || opt.DiscountRate != 7 {
+		t.Errorf("折现率三档应为 9/8/7：%v/%v/%v", cons.DiscountRate, base.DiscountRate, opt.DiscountRate)
+	}
+	for _, s := range scenes {
+		if containsString(s.CappedBy, "discount") {
+			t.Errorf("%s 档未触边界，不应记录 discount：%v", s.Name, s.CappedBy)
+		}
+	}
+	if opt.DeltaDiscount != -1 {
+		t.Errorf("乐观档 DeltaDiscount 应为 −1：%v", opt.DeltaDiscount)
+	}
+}
+
+// TestScenarioOptimisticNoFalseCap 未触新边界时不得误报 range/discount。
+func TestScenarioOptimisticNoFalseCap(t *testing.T) {
+	in := scenarioTestInput()
+	in.A, in.RawA = 20, 20
+	in.Discount = 10
+	in.GInf = 2
+	in.Macro = 4.5
+	in.SGR, in.SGROK = 10, true
+	scenes := buildScenariosForTest(in, scenarioBands{Growth: 4, Discount: 1, Terminal: 0.5})
+	opt := scenes[2]
+	if opt.GrowthAnchor != 24 || opt.DiscountRate != 9 {
+		t.Errorf("乐观档 A/r 应为 24/9：%v/%v", opt.GrowthAnchor, opt.DiscountRate)
+	}
+	if containsString(opt.CappedBy, "range") || containsString(opt.CappedBy, "discount") {
+		t.Errorf("未触边界不应记录 range/discount：%v", opt.CappedBy)
+	}
+}
+
 // TestScenarioModelDiffers 三档可使用不同模型且得分逐档不同（FR-32）。
 func TestScenarioModelDiffers(t *testing.T) {
 	in := scenarioTestInput()
-	in.A = 20
+	in.A, in.RawA = 20, 20
 	in.Discount = 15
 	in.GInf = 13
 	in.Macro = 14
@@ -407,7 +504,7 @@ func TestScenarioModelDiffers(t *testing.T) {
 // TestScenarioDegradesIndependently 单档三阶段无严格递减解时降为两阶段，且基准档不受影响。
 func TestScenarioDegradesIndependently(t *testing.T) {
 	in := scenarioTestInput()
-	in.A = 12
+	in.A, in.RawA = 12, 12
 	in.Discount = 15
 	in.GInf = 8
 	in.Macro = 14
@@ -500,7 +597,7 @@ func TestValuationPromptScenarioSummary(t *testing.T) {
 // 三档 A、g∞、模型相同，DeltaGrowth=0，仅折现率不同；终值偏移不得产生 range 约束（Q8）。
 func TestScenarioDegenerateKeepsTerminal(t *testing.T) {
 	in := scenarioTestInput()
-	in.A, in.Discount, in.GInf, in.Macro = -2, 10.5, 0, 4.5
+	in.A, in.RawA, in.Discount, in.GInf, in.Macro = -2, -2, 10.5, 0, 4.5
 	in.SGR, in.SGROK = 0, false
 	in.IsCyclical, in.Position, in.Delta = true, -1, 1
 	in.Fwd, in.ROEVals = forwardAnchor{}, []float64{-3}

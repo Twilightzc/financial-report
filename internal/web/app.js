@@ -331,6 +331,7 @@ const app = createApp({
     const aiLoading = ref(false);
     const aiError = ref('');
     const aiResult = ref(null);
+    const aiElapsed = ref(null); // 最近一次 AI 分析耗时（秒，1 位小数；加载中/缓存命中/失败为 null）
     const aiRadarRef = ref(null);
     const aiReasoning = ref('low'); // 分析模式：low 简洁 / medium 标准 / high 详细
     // R15：估值卡片内长文本/逐年明细的展开态（换股票或重新分析时复位）。
@@ -1148,6 +1149,7 @@ const app = createApp({
 
         // 切换股票时清空上一支股票的 AI 分析结果，避免残留
         aiResult.value = null;
+        aiElapsed.value = null;
         aiError.value = '';
         aiLoading.value = false;
         fetchData(); fetchFinancials(); fetchAnalysis(); fetchValuation(); fetchCompanyValue();
@@ -1162,6 +1164,11 @@ const app = createApp({
       doSearch();
     }
 
+    // 高精度计时：performance.now 不可用时回退 Date.now（AI 分析耗时展示用）。
+    function nowMs() {
+      return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    }
+
     // AI 一键分析：把财务指标发给大模型，返回评分/结论/行业/估值推荐。
     async function fetchAIAnalysis() {
       if (!code.value.trim()) return;
@@ -1171,16 +1178,19 @@ const app = createApp({
       const cacheKey = `${reqCode}|${analysisStartYear.value || ''}|${analysisEndYear.value || ''}|${aiReasoning.value || 'low'}`;
       const cached = aiCache.get(cacheKey);
       if (cached) {
-        // 同条件已分析过，直接复用结果，不重复调用大模型
+        // 同条件已分析过，直接复用结果，不重复调用大模型（没有新的请求耗时可展示）
         aiResult.value = cached;
+        aiElapsed.value = null;
         aiFCFSeriesOpen.value = false;
         aiFCFRationaleOpen.value = false;
         await renderRadarAfterRender();
         return;
       }
+      const startedAt = nowMs();
       aiLoading.value = true;
       aiError.value = '';
       aiResult.value = null;
+      aiElapsed.value = null;
       aiFCFSeriesOpen.value = false;
       aiFCFRationaleOpen.value = false;
       try {
@@ -1198,6 +1208,8 @@ const app = createApp({
         }
         aiCache.set(cacheKey, json.data);
         aiResult.value = json.data;
+        // 成功后展示本次请求耗时（秒，1 位小数）；加载态与失败态保持 null。
+        aiElapsed.value = Number(((nowMs() - startedAt) / 1000).toFixed(1));
         await renderRadarAfterRender();
       } catch (e) {
         if (code.value.trim() !== reqCode) return;
@@ -1742,7 +1754,7 @@ const app = createApp({
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
-      aiLoading, aiError, aiResult, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
+      aiLoading, aiError, aiResult, aiElapsed, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
       aiFCFSeriesOpen, aiFCFRationaleOpen,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
       companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessCompanies,
@@ -2206,7 +2218,10 @@ const app = createApp({
           </section>
 
           <section class="card">
-            <div class="card-head"><h2 class="card-title">AI 智能分析</h2></div>
+            <div class="card-head">
+              <h2 class="card-title">AI 智能分析</h2>
+              <span class="ai-elapsed" v-if="aiResult && aiElapsed != null">耗时 {{ aiElapsed.toFixed(1) }}s</span>
+            </div>
             <div class="card-body">
               <div class="ai-form">
                 <div class="ai-form-row">
@@ -2435,7 +2450,6 @@ const app = createApp({
                       <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">模型结论</div>
                       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
                         <span class="ai-model">{{ aiResult.valuation.model_name }}</span>
-                        <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
                       </div>
                       <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false" style="margin-top:6px"
                                 :title="aiResult.valuation.inapplicable_reason || '现金流贴现法不适用'" />
@@ -2533,42 +2547,6 @@ const app = createApp({
                       <p class="ai-text" v-if="aiResult.valuation.growth_adjustment">增长调整：{{ aiResult.valuation.growth_adjustment }}</p>
                       <p class="ai-text" v-if="aiResult.valuation.base_growth_note">{{ aiResult.valuation.base_growth_note }}</p>
                     </div>
-                    <!-- 组三·补：三档情景（P0 只输出参数，不提供逐档套用） -->
-                    <div v-if="aiResult.valuation.scenarios && aiResult.valuation.scenarios.length">
-                      <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">三档情景</div>
-                      <div class="ai-v ai-scenario-band" v-if="aiResult.valuation.scenario_band_source">{{ scenarioBandText(aiResult.valuation) }}</div>
-                      <table class="ai-scenario-table">
-                        <thead>
-                          <tr>
-                            <th>指标</th>
-                            <th v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.name }}</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr><th>基期 FCF（亿）</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtYiPlain(s.base_fcf) }}<template v-if="s.base_fcf_basis">（{{ s.base_fcf_basis }}）</template></td></tr>
-                          <tr><th>折现率</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.discount_rate) }}%</td></tr>
-                          <tr><th>模型</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></td></tr>
-                          <tr><th>复合锚 A</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.growth_anchor) }}%</td></tr>
-                          <tr><th>g1</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }}</td></tr>
-                          <tr><th>g2</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioG2(s) != null ? fmtRate(scenarioG2(s)) + '%' : '—' }}</td></tr>
-                          <tr><th>g∞</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.terminal_growth) }}%</td></tr>
-                          <tr><th>得分</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtScore(s.model_score) }}</td></tr>
-                          <tr><th>相对基准</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioDelta(s) }}</td></tr>
-                          <tr><th>说明</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></td></tr>
-                        </tbody>
-                      </table>
-                      <div class="ai-scenario-cards">
-                        <div v-for="s in aiResult.valuation.scenarios" :key="s.key" class="ai-scenario-card" :class="{ 'scenario-base': s.key === 'base' }">
-                          <div class="ai-scenario-card-title">{{ s.name }}<span v-if="s.key === 'base'" class="ai-scenario-badge">当前套用</span></div>
-                          <div class="ai-v">基期 FCF {{ fmtYiPlain(s.base_fcf) }} 亿<template v-if="s.base_fcf_basis"> · {{ s.base_fcf_basis }}</template></div>
-                          <div class="ai-v">折现率 {{ fmtRate(s.discount_rate) }}% · 模型 {{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></div>
-                          <div class="ai-v">A {{ fmtRate(s.growth_anchor) }}% · g1 {{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }} · g∞ {{ fmtRate(s.terminal_growth) }}%</div>
-                          <div class="ai-v">得分 {{ fmtScore(s.model_score) }} · {{ scenarioDelta(s) }}</div>
-                          <div class="ai-v ai-scenario-note">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></div>
-                        </div>
-                      </div>
-                      <p class="ai-text">三档的基期 FCF 按分年序列离散锚定：保守取 min(基准, 近年中位数)、乐观取 max(基准, 最近一年)；该值仅作展示，不参与每档估值计算（P0 不输出逐档股价）。基准档与上方参数及「套用到估值」一致。增长参数相同时仅折现率分档。</p>
-                    </div>
                     <!-- 组四：基期现金流（逐年恒等式 → 选中口径 → 周期判定 → 口径说明/逐年明细） -->
                     <div>
                       <div class="ai-section-title" style="font-size:13px;margin-bottom:4px">基期现金流</div>
@@ -2614,6 +2592,48 @@ const app = createApp({
                       <el-alert v-if="aiResult.valuation.warning" :title="aiResult.valuation.warning" type="warning" :closable="false" style="margin:6px 0" />
                       <p class="ai-text" v-if="aiResult.valuation.base_year">基期年 {{ aiResult.valuation.base_year }}<template v-if="aiResult.valuation.capex_coverage"> · Capex 覆盖率 {{ fmtNum(aiResult.valuation.capex_coverage) }}</template><template v-if="aiResult.valuation.fcf_profit_ratio"> · FCF/净利润 {{ fmtNum(aiResult.valuation.fcf_profit_ratio) }}</template></p>
                       <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
+                    </div>
+                    <!-- 组六：三档情景总结（单档参数分析之后的收口区块；「套用到估值」与总结同区块，
+                         仍只套用顶层基准字段，逻辑见 applyAIValuation） -->
+                    <div>
+                      <div class="ai-scenario-head">
+                        <div class="ai-section-title" style="font-size:13px;margin-bottom:0">{{ aiResult.valuation.scenarios && aiResult.valuation.scenarios.length ? '三档情景总结' : '参数总结' }}</div>
+                        <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
+                      </div>
+                      <template v-if="aiResult.valuation.scenarios && aiResult.valuation.scenarios.length">
+                        <div class="ai-v ai-scenario-band" v-if="aiResult.valuation.scenario_band_source">{{ scenarioBandText(aiResult.valuation) }}</div>
+                        <table class="ai-scenario-table">
+                          <thead>
+                            <tr>
+                              <th>指标</th>
+                              <th v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.name }}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr><th>基期 FCF（亿）</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtYiPlain(s.base_fcf) }}<template v-if="s.base_fcf_basis">（{{ s.base_fcf_basis }}）</template></td></tr>
+                            <tr><th>折现率</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.discount_rate) }}%</td></tr>
+                            <tr><th>模型</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></td></tr>
+                            <tr><th>复合锚 A</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.growth_anchor) }}%</td></tr>
+                            <tr><th>g1</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }}</td></tr>
+                            <tr><th>g2</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioG2(s) != null ? fmtRate(scenarioG2(s)) + '%' : '—' }}</td></tr>
+                            <tr><th>g∞</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtRate(s.terminal_growth) }}%</td></tr>
+                            <tr><th>得分</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ fmtScore(s.model_score) }}</td></tr>
+                            <tr><th>相对基准</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ scenarioDelta(s) }}</td></tr>
+                            <tr><th>说明</th><td v-for="s in aiResult.valuation.scenarios" :key="s.key" :class="{ 'scenario-base': s.key === 'base' }">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></td></tr>
+                          </tbody>
+                        </table>
+                        <div class="ai-scenario-cards">
+                          <div v-for="s in aiResult.valuation.scenarios" :key="s.key" class="ai-scenario-card" :class="{ 'scenario-base': s.key === 'base' }">
+                            <div class="ai-scenario-card-title">{{ s.name }}<span v-if="s.key === 'base'" class="ai-scenario-badge">当前套用</span></div>
+                            <div class="ai-v">基期 FCF {{ fmtYiPlain(s.base_fcf) }} 亿<template v-if="s.base_fcf_basis"> · {{ s.base_fcf_basis }}</template></div>
+                            <div class="ai-v">折现率 {{ fmtRate(s.discount_rate) }}% · 模型 {{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></div>
+                            <div class="ai-v">A {{ fmtRate(s.growth_anchor) }}% · g1 {{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }} · g∞ {{ fmtRate(s.terminal_growth) }}%</div>
+                            <div class="ai-v">得分 {{ fmtScore(s.model_score) }} · {{ scenarioDelta(s) }}</div>
+                            <div class="ai-v ai-scenario-note">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></div>
+                          </div>
+                        </div>
+                        <p class="ai-text">三档的基期 FCF 按分年序列离散锚定：保守取 min(基准, 近年中位数)、乐观取 max(基准, 最近一年)；该值仅作展示，不参与每档估值计算（P0 不输出逐档股价）。基准档与上方参数及「套用到估值」一致。增长参数相同时仅折现率分档；乐观档的增长锚上限放宽到 40%、折现率下限放宽到 7%，不与基准档共用「适中」边界。</p>
+                      </template>
                     </div>
                   </div>
                 </div>
