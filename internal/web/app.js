@@ -1,4 +1,4 @@
-const { createApp, ref, computed, nextTick } = Vue;
+const { createApp, ref, computed, nextTick, onMounted, onBeforeUnmount } = Vue;
 
 // 指标趋势图：图表可用宽度窄于此值时启用窄屏布局（图例移底、字号 11px、边距收紧）。
 // 注意「窄屏」按图表实测宽度判断（弹窗宽度是 min(680px, 92vw)，非固定）；「移动端」按视口宽度，见 style.css。
@@ -6,12 +6,13 @@ const CHART_NARROW_WIDTH = 480;
 
 // 语义色统一色值（FR-11）：与 style.css 的 --good / --bad 同值，改色只改此处（CSS 侧同步改令牌）。
 // good=向好/健康；goodMid/warn=AI 评分中间档（黄绿/琥珀）；bad=走弱/坏；neutral=图表中性灰；growth=增速折线琥珀。
+// 深色底适配：语义不变，仅把绿/红/灰调亮以保证对比度（与 style.css 令牌同步）。
 const PALETTE = {
-  good: '#149a5e',
-  goodMid: '#6aa84f',
-  warn: '#d9a240',
-  bad: '#d64040',
-  neutral: '#998c8c',
+  good: '#3fb950',
+  goodMid: '#7cc46a',
+  warn: '#e3b341',
+  bad: '#e05555',
+  neutral: '#8b949e',
   growth: '#d97706',
 };
 
@@ -80,15 +81,20 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
   const seriesName = legendLabel(it.name, narrow);
   const fontSize = narrow ? 11 : 12;
   const legendData = hasGrowth ? [seriesName, '同比增速'] : [seriesName];
+  // 深色底图表配色：文字用 --ink-2 / --muted，网格线用 --line / --line-strong。
+  const axisText = '#8b949e';
+  const axisLine = '#30363d';
+  const splitLineColor = '#21262d';
   const legend = narrow
-    ? { data: legendData, bottom: 0, left: 'center', itemGap: 12, textStyle: { color: '#5d5151', fontSize } }
-    : { data: legendData, top: 0, textStyle: { color: '#5d5151', fontSize } };
+    ? { data: legendData, bottom: 0, left: 'center', itemGap: 12, textStyle: { color: '#c9d1d9', fontSize } }
+    : { data: legendData, top: 0, textStyle: { color: '#c9d1d9', fontSize } };
 
   const yAxis = [{
     type: 'value',
     // 单位已由刻度标签承载，左轴不再设仅含单位符号的轴名（FR-1）
-    axisLabel: { formatter: (v) => fmtAxisValue(v, unit), fontSize },
-    splitLine: { lineStyle: { type: 'dashed' } },
+    axisLabel: { formatter: (v) => fmtAxisValue(v, unit), fontSize, color: axisText },
+    axisLine: { lineStyle: { color: axisLine } },
+    splitLine: { lineStyle: { type: 'dashed', color: splitLineColor } },
   }];
   if (hasGrowth) {
     yAxis.push({
@@ -96,7 +102,8 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
       name: '增速 %',
       nameGap: 8,
       nameTextStyle: { color: PALETTE.neutral, fontSize },
-      axisLabel: { formatter: fmtAxisPct, fontSize },
+      axisLabel: { formatter: fmtAxisPct, fontSize, color: axisText },
+      axisLine: { lineStyle: { color: axisLine } },
       splitLine: { show: false },
     });
   }
@@ -136,6 +143,9 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
+      backgroundColor: '#1c2128',
+      borderColor: '#30363d',
+      textStyle: { color: '#e6edf3' },
       formatter: (params) => {
         const idx = params[0].dataIndex;
         let html = '<b>' + years[idx] + ' 年</b><br/>';
@@ -153,7 +163,8 @@ function buildIndicatorChartOption(it, years, values, growth, narrow) {
       type: 'category',
       data: years.map(String),
       boundaryGap: true,
-      axisLabel: { fontSize, hideOverlap: true },
+      axisLabel: { fontSize, hideOverlap: true, color: axisText },
+      axisLine: { lineStyle: { color: axisLine } },
     },
     yAxis,
     series,
@@ -187,15 +198,21 @@ function radarAxisName(name) {
 // 折行只放在 axisName.formatter：indicator[].name 保留原文，避免 \n 污染 tooltip 渲染。
 function buildRadarOption(scores, narrow) {
   return {
-    tooltip: {},
+    tooltip: {
+      backgroundColor: '#1c2128',
+      borderColor: '#30363d',
+      textStyle: { color: '#e6edf3' },
+    },
     radar: {
       indicator: scores.map(s => ({ name: s.dimension, max: 100 })),
       center: ['50%', '52%'],
       radius: narrow ? '60%' : '66%',
-      splitArea: { areaStyle: { color: ['rgba(20,154,94,0.03)', 'rgba(20,154,94,0.06)'] } },
+      axisLine: { lineStyle: { color: '#30363d' } },
+      splitLine: { lineStyle: { color: '#21262d' } },
+      splitArea: { areaStyle: { color: ['rgba(139,148,158,0.06)', 'rgba(139,148,158,0.10)'] } },
       axisName: {
         formatter: radarAxisName,
-        color: '#606266',
+        color: '#c9d1d9',
         fontSize: narrow ? 12 : 13,
       },
     },
@@ -207,7 +224,7 @@ function buildRadarOption(scores, narrow) {
         symbolSize: 5,
         lineStyle: { color: PALETTE.good, width: 2 },
         itemStyle: { color: PALETTE.good },
-        areaStyle: { color: 'rgba(20,154,94,0.18)' },
+        areaStyle: { color: 'rgba(63,185,80,0.22)' },
       }],
     }],
   };
@@ -1815,6 +1832,46 @@ const app = createApp({
       else if (dx > 0 && idx > 0) analysisActive.value = dims[idx - 1].key;
     }
 
+    // ===================== 仪表盘侧边栏 =====================
+    // 仅承载「锚点滚动 + 当前区块高亮」这一层 UI 状态，不参与任何数据请求。
+    // 单页滚动：搜索后所有区块仍在同一页内，菜单只负责平滑滚动定位。
+    const SECTION_IDS = ['overview', 'statements', 'analysis', 'company-value', 'valuation', 'ai'];
+    const sidebarOpen = ref(false);
+    const activeSection = ref(SECTION_IDS[0]);
+    let sectionScrollRaf = 0;
+
+    function scrollToSection(id) {
+      sidebarOpen.value = false;
+      const el = document.getElementById(id);
+      if (!el) return; // 未搜索（欢迎页）时区块不存在：不滚动、不报错
+      const topbar = document.querySelector('.topbar');
+      const offset = (topbar ? topbar.offsetHeight : 66) + 16;
+      const top = el.getBoundingClientRect().top + window.scrollY - offset;
+      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+      activeSection.value = id;
+    }
+
+    // 当前区块：视口顶部 120px 线以上、位置最靠下的区块。
+    function updateActiveSection() {
+      let current = SECTION_IDS[0];
+      for (const id of SECTION_IDS) {
+        const el = document.getElementById(id);
+        if (el && el.getBoundingClientRect().top <= 120) current = id;
+      }
+      activeSection.value = current;
+    }
+
+    function onWindowScroll() {
+      if (sectionScrollRaf) return;
+      sectionScrollRaf = window.requestAnimationFrame(() => {
+        sectionScrollRaf = 0;
+        updateActiveSection();
+      });
+    }
+
+    onMounted(() => window.addEventListener('scroll', onWindowScroll, { passive: true }));
+    onBeforeUnmount(() => window.removeEventListener('scroll', onWindowScroll));
+
     loadHistory();
     // R16：初始化 GET 一次用于徽标计数；成功后尝试迁移旧 localStorage 数据（每次页面加载最多一次）。
     try { firstRecordHintShown = localStorage.getItem(VAL_HISTORY_HINT_KEY) === '1'; } catch (e) {}
@@ -1864,13 +1921,97 @@ const app = createApp({
       openValuationHistory, openValuationRecord, fetchValuationHistory,
       deleteValuationRecord, clearValuationHistory,
       fmtRecordTime, fmtRecordPerShare, recordParamSummary, recordModelName, resetValuationState,
+      focusValHistoryEntry,
+      // 仪表盘侧边栏（锚点滚动 + 当前区块高亮）
+      sidebarOpen, activeSection, scrollToSection,
     };
   },
   template: `
-<div class="page">
+<div class="app-shell">
+      <!-- 移动端遮罩：侧边栏抽屉打开时点击关闭 -->
+      <div v-if="sidebarOpen" class="sidebar-overlay" @click="sidebarOpen = false"></div>
+
+      <aside class="sidebar" :class="{ open: sidebarOpen }">
+        <div class="sidebar-brand">
+          <span class="brand-mark">财</span>
+          <span class="brand-name">A股财报分析</span>
+        </div>
+        <nav class="sidebar-nav" aria-label="页面导航">
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'overview' }" @click="scrollToSection('overview')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+              <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+              <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+              <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+            </svg>
+            <span>公司总览</span>
+          </button>
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'statements' }" @click="scrollToSection('statements')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="8" y1="13" x2="16" y2="13"></line>
+              <line x1="8" y1="17" x2="13" y2="17"></line>
+            </svg>
+            <span>三大财报</span>
+          </button>
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'analysis' }" @click="scrollToSection('analysis')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="6" y1="20" x2="6" y2="15"></line>
+              <line x1="12" y1="20" x2="12" y2="10"></line>
+              <line x1="18" y1="20" x2="18" y2="4"></line>
+              <line x1="3" y1="20" x2="21" y2="20"></line>
+            </svg>
+            <span>财务指标分析</span>
+          </button>
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'company-value' }" @click="scrollToSection('company-value')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 3h12l4 6-10 12L2 9z"></path>
+              <path d="M2 9h20"></path>
+              <path d="M9 3l3 6 3-6"></path>
+              <path d="M12 9v12"></path>
+            </svg>
+            <span>公司价值</span>
+          </button>
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'valuation' }" @click="scrollToSection('valuation')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="4" y="2" width="16" height="20" rx="2"></rect>
+              <line x1="8" y1="6" x2="16" y2="6"></line>
+              <line x1="7.5" y1="11" x2="8.5" y2="11"></line>
+              <line x1="11.5" y1="11" x2="12.5" y2="11"></line>
+              <line x1="15.5" y1="11" x2="16.5" y2="11"></line>
+              <line x1="7.5" y1="15" x2="8.5" y2="15"></line>
+              <line x1="11.5" y1="15" x2="12.5" y2="15"></line>
+              <line x1="15.5" y1="18" x2="16.5" y2="18"></line>
+              <line x1="7.5" y1="18" x2="8.5" y2="18"></line>
+              <line x1="11.5" y1="18" x2="12.5" y2="18"></line>
+            </svg>
+            <span>公司估值</span>
+          </button>
+          <button type="button" class="nav-item" :class="{ active: activeSection === 'ai' }" @click="scrollToSection('ai')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"></path>
+              <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"></path>
+            </svg>
+            <span>AI智能分析</span>
+          </button>
+        </nav>
+        <div class="sidebar-foot">数据来源：东方财富 · 腾讯行情</div>
+      </aside>
+
+      <div class="content">
       <header class="topbar">
         <div class="topbar-inner">
-          <div class="brand">
+          <button type="button" class="sidebar-toggle" title="打开菜单" aria-label="打开菜单"
+                  :aria-expanded="sidebarOpen ? 'true' : 'false'" @click="sidebarOpen = !sidebarOpen">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="3" y1="6" x2="21" y2="6"></line>
+              <line x1="3" y1="12" x2="21" y2="12"></line>
+              <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+          </button>
+          <div class="topbar-brand">
             <span class="brand-mark">财</span>
             <span class="brand-name">A股财报分析</span>
           </div>
@@ -1905,6 +2046,15 @@ const app = createApp({
               </svg>
             </button>
           </div>
+          <div v-if="data" class="selected-chip">
+            <span class="selected-code">{{ data.stock.code }}</span>
+            <span class="selected-name">{{ data.stock.name }}</span>
+            <span class="selected-market">{{ aiResult && aiResult.industry && aiResult.industry.name ? aiResult.industry.name : marketLabelOf(guessMarket(data.stock.code)) }}</span>
+          </div>
+          <div v-if="data" class="topbar-quote">
+            <span :class="['topbar-price', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ data.quote.price.toFixed(2) }}</span>
+            <span :class="['topbar-chg', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ (data.quote.change_pct >= 0 ? '+' : '') + data.quote.change_pct.toFixed(2) }}%</span>
+          </div>
           <button ref="valHistoryEntryRef" type="button" class="val-hist-entry"
                   title="估值记录" aria-label="估值记录" @click="openValuationHistory">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
@@ -1935,35 +2085,37 @@ const app = createApp({
         </section>
 
         <template v-if="data">
-          <section class="card stock-card">
-            <div class="stock-main">
-              <div class="stock-id">
-                <div class="stock-name">{{ data.stock.name }}</div>
-                <div class="stock-code">{{ data.stock.code }}</div>
-              </div>
-              <div class="stock-quote">
-                <div :class="['stock-price', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ data.quote.price.toFixed(2) }}</div>
-                <div :class="['stock-chg', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ (data.quote.change_pct >= 0 ? '+' : '') + data.quote.change_pct.toFixed(2) }}%</div>
-                <div class="stock-cap">总市值 {{ fmtYi(data.quote.market_cap) }}</div>
-              </div>
-            </div>
-          </section>
-
-          <section class="card">
-            <div class="card-head"><h2 class="card-title">核心指标<span class="sub">最新年报</span></h2></div>
-            <div class="card-body">
-              <div class="stat-grid">
-                <div v-for="it in data.indicators" :key="it.name" class="stat">
-                  <div class="stat-name">{{ it.name }}</div>
-                  <div class="stat-value">{{ fmt(it.value, it.unit) }}</div>
+          <section id="overview" class="dashboard-section">
+            <section class="card stock-card">
+              <div class="stock-main">
+                <div class="stock-id">
+                  <div class="stock-name">{{ data.stock.name }}</div>
+                  <div class="stock-code">{{ data.stock.code }}</div>
+                </div>
+                <div class="stock-quote">
+                  <div :class="['stock-price', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ data.quote.price.toFixed(2) }}</div>
+                  <div :class="['stock-chg', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ (data.quote.change_pct >= 0 ? '+' : '') + data.quote.change_pct.toFixed(2) }}%</div>
+                  <div class="stock-cap">总市值 {{ fmtYi(data.quote.market_cap) }}</div>
                 </div>
               </div>
-            </div>
+            </section>
+
+            <section class="section-block">
+              <div class="section-head">
+                <h2 class="card-title">基础信息<span class="sub">最新年报</span></h2>
+              </div>
+              <div class="kpi-grid">
+                <div v-for="it in data.indicators" :key="it.name" class="kpi-card">
+                  <div class="kpi-label">{{ it.name }}</div>
+                  <div class="kpi-value">{{ fmt(it.value, it.unit) }}</div>
+                </div>
+              </div>
+            </section>
           </section>
 
-          <section class="card" v-loading="finLoading">
+          <section id="statements" class="card" v-loading="finLoading">
             <div class="card-head">
-              <h2 class="card-title">三大报表<span class="sub">年报</span></h2>
+              <h2 class="card-title">三大财报数据<span class="sub">年报</span></h2>
               <div class="year-filter">
                 <el-select v-model="startYear" placeholder="起始年" @change="changeRange">
                   <el-option v-for="y in yearOptions" :key="y" :label="y" :value="y" />
@@ -1988,13 +2140,13 @@ const app = createApp({
                     <thead>
                       <tr>
                         <th class="item-col">科目</th>
-                        <th v-for="y in stmtYears()" :key="y">{{ y }}</th>
+                        <th v-for="y in stmtYears()" :key="y" :class="{ 'latest-col': y === stmtYears()[stmtYears().length - 1] }">{{ y }}</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="it in g.items" :key="it.field">
                         <td class="item-name"><el-tooltip :content="it.name" placement="top" :trigger="['hover','focus']"><span class="stmt-text" tabindex="0">{{ it.name }}</span></el-tooltip></td>
-                        <td v-for="(v, i) in it.values" :key="i" class="num">
+                        <td v-for="(v, i) in it.values" :key="i" class="num" :class="{ 'latest-col': stmtYears()[i] === stmtYears()[stmtYears().length - 1] }">
                           <div class="val">{{ fmtYi(v) }}</div>
                           <div class="yoy" :class="yoyClass(it.values, i)">{{ yoyText(it.values, i) }}</div>
                         </td>
@@ -2006,7 +2158,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card" v-loading="analysisLoading">
+          <section id="analysis" class="card" v-loading="analysisLoading">
             <div class="card-head">
               <h2 class="card-title">财务指标分析<span class="sub">六维</span></h2>
               <div class="year-filter">
@@ -2040,7 +2192,7 @@ const app = createApp({
                             <thead>
                               <tr>
                                 <th class="item-col">指标</th>
-                                <th v-for="y in analysis.years" :key="y">{{ y }}</th>
+                                <th v-for="y in analysis.years" :key="y" :class="{ 'latest-col': y === analysis.years[analysis.years.length - 1] }">{{ y }}</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2063,7 +2215,7 @@ const app = createApp({
                                     </el-tooltip>
                                   </div>
                                 </td>
-                                <td v-for="(v, i) in it.values" :key="i" class="num">
+                                <td v-for="(v, i) in it.values" :key="i" class="num" :class="{ 'latest-col': analysis.years[i] === analysis.years[analysis.years.length - 1] }">
                                   <div class="val">{{ fmtAnalysisVal(v, it.unit) }}</div>
                                   <!-- 六维分析表同比：与三大报表一致的红涨绿跌（正增长=红、负增长=绿） -->
                                   <div class="yoy" :class="yoyClass(it.values, i)">{{ yoyText(it.values, i) }}</div>
@@ -2085,7 +2237,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card" v-loading="cvLoading">
+          <section id="company-value" class="card" v-loading="cvLoading">
             <div class="card-head">
               <h2 class="card-title">公司价值<span class="sub">逐年</span></h2>
               <div class="year-filter">
@@ -2111,7 +2263,7 @@ const app = createApp({
                       <thead>
                         <tr>
                           <th class="item-col">指标</th>
-                          <th v-for="y in companyValue.years" :key="y">{{ y }}</th>
+                          <th v-for="y in companyValue.years" :key="y" :class="{ 'latest-col': y === companyValue.years[companyValue.years.length - 1] }">{{ y }}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2130,7 +2282,7 @@ const app = createApp({
                               </el-tooltip>
                             </div>
                           </td>
-                          <td v-for="(v, i) in it.values" :key="i" class="num">
+                          <td v-for="(v, i) in it.values" :key="i" class="num" :class="{ 'latest-col': companyValue.years[i] === companyValue.years[companyValue.years.length - 1] }">
                             <div class="val">{{ fmtAnalysisVal(v, it.unit) }}</div>
                             <div class="yoy" :class="yoyClass(it.values, i)">{{ yoyText(it.values, i) }}</div>
                           </td>
@@ -2143,7 +2295,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card" v-loading="valLoading">
+          <section id="valuation" class="card" v-loading="valLoading">
             <div class="card-head"><h2 class="card-title">公司估值<span class="sub">现金流贴现</span></h2></div>
             <div class="card-body">
               <div class="val-form">
@@ -2309,7 +2461,7 @@ const app = createApp({
             </div>
           </section>
 
-          <section class="card">
+          <section id="ai" class="card">
             <div class="card-head">
               <h2 class="card-title">AI 智能分析</h2>
             </div>
@@ -2746,6 +2898,7 @@ const app = createApp({
           </section>
         </template>
       </main>
+      </div><!-- /.content -->
 
       <!-- R16 估值记录抽屉：全局数据，欢迎页/结果页均可打开；teleport 到 body，不受 sticky 顶栏影响 -->
       <el-drawer v-model="valHistoryOpen" direction="rtl" :size="valHistoryDrawerSize"
