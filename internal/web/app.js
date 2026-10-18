@@ -331,6 +331,9 @@ const app = createApp({
     const aiLoading = ref(false);
     const aiError = ref('');
     const aiResult = ref(null);
+    // R15/P1：套用到估值时可选的档位 key（conservative/base/optimistic），默认基准。
+    // 旧响应/旧缓存无 scenarios 时不渲染选择器，套用逻辑回退顶层基准字段。
+    const aiApplyScenario = ref('base');
     const aiElapsed = ref(null); // 最近一次 AI 分析耗时（秒，1 位小数；加载中/缓存命中/失败为 null）
     const aiRadarRef = ref(null);
     const aiReasoning = ref('low'); // 分析模式：low 简洁 / medium 标准 / high 详细
@@ -1180,6 +1183,7 @@ const app = createApp({
       if (cached) {
         // 同条件已分析过，直接复用结果，不重复调用大模型（没有新的请求耗时可展示）
         aiResult.value = cached;
+        aiApplyScenario.value = 'base'; // 新分析结果默认套用基准档
         aiElapsed.value = null;
         aiFCFSeriesOpen.value = false;
         aiFCFRationaleOpen.value = false;
@@ -1208,6 +1212,7 @@ const app = createApp({
         }
         aiCache.set(cacheKey, json.data);
         aiResult.value = json.data;
+        aiApplyScenario.value = 'base'; // 新分析结果默认套用基准档
         // 成功后展示本次请求耗时（秒，1 位小数）；加载态与失败态保持 null。
         aiElapsed.value = Number(((nowMs() - startedAt) / 1000).toFixed(1));
         await renderRadarAfterRender();
@@ -1379,38 +1384,105 @@ const app = createApp({
       return u ? u.label : '';
     }
 
-    // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
-    function applyAIValuation(v) {
-      if (!v || !v.model) return;
-      valModel.value = v.model;
-      if (v.discount_rate) valDiscount.value = v.discount_rate;
-      const params = v.params || [];
+    // 纯函数：从 AI 推荐 params（key/value 数组）取增长率与年数，缺项为 null。
+    function aiParamsToForm(params) {
       const get = (key) => {
-        const p = params.find(x => x.key === key);
+        const p = (params || []).find(x => x.key === key);
         return p ? p.value : null;
       };
-      if (get('g') != null) valG.value = get('g');
-      if (get('g1') != null) valG1.value = get('g1');
-      if (get('n1') != null) valN1.value = Math.round(get('n1'));
-      if (get('g2') != null) valG2.value = get('g2');
-      if (get('n2') != null) valN2.value = Math.round(get('n2'));
-      if (get('g3') != null) valG3.value = get('g3');
-      // ref 写入同步生效，紧随其后的 fetchValuation() 读到的已是新值，故开关与请求参数一致。
-      valAdjustRD.value = resolveAdjustRD(valAdjustRD.value, v.adjust_rd);
-      // R13：一并套用基期自由现金流选择（FR-6，改动 R12 边界）。
-      // if (v.fcf_mode) 守卫保证旧响应/前端缓存（无该字段）不误改当前选择，向后兼容。
-      if (v.fcf_mode) {
-        valFCFMode.value = v.fcf_mode;
-        if (['average', 'median', 'trim_mean'].includes(v.fcf_mode)) {
-          if (v.fcf_years) valFCFYears.value = Math.round(v.fcf_years);
-        }
-        if (v.fcf_mode === 'custom') {
-          if (v.fcf_custom_value != null) valFCFCustomValue.value = v.fcf_custom_value;
-          if (v.fcf_custom_unit) valFCFCustomUnit.value = v.fcf_custom_unit;
+      return {
+        g: get('g'), g1: get('g1'), n1: get('n1'),
+        g2: get('g2'), n2: get('n2'), g3: get('g3'),
+      };
+    }
+
+    // 纯函数：顶层基准推荐 → 估值表单参数（旧响应/无 scenarios 时回退使用）。
+    function aiValuationToFormParams(v) {
+      const p = aiParamsToForm(v.params);
+      const mode = v.fcf_mode || null;
+      return {
+        model: v.model || null,
+        discount: v.discount_rate != null ? v.discount_rate : null,
+        g: p.g, g1: p.g1, n1: p.n1, g2: p.g2, n2: p.n2, g3: p.g3,
+        // R13：一并套用基期自由现金流选择（FR-6，改动 R12 边界）。
+        // fcf_mode 缺失（旧响应/缓存）时为 null，applyValuationFormParams 会保持当前选择。
+        fcfMode: mode,
+        fcfYears: (mode && ['average', 'median', 'trim_mean'].includes(mode) && v.fcf_years)
+          ? Math.round(v.fcf_years) : null,
+        fcfCustomValue: v.fcf_custom_value != null ? v.fcf_custom_value : null,
+        fcfCustomUnit: v.fcf_custom_unit || null,
+      };
+    }
+
+    // 纯函数：单档情景 → 估值表单参数（P1 逐档套用）。
+    // 基期 FCF 取该档 base_fcf（元），按「自定义 + 亿」写入表单（四舍五入 2 位，与 fcf_custom_value
+    // 展示口径一致）；缺失/非正，或换算为亿后四舍五入为 0（< 50 万元）时返回 null，
+    // 由调用方回退顶层 FCF 字段（顶层口径可精确复算），避免写入 0 触发自定义 FCF 校验失败。
+    function scenarioToFormParams(s) {
+      if (!s) return null;
+      const p = aiParamsToForm(s.params);
+      const out = {
+        model: s.model || null,
+        discount: s.discount_rate != null ? s.discount_rate : null,
+        g: p.g, g1: p.g1, n1: p.n1, g2: p.g2, n2: p.n2, g3: p.g3,
+        fcfMode: null,
+        fcfYears: null,
+        fcfCustomValue: null,
+        fcfCustomUnit: null,
+      };
+      const rounded = Math.round((s.base_fcf / VAL_FCF_UNIT_FACTOR.yi) * 100) / 100;
+      if (rounded > 0) {
+        out.fcfMode = 'custom';
+        out.fcfCustomUnit = 'yi';
+        out.fcfCustomValue = rounded;
+      }
+      return out;
+    }
+
+    // 把表单参数写回 ref；null 表示该项无推荐值，保持用户当前选择。
+    function applyValuationFormParams(p) {
+      if (!p) return;
+      if (p.model) valModel.value = p.model;
+      if (p.discount != null) valDiscount.value = p.discount;
+      if (p.g != null) valG.value = p.g;
+      if (p.g1 != null) valG1.value = p.g1;
+      if (p.n1 != null) valN1.value = Math.round(p.n1);
+      if (p.g2 != null) valG2.value = p.g2;
+      if (p.n2 != null) valN2.value = Math.round(p.n2);
+      if (p.g3 != null) valG3.value = p.g3;
+      if (p.fcfMode) {
+        valFCFMode.value = p.fcfMode;
+        if (p.fcfYears) valFCFYears.value = p.fcfYears;
+        if (p.fcfMode === 'custom') {
+          if (p.fcfCustomValue != null) valFCFCustomValue.value = p.fcfCustomValue;
+          if (p.fcfCustomUnit) valFCFCustomUnit.value = p.fcfCustomUnit;
         }
       }
+    }
+
+    // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
+    // 有 scenarios 时按所选档（默认基准）套用；无 scenarios（旧响应/旧缓存）回退顶层基准字段。
+    function applyAIValuation(v) {
+      if (!v || !v.model) return;
+      const scenarios = Array.isArray(v.scenarios) ? v.scenarios : [];
+      const picked = scenarios.find(s => s.key === aiApplyScenario.value) || null;
+      const topForm = aiValuationToFormParams(v);
+      const form = picked ? scenarioToFormParams(picked) : topForm;
+      // 该档无可用 base_fcf（旧缓存缺字段/非正/换算为 0）时沿用顶层 FCF 选择，保持与旧套用一致。
+      if (picked && form.fcfMode == null) {
+        form.fcfMode = topForm.fcfMode;
+        form.fcfYears = topForm.fcfYears;
+        form.fcfCustomValue = topForm.fcfCustomValue;
+        form.fcfCustomUnit = topForm.fcfCustomUnit;
+      }
+      applyValuationFormParams(form);
+      // ref 写入同步生效，紧随其后的 fetchValuation() 读到的已是新值，故开关与请求参数一致。
+      // adjust_rd 三档共用，始终取顶层推荐（见技术设计 20.7.1）。
+      valAdjustRD.value = resolveAdjustRD(valAdjustRD.value, v.adjust_rd);
       fetchValuation('ai'); // R16 FR-1：AI 套用为主动动作，记录来源标记 ai
-      ElementPlus.ElMessage.success('已套用 AI 推荐的估值参数并计算');
+      ElementPlus.ElMessage.success(picked
+        ? `已按${picked.name}档套用参数并计算`
+        : '已套用 AI 推荐的估值参数并计算');
     }
 
     // R18：从 AI 估值 params 中取参数值（不存在返回 null，供模板守卫）。
@@ -1754,7 +1826,7 @@ const app = createApp({
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
-      aiLoading, aiError, aiResult, aiElapsed, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
+      aiLoading, aiError, aiResult, aiApplyScenario, aiElapsed, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
       aiFCFSeriesOpen, aiFCFRationaleOpen,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
       companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessCompanies,
@@ -2220,7 +2292,6 @@ const app = createApp({
           <section class="card">
             <div class="card-head">
               <h2 class="card-title">AI 智能分析</h2>
-              <span class="ai-elapsed" v-if="aiResult && aiElapsed != null">耗时 {{ aiElapsed.toFixed(1) }}s</span>
             </div>
             <div class="card-body">
               <div class="ai-form">
@@ -2594,11 +2665,18 @@ const app = createApp({
                       <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
                     </div>
                     <!-- 组六：三档情景总结（单档参数分析之后的收口区块；「套用到估值」与总结同区块，
-                         仍只套用顶层基准字段，逻辑见 applyAIValuation） -->
+                         默认套用基准档，可切换保守/乐观逐档套用，逻辑见 applyAIValuation） -->
                     <div>
                       <div class="ai-scenario-head">
                         <div class="ai-section-title" style="font-size:13px;margin-bottom:0">{{ aiResult.valuation.scenarios && aiResult.valuation.scenarios.length ? '三档情景总结' : '参数总结' }}</div>
-                        <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
+                        <div class="ai-scenario-actions">
+                          <!-- 旧响应/旧缓存无 scenarios 时不渲染选择器，套用按钮回退顶层基准字段 -->
+                          <el-radio-group v-if="aiResult.valuation.scenarios && aiResult.valuation.scenarios.length"
+                                          v-model="aiApplyScenario" size="small">
+                            <el-radio-button v-for="s in aiResult.valuation.scenarios" :key="s.key" :value="s.key">{{ s.name }}</el-radio-button>
+                          </el-radio-group>
+                          <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">套用到估值</el-button>
+                        </div>
                       </div>
                       <template v-if="aiResult.valuation.scenarios && aiResult.valuation.scenarios.length">
                         <div class="ai-v ai-scenario-band" v-if="aiResult.valuation.scenario_band_source">{{ scenarioBandText(aiResult.valuation) }}</div>
@@ -2624,7 +2702,7 @@ const app = createApp({
                         </table>
                         <div class="ai-scenario-cards">
                           <div v-for="s in aiResult.valuation.scenarios" :key="s.key" class="ai-scenario-card" :class="{ 'scenario-base': s.key === 'base' }">
-                            <div class="ai-scenario-card-title">{{ s.name }}<span v-if="s.key === 'base'" class="ai-scenario-badge">当前套用</span></div>
+                            <div class="ai-scenario-card-title">{{ s.name }}<span v-if="s.key === aiApplyScenario" class="ai-scenario-badge">当前套用</span></div>
                             <div class="ai-v">基期 FCF {{ fmtYiPlain(s.base_fcf) }} 亿<template v-if="s.base_fcf_basis"> · {{ s.base_fcf_basis }}</template></div>
                             <div class="ai-v">折现率 {{ fmtRate(s.discount_rate) }}% · 模型 {{ s.model_name }}<template v-if="s.model_degraded">（已降级）</template></div>
                             <div class="ai-v">A {{ fmtRate(s.growth_anchor) }}% · g1 {{ scenarioG1(s) != null ? fmtRate(scenarioG1(s)) + '%' : '—' }} · g∞ {{ fmtRate(s.terminal_growth) }}%</div>
@@ -2632,12 +2710,17 @@ const app = createApp({
                             <div class="ai-v ai-scenario-note">{{ s.note || '—' }}<template v-if="s.capped_by && s.capped_by.length">（受 {{ scenarioCapLabels(s.capped_by) }} 约束）</template></div>
                           </div>
                         </div>
-                        <p class="ai-text">三档的基期 FCF 按分年序列离散锚定：保守取 min(基准, 近年中位数)、乐观取 max(基准, 最近一年)；该值仅作展示，不参与每档估值计算（P0 不输出逐档股价）。基准档与上方参数及「套用到估值」一致。增长参数相同时仅折现率分档；乐观档的增长锚上限放宽到 40%、折现率下限放宽到 7%，不与基准档共用「适中」边界。</p>
+                        <p class="ai-text">三档的基期 FCF 按分年序列离散锚定：保守取 min(基准, 近年中位数)、乐观取 max(基准, 最近一年)。后端不输出逐档股价；点「套用到估值」时，按所选档把该档折现率、增长参数与基期 FCF（自定义口径）写回估值表单，默认基准档与上方参数一致。增长参数相同时仅折现率分档；乐观档的增长锚上限放宽到 40%、折现率下限放宽到 7%，不与基准档共用「适中」边界。</p>
                       </template>
                     </div>
                   </div>
                 </div>
-                <div v-if="aiResult.usage" class="ai-usage">本次分析消耗约 {{ aiResult.usage.total_tokens }} tokens（输入 {{ aiResult.usage.prompt_tokens }} / 输出 {{ aiResult.usage.completion_tokens }}）</div>
+                <!-- usage / 耗时任一存在即渲染；缺失一侧不显示，另一侧照常展示 -->
+                <div v-if="aiResult.usage || aiElapsed != null" class="ai-usage">
+                  <template v-if="aiResult.usage">本次分析消耗约 {{ aiResult.usage.total_tokens }} tokens（输入 {{ aiResult.usage.prompt_tokens }} / 输出 {{ aiResult.usage.completion_tokens }}）</template>
+                  <template v-if="aiResult.usage && aiElapsed != null"> · </template>
+                  <template v-if="aiElapsed != null">{{ aiResult.usage ? '耗时' : '本次分析耗时' }} {{ aiElapsed.toFixed(1) }}s</template>
+                </div>
               </template>
             </div>
           </section>

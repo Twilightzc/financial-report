@@ -580,8 +580,9 @@ td.num, .val, .yoy {
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; flex-wrap: wrap; margin-bottom: 4px;
 }
+/* 档位选择器 + 套用按钮：窄屏换行后仍保持右对齐的触控区域 */
+.ai-scenario-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ai-scenario-band { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
-.ai-elapsed { color: var(--muted); font-size: 12px; }
 .ai-scenario-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px; table-layout: fixed; }
 .ai-scenario-table th, .ai-scenario-table td { padding: 6px 8px; border: 1px solid var(--line); text-align: right; vertical-align: top; }
 .ai-scenario-table thead th { color: var(--ink); background: #f6f7f9; text-align: center; }
