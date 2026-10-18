@@ -511,3 +511,88 @@ func TestComputeValuationBaseFCFMode(t *testing.T) {
 		t.Errorf("研发调整 BaseFCF=%v rd=%v adjust=%v err=%v，期望 350 / 50 / true", res.BaseFCF, res.RDAdjustment, res.AdjustRD, err)
 	}
 }
+
+// TestComputeValuationEquityFloor 公司价值低于债务价值时，股权价值与每股价值 floor 到 0 并标记资不抵债。
+// 构造：经营现金流净额 5（无保全性资本支出）→ FCF = 5；零增长 r=10% → 经营资产价值 50；
+// 无金融资产/长投 → 公司价值 50 < 有息债务 1000。
+func TestComputeValuationEquityFloor(t *testing.T) {
+	balance := row(map[string]float64{
+		"MONETARYFUNDS": 0,
+		"SHORT_LOAN":    1000,
+		"TOTAL_ASSETS":  2000,
+		"TOTAL_EQUITY":  500,
+	})
+	cashflow := row(map[string]float64{"NETCASH_OPERATE": 5})
+	income := row(map[string]float64{})
+
+	res, err := ComputeValuation([]model.ReportRow{balance}, []model.ReportRow{cashflow}, []model.ReportRow{income},
+		model.ValuationParams{Model: "zero", DiscountRate: 10}, 1000)
+	if err != nil {
+		t.Fatalf("ComputeValuation 返回错误：%v", err)
+	}
+	if res.CompanyValue != 50 || res.DebtValue != 1000 {
+		t.Errorf("公司价值=%v 债务价值=%v，期望 50 / 1000", res.CompanyValue, res.DebtValue)
+	}
+	if !res.EquityFloored {
+		t.Error("EquityFloored = false，期望 true（公司价值低于债务价值）")
+	}
+	if res.EquityValue != 0 {
+		t.Errorf("股权价值 = %v，期望 0（负值应 floor 到 0）", res.EquityValue)
+	}
+	if res.EquityValuePerShare != 0 {
+		t.Errorf("每股股权价值 = %v，期望 0", res.EquityValuePerShare)
+	}
+	if res.EquityNote == "" {
+		t.Error("资不抵债时 EquityNote 不应为空")
+	}
+}
+
+// TestComputeValuationEquityNotFloored 公司价值 ≥ 债务价值时标记为 false，股权价值原值不受影响；
+// 公司价值恰等于债务价值（容差内）时不标记，股权价值为 0。
+func TestComputeValuationEquityNotFloored(t *testing.T) {
+	// 公司价值固定 = 金融资产 1000 + 长投 200 + 经营资产 3780 = 4980。
+	cases := []struct {
+		name        string
+		shortLoan   float64 // 有息债务（短期借款）
+		wantEquity  float64
+		wantFloored bool
+	}{
+		{"公司价值高于债务", 500, 4480, false},
+		{"公司价值等于债务", 4980, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			balance := row(map[string]float64{
+				"MONETARYFUNDS":      1000,
+				"LONG_EQUITY_INVEST": 200,
+				"SHORT_LOAN":         c.shortLoan,
+				"TOTAL_EQUITY":       1500,
+				"TOTAL_ASSETS":       6000,
+			})
+			_, cf, inc := valuationFixture()
+			res, err := ComputeValuation([]model.ReportRow{balance}, []model.ReportRow{cf}, []model.ReportRow{inc},
+				model.ValuationParams{Model: "zero", DiscountRate: 10}, 1000)
+			if err != nil {
+				t.Fatalf("ComputeValuation 返回错误：%v", err)
+			}
+			if !approx(res.CompanyValue, 4980) {
+				t.Fatalf("公司价值 = %v，期望 4980", res.CompanyValue)
+			}
+			if res.EquityFloored != c.wantFloored {
+				t.Errorf("EquityFloored = %v，期望 %v", res.EquityFloored, c.wantFloored)
+			}
+			if !approx(res.EquityValue, c.wantEquity) {
+				t.Errorf("股权价值 = %v，期望 %v", res.EquityValue, c.wantEquity)
+			}
+			if !approx(res.EquityValuePerShare, c.wantEquity/1000) {
+				t.Errorf("每股股权价值 = %v，期望 %v", res.EquityValuePerShare, c.wantEquity/1000)
+			}
+			if c.wantFloored && res.EquityNote == "" {
+				t.Error("标记资不抵债时 EquityNote 不应为空")
+			}
+			if !c.wantFloored && res.EquityNote != "" {
+				t.Errorf("未标记资不抵债时 EquityNote = %q，期望为空", res.EquityNote)
+			}
+		})
+	}
+}

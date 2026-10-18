@@ -46,6 +46,13 @@ var valFCFCustomValueRe = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,2})?$`)
 // longEquityThreshold 长期股权投资占总资产比例超过该阈值时，提示对投资公司单独估值。
 const longEquityThreshold = 0.10
 
+// valEquityEpsilon 判定「公司价值低于债务价值」的浮点容差：差额绝对值不超过该值时视为相等，
+// 避免数学上相等但浮点舍入产生的伪资不抵债标记。
+const valEquityEpsilon = 1e-9
+
+// valEquityFlooredNote 公司价值低于债务价值时的提示文案（股权价值 floor 到 0）。
+const valEquityFlooredNote = "公司价值低于债务价值，股权价值按 0 计（存在资不抵债风险）。"
+
 var valuationModelNames = map[string]string{
 	valModelZero:       "零增长模型",
 	valModelPerpetual:  "永续增长模型",
@@ -98,7 +105,7 @@ func ParseCustomFCF(value, unit string) (float64, error) {
 
 // ComputeValuation 计算公司股票估值（现金流贴现法，基于最新年报）。
 //
-// 公司价值 = 金融资产价值 + 长期股权投资价值 + 经营资产价值；股权价值 = 公司价值 − 债务价值（有息债务）。
+// 公司价值 = 金融资产价值 + 长期股权投资价值 + 经营资产价值；股权价值 = max(0, 公司价值 − 债务价值（有息债务）)。
 //   - 金融资产价值：直接取财报账面价值（公允价值/摊余成本已反映估值日价值）。
 //   - 长期股权投资价值：收益资本化 = 账面价值 × (长期股权投资收益率 ÷ 折现率)，收益率 ≤ 0 时取 0。
 //   - 经营资产价值：对经营资产自由现金流按所选模型贴现（零增长/永续增长/两阶段/三阶段）。
@@ -178,7 +185,10 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 	finValue := financialAssets(b)
 	companyValue := finValue + longValue + opValue
 	debt := interestBearingDebt(b)
-	equityValue := companyValue - debt
+	// 股权价值 = 公司价值 − 债务价值，下限为 0：保守情景（低谷 FCF + 高折现率）下重资产高负债公司
+	// 可能出现公司价值 < 债务价值，此时股权价值按 0 计并标记资不抵债风险，避免输出负股价。
+	equityFloored := companyValue-debt < -valEquityEpsilon
+	equityValue := math.Max(0, companyValue-debt)
 
 	fcfYears := 0
 	switch params.FCFMode {
@@ -195,6 +205,10 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 		BaseFCF: fcf, LongEquityBook: longBook, LongEquityReturn: longRet, DebtValue: debt,
 		FinancialAssetValue: finValue, LongEquityValue: longValue, OperatingAssetValue: opValue,
 		CompanyValue: companyValue, EquityValue: equityValue,
+		EquityFloored: equityFloored,
+	}
+	if equityFloored {
+		res.EquityNote = valEquityFlooredNote
 	}
 	// 自定义参数仅 custom 模式回显，其余模式留零值（omitempty 不输出），避免非 custom 传入脏值时泄漏。
 	if params.FCFMode == valFCFCustom {

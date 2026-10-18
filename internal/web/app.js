@@ -2278,12 +2278,16 @@ const app = createApp({
                       <td class="item-name">股权价值</td>
                       <td class="num">{{ fmtYi(valuation.equity_value) }}</td>
                     </tr>
-                    <tr v-if="valuation.equity_value_per_share">
+                    <tr v-if="valuation.equity_value_per_share || valuation.equity_floored">
                       <td class="item-name">每股股权价值</td>
                       <td class="num">{{ valuation.equity_value_per_share.toFixed(2) }} 元</td>
                     </tr>
                   </tbody>
                 </table>
+                <!-- 资不抵债风险：后端把股权价值 floor 到 0，此处醒目提示（红色告警） -->
+                <el-alert v-if="valuation.equity_floored" type="error" :closable="false" show-icon
+                          :title="valuation.equity_note || '公司价值低于债务价值，股权价值按 0 计（存在资不抵债风险）'"
+                          style="margin-top:8px" />
                 <el-alert v-for="(n, i) in valuation.notes" :key="i" :title="n" type="warning" :closable="false" style="margin-top:8px" />
               </template>
             </div>

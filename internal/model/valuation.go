@@ -57,12 +57,14 @@ type ValuationResult struct {
 	DebtValue        float64  `json:"debt_value"`         // 债务价值 = 有息债务（元）
 
 	// 估值结果
-	FinancialAssetValue float64 `json:"financial_asset_value"`  // 金融资产价值（元）
-	LongEquityValue     float64 `json:"long_equity_value"`      // 长期股权投资价值（元）
-	OperatingAssetValue float64 `json:"operating_asset_value"`  // 经营资产价值（DCF，元）
-	CompanyValue        float64 `json:"company_value"`          // 公司价值（元）
-	EquityValue         float64 `json:"equity_value"`           // 股权价值（元）
-	EquityValuePerShare float64 `json:"equity_value_per_share"` // 每股股权价值（元）
+	FinancialAssetValue float64 `json:"financial_asset_value"`    // 金融资产价值（元）
+	LongEquityValue     float64 `json:"long_equity_value"`        // 长期股权投资价值（元）
+	OperatingAssetValue float64 `json:"operating_asset_value"`    // 经营资产价值（DCF，元）
+	CompanyValue        float64 `json:"company_value"`            // 公司价值（元）
+	EquityValue         float64 `json:"equity_value"`             // 股权价值（元，已 floor 到 0）
+	EquityValuePerShare float64 `json:"equity_value_per_share"`   // 每股股权价值（元，已 floor 到 0）
+	EquityFloored       bool    `json:"equity_floored,omitempty"` // 公司价值低于债务价值，股权价值按 0 计
+	EquityNote          string  `json:"equity_note,omitempty"`    // 资不抵债风险提示（EquityFloored 为真时给出）
 
 	Notes []string `json:"notes,omitempty"`
 }
