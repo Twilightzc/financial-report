@@ -11,7 +11,7 @@ import (
 )
 
 // R20《估值增长与终值保守化》专项测试：
-//   g1 上限改为 SGR + 1pp（前瞻锚退出）；
+//   g1 上限 = min(30%, max(前瞻锚, SGR) + 1pp)（前瞻锚参与，取较高者）；
 //   周期/商品股终值增长率上限（R21 起为长期通胀 2.5%）。
 
 func TestTerminalGrowthR20(t *testing.T) {
@@ -79,11 +79,14 @@ func TestGrowthG1R20(t *testing.T) {
 		contains   string
 		excludes   string
 	}{
-		{"AC-1 SGR=8、A=20", 20, 2.0, 20, 8.0, true, true, 9.0, "upper", "8.0% + 1pp", ""},
-		{"AC-2a 不被无谓压低", 7, 2.0, 20, 8.0, true, true, 7.0, "none", "", ""},
-		{"AC-2b 网格取整", 12, 2.0, 20, 8.2, true, true, 9.0, "upper", "8.2%", ""},
-		{"AC-3 前瞻锚退出", 25, 2.0, 20, 8.0, true, true, 9.0, "upper", "", "前瞻锚"},
-		{"Q1 前瞻兜底", 20, 4.5, 12, 0, true, false, 14.0, "upper", "前瞻锚 + 2pp", ""},
+		{"AC-1 SGR 更高时绑定 SGR", 20, 2.0, 5, 8.0, true, true, 9.0, "upper", "8.0% + 1pp", "前瞻一致预期"},
+		{"AC-2a 不被无谓压低", 7, 2.0, 5, 8.0, true, true, 7.0, "none", "", ""},
+		{"AC-2b 网格取整", 12, 2.0, 5, 8.2, true, true, 9.0, "upper", "8.2%", ""},
+		{"前瞻锚参与（高于 SGR）", 20, 2.0, 12, 8.0, true, true, 13.0, "upper", "前瞻一致预期 12.0% + 1pp", ""},
+		{"前瞻锚远高按 +1pp", 25, 2.0, 20, 8.0, true, true, 21.0, "upper", "20.0% + 1pp", "2pp"},
+		{"SGR=8 无前瞻", 20, 2.0, 0, 8.0, false, true, 9.0, "upper", "8.0% + 1pp", ""},
+		{"Q1 前瞻兜底", 20, 4.5, 12, 0, true, false, 13.0, "upper", "前瞻一致预期 12.0% + 1pp", ""},
+		{"前瞻≤-1 按 0 收口", 20, 0, -1.2, 0, true, false, 0.0, "upper", "按 0 收口", "1pp 上限"},
 		{"Q1 仅 30%", 40, 2.0, 0, 0, false, false, 30.0, "upper", "仅受 30%", ""},
 		{"SGR=0", 20, 0, 0, 0, false, true, 1.0, "upper", "非正", ""},
 		{"-1<SGR<0", 20, 0, 0, -0.5, false, true, 0.5, "upper", "-0.5%", ""},
@@ -111,8 +114,18 @@ func TestGrowthG1R20(t *testing.T) {
 			if g1 < 0 || g1+1e-9 < c.gInf || g1 > 30 {
 				t.Errorf("g1=%v 越界（g∞=%v）", g1, c.gInf)
 			}
-			if c.sgrOK && c.sgr > 0 && g1 > math.Min(30, c.sgr+r20G1SGRBufferPP)+1e-9 {
-				t.Errorf("g1=%v 超过 SGR+1pp 上限（SGR=%v）", g1, c.sgr)
+			// 复算上限：前瞻锚与 SGR 均可用时取较高者 + 1pp。
+			capG1 := 30.0
+			switch {
+			case c.fwdOK && c.sgrOK:
+				capG1 = math.Min(30, math.Max(0, math.Max(c.fwd, c.sgr)+g1CapBufferPP))
+			case c.sgrOK:
+				capG1 = math.Min(30, math.Max(0, c.sgr+g1CapBufferPP))
+			case c.fwdOK:
+				capG1 = math.Min(30, math.Max(0, c.fwd+g1CapBufferPP))
+			}
+			if c.constraint != "cap_below_terminal" && g1 > capG1+1e-9 {
+				t.Errorf("g1=%v 超过上限 %v（fwd=%v, sgr=%v）", g1, capG1, c.fwd, c.sgr)
 			}
 		})
 	}
@@ -216,8 +229,8 @@ func TestRecommendCyclicalTerminalR20(t *testing.T) {
 	}
 	if rec.Model == valModelTwoStage || rec.Model == valModelThreeStage {
 		g1 := paramValue(t, rec.Params, "g1")
-		if g1 > sgr+r20G1SGRBufferPP+1e-9 {
-			t.Errorf("g1 = %v 超过 SGR+1pp = %v", g1, sgr+r20G1SGRBufferPP)
+		if g1 > sgr+g1CapBufferPP+1e-9 {
+			t.Errorf("g1 = %v 超过 SGR+1pp = %v", g1, sgr+g1CapBufferPP)
 		}
 		if g1 < rec.GrowthTerminal-1e-9 {
 			t.Errorf("g1 = %v 低于终值 %v", g1, rec.GrowthTerminal)

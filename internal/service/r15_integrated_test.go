@@ -114,7 +114,7 @@ func TestValuationDiscountNoBalance(t *testing.T) {
 
 // TestGrowthG1Rules g1 上限与终值收口规则。
 func TestGrowthG1Rules(t *testing.T) {
-	// A=20、SGR=15 → R20 上限 min(30, SGR+1)=16，前瞻锚不参与。
+	// A=20、SGR=15、前瞻锚=12 → 上限 min(30, max(12, 15)+1)=16。
 	if g1, constraint, _ := growthG1(20, 4.5, 12, 15, true, true); g1 != 16 || constraint != "upper" {
 		t.Errorf("上限规则 = %v/%s，期望 16/upper", g1, constraint)
 	}

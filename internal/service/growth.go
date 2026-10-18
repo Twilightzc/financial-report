@@ -44,7 +44,7 @@ const (
 	r18CyclePositionEnabled   = true
 
 	// R20 估值增长与终值保守化。
-	r20G1SGRBufferPP = 1.0 // g1 相对 SGR 的近似误差缓冲（用户确认，不得扩大）
+	g1CapBufferPP = 1.0 // g1 相对上限锚（前瞻锚/SGR 取较高者）的近似误差缓冲（用户确认，不得扩大）
 	// R21：周期/商品股终值上限由 2.0% 调整为 2.5%（长期通胀区间 2.0%–3.0% 的中点）。
 	r20CyclicalTerminalPP = 2.5 // 周期/商品股终值上限 = 长期通胀
 )
@@ -1067,19 +1067,28 @@ func classifyGrowthModel(A, gap, score float64, insufficient bool, negType strin
 	}
 }
 
-// growthG1 由复合锚 A 得到 g1 与唯一上限约束（R20）。
-// SGR 可用：capG1 = min(30, max(0, SGR + 1))；前瞻锚不参与上限。
-// SGR 不可用：前瞻锚可用时 min(30, max(0, 前瞻锚) + 2)，否则 30。
+// growthG1 由复合锚 A 得到 g1 与唯一上限约束（R20 口径，前瞻锚参与上限）。
+// 前瞻锚与 SGR 均可用：capG1 = min(30, max(0, max(前瞻锚, SGR) + 1pp))，依据句指向较高者。
+// 仅 SGR 可用：capG1 = min(30, max(0, SGR + 1pp))。
+// 仅前瞻锚可用：capG1 = min(30, max(0, 前瞻锚 + 1pp))；两者都不可用：30。
 // g1 = floorHalf(clamp(A, g∞, capG1))。
 func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constraint, note string) {
 	capG1 := 30.0
 	capSource := "none" // 内部使用，不输出
 	switch {
+	case sgrOK && fwdOK:
+		// 取较高者作为上限锚，依据句指向真正绑定的一项。
+		capG1 = math.Min(30.0, math.Max(0, math.Max(fwd, sgr)+g1CapBufferPP))
+		if fwd >= sgr {
+			capSource = "forward"
+		} else {
+			capSource = "sgr"
+		}
 	case sgrOK:
-		capG1 = math.Min(30.0, math.Max(0, sgr+r20G1SGRBufferPP))
+		capG1 = math.Min(30.0, math.Max(0, sgr+g1CapBufferPP))
 		capSource = "sgr"
 	case fwdOK:
-		capG1 = math.Min(30.0, math.Max(0, fwd)+2.0)
+		capG1 = math.Min(30.0, math.Max(0, fwd+g1CapBufferPP))
 		capSource = "forward"
 	}
 	// 上限低于终值：g1 按终值收口，不得出现 g1 < g∞ 或负值。
@@ -1091,7 +1100,7 @@ func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constra
 	// 排除 A 仅被 0.5pp 网格向下取整、并未真正触顶的情况。
 	switch {
 	case A > capG1+1e-9:
-		return g1, "upper", r20G1UpperNote(capSource, sgr)
+		return g1, "upper", r20G1UpperNote(capSource, fwd, sgr)
 	case A < gInf-1e-9:
 		return g1, "terminal", "g1 按终值收口。"
 	default:
@@ -1100,7 +1109,7 @@ func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constra
 }
 
 // r20G1UpperNote g1 触顶时的依据句（只含业务语言与实际数字，不输出内部键名）。
-func r20G1UpperNote(capSource string, sgr float64) string {
+func r20G1UpperNote(capSource string, fwd, sgr float64) string {
 	switch capSource {
 	case "sgr":
 		switch {
@@ -1108,15 +1117,24 @@ func r20G1UpperNote(capSource string, sgr float64) string {
 			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%），高增长期增长率按 0 收口。", sgr)
 		case sgr <= 0:
 			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%），高增长期增长率按 1pp 上限收口。", sgr)
-		case sgr+r20G1SGRBufferPP > 30.0:
+		case sgr+g1CapBufferPP > 30.0:
 			return fmt.Sprintf("自筹资金可持续增速 %.1f%%，高增长期增长率按 30%% 上限约束。", sgr)
 		default:
 			return fmt.Sprintf("高增长期增长率受自筹资金可持续增速 %.1f%% + 1pp 上限约束。", sgr)
 		}
 	case "forward":
-		return "自筹资金可持续增速不可用，高增长期增长率按前瞻锚 + 2pp 上限（且不超过 30%）约束。"
+		switch {
+		case fwd <= -1.0:
+			return fmt.Sprintf("前瞻一致预期非正（%.1f%%），高增长期增长率按 0 收口。", fwd)
+		case fwd <= 0:
+			return fmt.Sprintf("前瞻一致预期非正（%.1f%%），高增长期增长率按 1pp 上限收口。", fwd)
+		case fwd+g1CapBufferPP > 30.0:
+			return fmt.Sprintf("前瞻一致预期 %.1f%%，高增长期增长率按 30%% 上限约束。", fwd)
+		default:
+			return fmt.Sprintf("高增长期增长率受前瞻一致预期 %.1f%% + 1pp 上限约束。", fwd)
+		}
 	default:
-		return "自筹资金可持续增速不可用，高增长期增长率仅受 30% 上限约束。"
+		return "前瞻一致预期与自筹资金可持续增速均不可用，高增长期增长率仅受 30% 上限约束。"
 	}
 }
 
@@ -1207,7 +1225,7 @@ func verifyC4a(gInf, discount, sgr float64, sgrOK bool) (ok bool, warning string
 
 // verifyC4b 软约束：g1 > SGR + 1pp 才告警（1pp 缓冲本身不告警），不降级。
 func verifyC4b(g1, sgr float64, sgrOK bool) string {
-	if !sgrOK || sgr <= 0 || g1 <= sgr+r20G1SGRBufferPP+1e-9 {
+	if !sgrOK || sgr <= 0 || g1 <= sgr+g1CapBufferPP+1e-9 {
 		return ""
 	}
 	return fmt.Sprintf("高增长期增长率 %.2f%% 高于自筹资金可持续增速 %.2f%% + 1pp，仅告警，不降级。", g1, sgr)
