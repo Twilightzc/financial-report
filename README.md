@@ -39,7 +39,7 @@ go run ./cmd/server
 | --- | --- | --- |
 | `-addr` | `0.0.0.0:18080` | 监听地址 `ip:port` |
 | `-apikey` | 空 | DeepSeek API Key（未填则读环境变量 `DEEPSEEK_API_KEY`） |
-| `-model` | `deepseek-v4-pro` | DeepSeek 模型名 |
+| `-model` | `deepseek-flash` | DeepSeek 模型名（快速非推理模型；推理模型请显式指定） |
 | `-baseurl` | `https://api.deepseek.com/v1` | DeepSeek 接口地址 |
 
 示例：

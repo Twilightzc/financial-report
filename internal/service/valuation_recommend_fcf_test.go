@@ -210,9 +210,9 @@ func TestRecommendBaseFCFDeterministic(t *testing.T) {
 	}
 }
 
-// TestRecommendBaseFCFDynamicWindow G9：窗口按 FCF 周期动态取 3/5/7 年，且不超过可用年数。
+// TestRecommendBaseFCFDynamicWindow G9：窗口按 FCF 周期动态取 3/5/10 年，且不超过可用年数。
 func TestRecommendBaseFCFDynamicWindow(t *testing.T) {
-	years := []int{2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
+	years := []int{2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
 	fcf := make(map[int]float64, len(years))
 	for i, y := range years {
 		fcf[y] = float64(100+i) * 1e8 // 单调递增 → 无周期时命中 R4 latest
@@ -227,7 +227,7 @@ func TestRecommendBaseFCFDynamicWindow(t *testing.T) {
 	if got := RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, CV: 0.4, WindowYears: 8}); got.Mode != valFCFLatest {
 		t.Errorf("中等波动 + 单调增应命中 latest，实际 %+v", got)
 	}
-	// 强周期 → 7 年，且强制去极值平均。
+	// 强周期 → 10 年，且强制去极值平均。
 	got = RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, Cyclical: true, CV: 0.6, WindowYears: 8})
 	if got.Mode != valFCFTrimMean || got.Years != valFCFYearsCyclical {
 		t.Errorf("强周期应取 %d 年去极值平均，实际 %+v", valFCFYearsCyclical, got)
@@ -266,8 +266,8 @@ func TestDetectFCFCycle(t *testing.T) {
 		t.Errorf("不足 3 年不应判定：%+v", c)
 	}
 
-	// 窗口截断到 7 年（只吃最近 7 年）。
-	years := []int{2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
+	// 窗口截断到 10 年（只吃最近 10 年）。
+	years := []int{2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
 	fcf := make(map[int]float64, len(years))
 	for _, y := range years {
 		fcf[y] = 1e8
@@ -286,8 +286,8 @@ func TestFCFWindowYears(t *testing.T) {
 		{fcfCycle{Evaluated: false}, valFCFYearsCyclical}, // 不可判定不额外缩短（交给 R1）
 		{fcfCycle{Evaluated: true, CV: 0.29}, valFCFYearsStable},
 		{fcfCycle{Evaluated: true, CV: 0.31}, valFCFYearsMild},
-		// CV 高但未判周期（如成长性否决后 Cyclical=false）不再单独触发 7 年：
-		// 7 年只由生效判据 Cyclical 决定（R15/P5 修复点 1 的回归守卫）。
+		// CV 高但未判周期（如成长性否决后 Cyclical=false）不再单独触发 10 年：
+		// 10 年只由生效判据 Cyclical 决定（R15/P5 修复点 1 的回归守卫）。
 		{fcfCycle{Evaluated: true, CV: 0.51}, valFCFYearsMild},
 		{fcfCycle{Evaluated: true, Cyclical: true, CV: 0.51}, valFCFYearsCyclical},
 		{fcfCycle{Evaluated: true, Cyclical: true, CV: 0.1}, valFCFYearsCyclical},

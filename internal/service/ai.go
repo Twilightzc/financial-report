@@ -147,8 +147,27 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	b.WriteString("- 行业类型：请判定并在 industry_type 输出（cyclical 周期性行业 / general 一般行业 / utility 公用事业，三选一，不确定取 general）。\n")
 	// R15/P1：折现率构成（预推导口径；终态折现率与永续增长率将按 AI 判定的行业类型重算）。
 	if rec.WaccBaseline > 0 {
-		b.WriteString(fmt.Sprintf("- 折现率构成：WACC 基线 %.2f%% + 公司风险溢价 %.1f%%（无风险利率 %.1f%% + β %.2f（%s）× 风险溢价 %.1f%%）；β 将按你判定的 industry_type 重算（cyclical 1.2 / general 1.0 / utility 0.8），折现率与永续增长率随之重算。\n",
-			rec.WaccBaseline, rec.RiskPremium, rec.RiskFreeRate, rec.Beta, rec.BetaTier, rec.EquityRiskPremium))
+		// FR-10/FR-15：Re → 资本结构 → 税后 Rd → WACC → 风险溢价 → 收口的可复算链路。
+		line := fmt.Sprintf("- 折现率构成（WACC 分步）：WACC 基线 %.2f%%；", rec.WaccBaseline)
+		if rec.EquityCost > 0 {
+			line += fmt.Sprintf("Re = Rf %.2f%% + β %.2f（%s）× ERP %.2f%% = %.2f%%；",
+				rec.RiskFreeRate, rec.Beta, rec.BetaTier, rec.EquityRiskPremium, rec.EquityCost)
+		} else {
+			line += fmt.Sprintf("β %.2f（%s）；", rec.Beta, rec.BetaTier)
+		}
+		if rec.DebtWeight > 0 {
+			rdText := fmt.Sprintf("Rd_pre %.2f%% × (1−t %.2f%%) = Rd_after %.2f%%",
+				rec.DebtCostPretax, rec.EffectiveTaxRate*100, rec.AfterTaxDebtCost)
+			if rec.DebtCostEstimated {
+				rdText += "（债务成本不可用，按 Rf+2.0pp 保守估计）"
+			}
+			line += fmt.Sprintf("wD %.2f / wE %.2f；%s；", rec.DebtWeight, rec.EquityWeight, rdText)
+		} else {
+			line += "无有息债务（wD=0，WACC=Re）；"
+		}
+		line += fmt.Sprintf("+公司风险溢价 %.2f%% → %.2f%% → 收口 %.1f%%（[8,15] 0.5 网格）；β 将按你判定的 industry_type 重算（cyclical 1.2 / general 1.0 / utility 0.8），折现率与永续增长率随之重算。",
+			rec.RiskPremium, rec.WaccBaseline+rec.RiskPremium, rec.DiscountRate)
+		b.WriteString(line + "\n")
 	} else {
 		b.WriteString("- 折现率构成：缺少资产负债表，折现率回落保守默认值；β 将按你判定的 industry_type 重算（cyclical 1.2 / general 1.0 / utility 0.8），折现率与永续增长率随之重算。\n")
 	}
@@ -166,6 +185,23 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	if rec.FCFRationale != "" {
 		b.WriteString("- 基期自由现金流：" + baseFCFPromptText(rec) + "\n")
 	}
+	// R15 整合版：FCF 公式、窗口与 capex/现金含量提示（FR-1/FR-7/FR-9）。
+	if rec.FCFFormulaNote != "" {
+		line := "- 基期 FCF 公式：" + rec.FCFFormulaNote
+		if rec.FCFWindowStart > 0 && rec.FCFWindowEnd > 0 {
+			line += fmt.Sprintf(" 推荐窗口 %d–%d 年", rec.FCFWindowStart, rec.FCFWindowEnd)
+		}
+		line += fmt.Sprintf("；推荐值 %.2f 亿元。", rec.FCFBaseValue/1e8)
+		b.WriteString(line + "\n")
+	}
+	if rec.CapexCoverage > valCapexCoverageHigh {
+		b.WriteString(fmt.Sprintf("- capex 提示：购建长期资产现金/保全性资本支出 %.2f 倍（> 1.3），保全口径未扣扩张性资本开支，基期 FCF 可能偏乐观。\n",
+			rec.CapexCoverage))
+	}
+	if rec.FCFProfitRatio > valFCFProfitHigh {
+		b.WriteString(fmt.Sprintf("- 现金含量提示：FCF 中位数为净利润的 %.2f 倍（> 1.5），只解释折旧摊销/减值/营运资本差异，不得改写数字。\n",
+			rec.FCFProfitRatio))
+	}
 	// R18：三层锚、周期位置、负增长归因与模型分档（只解释口径，不得改写数字）。
 	// 缺失分项标记「不可用」而不是写成 0%，避免向大模型编造数据点（A3）。
 	downsideText := "不可用"
@@ -180,8 +216,35 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 	}
 	b.WriteString(fmt.Sprintf("- 负增长归因：%s（%s）；正常化 A_norm = %.2f%%。\n",
 		rec.NegativeGrowthType, rec.NegativeGrowthBasis, rec.GrowthNormalized))
-	b.WriteString(fmt.Sprintf("- 模型分档：得分 %.2f（%s）→ %s（权重 增速 0.6 / 稳定性 0.2 / ROE 0.2，阈值 70/45；A<0 时结构性→零增长、周期性→低永续；不得再把 A<3%% 说成零增长）。\n",
+	b.WriteString(fmt.Sprintf("- 模型分档：得分 %.2f（%s）→ %s（权重 0.6×Sg + 0.2×Sst + 0.2×Sroe，缺项按剩余权重归一化；阈值 70/45；A<0 时结构性→零增长、周期性→低永续；不得再把 A<3%% 说成零增长）。\n",
 		rec.ModelScore, modelScoreParts(rec), rec.ModelName))
+	// R15 整合版：复合锚权重与贡献（只读 rec，禁止大模型自行加权）。
+	if rec.GrowthAnchorCount > 0 {
+		histValue := rec.GrowthHistory + rec.GrowthCycleAdjust
+		fwdValue := 0.0
+		if rec.GrowthForwardOK {
+			fwdValue = rec.GrowthForward
+		}
+		b.WriteString(fmt.Sprintf("- 复合锚贡献：历史（周期修正后）%.2f%%×%.2f=%.2fpp；前瞻 %.2f%%×%.2f=%.2fpp；宏观 %.2f%%×%.2f=%.2fpp；合计 A_raw %.2fpp → A %.2f%%（锚数 %d）。\n",
+			histValue, rec.GrowthWeights.History, histValue*rec.GrowthWeights.History,
+			fwdValue, rec.GrowthWeights.Forward, fwdValue*rec.GrowthWeights.Forward,
+			rec.GrowthMacro, rec.GrowthWeights.Macro, rec.GrowthMacro*rec.GrowthWeights.Macro,
+			histValue*rec.GrowthWeights.History+fwdValue*rec.GrowthWeights.Forward+rec.GrowthMacro*rec.GrowthWeights.Macro,
+			rec.GrowthComposite, rec.GrowthAnchorCount))
+	}
+	// R15 整合版：g1 向下调整的可观测分量（未触发也要写明）。
+	g1Text := "不可用"
+	if v, ok := paramValueFromParams(rec.Params, "g1"); ok {
+		g1Text = fmt.Sprintf("%.2f%%", v)
+	} else if v, ok := paramValueFromParams(rec.Params, "g"); ok {
+		g1Text = fmt.Sprintf("%.2f%%（永续/零增长模型无 g1，取 g）", v)
+	}
+	dampingText := "未触发"
+	if rec.GrowthDamping > 0 {
+		dampingText = fmt.Sprintf("折减 %.2fpp", rec.GrowthDamping)
+	}
+	b.WriteString(fmt.Sprintf("- g1 向下调整：离散度%s；软上限 %.2f%%；包络 A±%.0fpp；生效 g1 %s。\n",
+		dampingText, rec.GrowthCap, rec.GrowthEnvelope, g1Text))
 	if rec.SGR > 0 {
 		b.WriteString(fmt.Sprintf("- 长期内生增速参考：SGR %.2f%%（留存率 %.1f%%，口径 %s）；仅作终值与软上限参考，不硬压 g1；g1 超过 SGR 只告警、不降级。\n",
 			rec.SGR, rec.RetentionRate*100, rec.RetentionBasis))
@@ -222,6 +285,41 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 		}
 		b.WriteString(line + "。以上均为系统校验结果，只解释口径，不得改写数字。\n")
 	}
+	// R15 整合版：三档参数摘要（固定顺序；即使 applicable=false 也输出，只禁用逐档套用）。
+	if len(rec.Scenarios) > 0 {
+		if rec.ScenarioBandSource != "" {
+			source := map[string]string{
+				"disagreement": "历史与前瞻锚分歧",
+				"fallback":     "历史/前瞻无有效分歧，按 0.2×A 回退",
+				"degenerate":   "负增长/零增长，增长带宽置 0",
+			}[rec.ScenarioBandSource]
+			if source == "" {
+				source = rec.ScenarioBandSource
+			}
+			b.WriteString(fmt.Sprintf(
+				"- 带宽来源：%s；原始分歧/回退 %.1fpp → 增长带宽 %.1fpp（折现率 %.1fpp、终值 %.1fpp）。\n",
+				source, rec.ScenarioBandRaw, rec.ScenarioBandGrowth,
+				rec.ScenarioBandDiscount, rec.ScenarioTerminalAdjust))
+		}
+		b.WriteString("三档参数（后端确定性计算，只能解释，不得生成或修改任何数字）：\n")
+		for _, s := range rec.Scenarios {
+			g1Text := "—"
+			if v, ok := paramValueFromParams(s.Params, "g1"); ok {
+				g1Text = fmt.Sprintf("%.1f%%", v)
+			} else if v, ok := paramValueFromParams(s.Params, "g"); ok {
+				g1Text = fmt.Sprintf("%.1f%%", v)
+			}
+			if s.Key == "base" {
+				b.WriteString(fmt.Sprintf("- %s：r=%.1f%%，A=%.1f%%，g1=%s，g∞=%.1f%%，模型=%s（与单点输出一致）\n",
+					s.Name, s.DiscountRate, s.GrowthAnchor, g1Text, s.TerminalGrowth, s.ModelName))
+				continue
+			}
+			b.WriteString(fmt.Sprintf("- %s：r=%.1f%%，A=%.1f%%，g1=%s，g∞=%.1f%%，模型=%s，Δ增长=%+.1fpp，Δ折现=%+.1fpp，说明=%s\n",
+				s.Name, s.DiscountRate, s.GrowthAnchor, g1Text, s.TerminalGrowth, s.ModelName,
+				s.DeltaGrowth, s.DeltaDiscount, s.Note))
+		}
+	}
+	b.WriteString("- 三档由服务端确定性计算；你只能在 rationale 中解释基准与差异，不得输出不同数值、概率或目标价。\n")
 	return b.String()
 }
 
@@ -327,6 +425,16 @@ func formatParamValue(v float64) string {
 		return strconv.Itoa(int(v))
 	}
 	return strconv.FormatFloat(v, 'g', -1, 64)
+}
+
+// paramValueFromParams 从模型参数中取指定 key 的值（提示词只读 rec，不做二次推导）。
+func paramValueFromParams(params []model.AIValuationParam, key string) (float64, bool) {
+	for _, p := range params {
+		if p.Key == key {
+			return p.Value, true
+		}
+	}
+	return 0, false
 }
 
 // segmentSummary 把主营构成序列化为「板块名（营收/利润/毛利率）、…」的紧凑文本，供大模型阅读。
@@ -796,6 +904,38 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 	r.Valuation.SGRRole = rec.SGRRole
 	r.Valuation.RetentionBasis = rec.RetentionBasis
 	r.Valuation.GrowthAdjustment = rec.GrowthAdjustment
+	// R15 整合版：三档情景、增长可观测、折现率分步、基期 FCF 可解释。
+	// 精度按 20.3.3：率/pp/权重/得分 1~2 位，金额保持元值（计算链仍用未舍入值）。
+	r.Valuation.ScenarioMethod = rec.ScenarioMethod
+	r.Valuation.ScenarioBandGrowth = round2(rec.ScenarioBandGrowth)
+	r.Valuation.ScenarioBandDiscount = round2(rec.ScenarioBandDiscount)
+	r.Valuation.ScenarioTerminalAdjust = round2(rec.ScenarioTerminalAdjust)
+	r.Valuation.ScenarioBandSource = rec.ScenarioBandSource
+	r.Valuation.ScenarioBandRaw = round2(rec.ScenarioBandRaw)
+	r.Valuation.Scenarios = rec.Scenarios
+	r.Valuation.GrowthWeights = rec.GrowthWeights
+	r.Valuation.GrowthAnchorCount = rec.GrowthAnchorCount
+	r.Valuation.GrowthDamping = round1(rec.GrowthDamping)
+	r.Valuation.GrowthCap = round1(rec.GrowthCap)
+	r.Valuation.GrowthEnvelope = rec.GrowthEnvelope
+	r.Valuation.ScoreGrowth = round2(rec.ScoreGrowth)
+	r.Valuation.ScoreStability = round2(rec.ScoreStability)
+	r.Valuation.HasStabilityScore = rec.HasStabilityScore
+	r.Valuation.ScoreROE = round2(rec.ScoreROE)
+	r.Valuation.HasROEScore = rec.HasROEScore
+	r.Valuation.GrowthTerminal = round2(rec.GrowthTerminal)
+	r.Valuation.EquityCost = round2(rec.EquityCost)
+	r.Valuation.DebtWeight = round2(rec.DebtWeight)
+	r.Valuation.EquityWeight = round2(rec.EquityWeight)
+	r.Valuation.DebtCostPretax = round2(rec.DebtCostPretax)
+	r.Valuation.AfterTaxDebtCost = round2(rec.AfterTaxDebtCost)
+	r.Valuation.EffectiveTaxRate = round2(rec.EffectiveTaxRate * 100)
+	r.Valuation.DebtCostEstimated = rec.DebtCostEstimated
+	r.Valuation.FCFSeries = rec.FCFSeries
+	r.Valuation.FCFBaseValue = rec.FCFBaseValue
+	r.Valuation.FCFFormulaNote = rec.FCFFormulaNote
+	r.Valuation.FCFWindowStart = rec.FCFWindowStart
+	r.Valuation.FCFWindowEnd = rec.FCFWindowEnd
 	// 一致预期未取到/不可用时清空快照字段，避免旧缓存或大模型脏值透传。
 	if rec.ConsensusFetched {
 		r.Valuation.ConsensusAsOf = rec.ConsensusAsOf

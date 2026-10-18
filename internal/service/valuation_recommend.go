@@ -29,11 +29,15 @@ const rdAdjustThreshold = 0.05 // 5%
 
 // R13《AI 基期自由现金流推荐》的固定阈值（FR-3 / Q3）。全部为常量，保证同一份财报推导结果唯一。
 const (
-	valFCFRecMaxYears = 7   // 中枢/波动判定窗口最多取近 7 年（R15/P3 G9：覆盖至少一轮周期）
+	valFCFRecMaxYears = 10  // 中枢/波动判定窗口最多取近 10 年（R15 整合版 FR-5：覆盖至少一轮周期）
 	valFCFRecMinYears = 3   // 中枢判定至少需 3 个可用年度，否则退回 latest（FR-10）
 	valFCFHighRatio   = 1.3 // latest > 1.3 × median → 最近一年明显偏高（Q3）
 	valFCFLowRatio    = 0.7 // latest < 0.7 × median → 最近一年明显偏低（Q3）
 )
+
+// valFCFFormulaNote 基期自由现金流的固定口径说明（FR-1/FR-9）。
+// 与 operatingFreeCashFlow 的实现严格同源：不扣扩张性资本开支与营运资本变动。
+const valFCFFormulaNote = "经营资产自由现金流 = 经营活动现金流量净额 − 保全性资本支出（资产/信用减值损失 + 折旧 + 摊销 + 处置/报废损失，仅计损失）；未扣扩张性资本开支与营运资本变动，未剔除一次性项目。"
 
 // R15/P1《自由现金流估值参数设定方法论》常量表（生效日期 2026-10-16）。
 // Rf / ERP / β 均为固定常量（Q8/Q9：不新增数据源，随版本手动更新并注明生效日期）。
@@ -48,6 +52,11 @@ const (
 	valDiscountRateMax  = 15.0 // r 收口上限 %（放宽自原 [9,12]）
 	valDiscountRateStep = 0.5  // r 收口网格步长 %
 	valLongTermGDP      = 4.0  // 长期名义 GDP 增速上限 %（永续增长率 gk 上界，G6 常量显式化）
+
+	// FR-12：债务成本不可用时的保守估计（仅估值链路启用；六维分析 wacc 仍按 0 处理）。
+	valDebtCostFallbackSpread = 2.0 // 信用利差近似 pp
+	valDebtCostMin            = 3.0 // fallback 下限 %
+	valDebtCostMax            = 8.0 // fallback 上限 %
 )
 
 // R15/P2 增速口径、多信号分档与 g1 折减（生效日期 2026-10-17）。
@@ -87,15 +96,15 @@ const (
 
 // R15/P3 周期识别与动态年数（生效日期 2026-10-17）。
 const (
-	valCycleWindowYears = 7    // 周期判定窗口上限（与 valFCFRecMaxYears 一致）
+	valCycleWindowYears = 10   // 周期判定窗口上限（与 valFCFRecMaxYears 一致）
 	valCycleMinYears    = 3    // 少于 3 年不做周期判定（Evaluated=false）
 	valCycleCVThreshold = 0.50 // FCF 变异系数 > 0.5 → 强周期
 	valCycleSignChanges = 2    // 窗口内正负交替 ≥ 2 次 → 强周期
 	valFCVMildThreshold = 0.30 // 0.3 < CV ≤ 0.5 → 中等波动（fcf_years=5）
 
-	valFCFYearsStable   = 3 // CV ≤ 0.3 → 3 年
-	valFCFYearsMild     = 5 // 0.3 < CV ≤ 0.5 → 5 年
-	valFCFYearsCyclical = 7 // 强周期 → 7 年（不足则取满可用年份）
+	valFCFYearsStable   = 3  // CV ≤ 0.3 → 3 年
+	valFCFYearsMild     = 5  // 0.3 < CV ≤ 0.5 → 5 年
+	valFCFYearsCyclical = 10 // 强周期 → 10 年（不足则取满可用年份）
 
 	valRDDoubleCondition = true // 研发双条件总开关（false 时回退旧单条件，便于灰度与回滚）
 )
@@ -109,7 +118,7 @@ const (
 	valGrowthVetoStrongYears = 2     // 至少 2 个强增长年
 	valGrowthVetoMaxDecline  = -10.0 // 营收同比最小值不得低于 -10%（容忍小幅波动）
 	valGrowthVetoMaxGMRange  = 20.0  // 窗口内毛利率极差 ≤ 20pp（排除商品价格周期）
-	valFCFYearsGrowth        = 5     // 成长性否决后的 fcf_years（不按强周期取 7）
+	valFCFYearsGrowth        = 5     // 成长性否决后的 fcf_years（不按强周期取 10）
 
 	// 修复点 2：FCF 增速分项可靠性
 	valFCFGrowthMinPoints = 2 // FCF 增速至少 2 个有效同比点（否则单点不代表趋势）
@@ -255,7 +264,7 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 		latest = latestYear(incomeYears, cfYears, balanceYears)
 	}
 
-	// 窗口：营收/净利润最近 ≤5 年；FCF 为两表交集最近 ≤7 年（增速分项只取其中最近 5 年）。
+	// 窗口：营收/净利润最近 ≤5 年；FCF 为两表交集最近 ≤10 年（增速分项只取其中最近 5 年）。
 	incomeWindow := yearWindow(incomeYears, latest, valGrowthWindowYears)
 	fcfYears := yearWindow(commonYears(incomeYears, cfYears), latest, valFCFRecMaxYears)
 	fcfGrowthYears := yearWindow(fcfYears, latest, valGrowthWindowYears)
@@ -341,10 +350,8 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	gInf, gInfWarn := terminalGrowth(macro.Value, discount, sgr, sgrOK)
 
 	// —— R18 ④：负增长归因（结构性 → 零增长；周期性 → 低永续）——
-	sm := structuralMetrics{}
-	if A < 0 {
-		sm = computeStructuralMetrics(incomeByYear, cycleWindow)
-	}
+	// 结构性指标无条件计算：三档情景中的保守档 A_s 可能为负，需复用同一份判据（纯计算，无副作用）。
+	sm := computeStructuralMetrics(incomeByYear, cycleWindow)
 	negType, negBasis, negWarn := attributeNegativeGrowth(A, isCyclical, pos, delta, fwd, sm)
 
 	// —— G5：ROE 信号（窗口内权益 > 0 的年度）与评分 ——
@@ -366,6 +373,7 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	gap := A - gInf
 	mdl, _, _ := classifyGrowthModel(A, gap, score, insufficientA, negType)
 	g1, cap, adjust := applyDownwardAdjustments(A, gap, dispersion, delta, fwd, sgr, sgrOK, envelope)
+	_, damping := dampedCandidate(A, dispersion, delta)
 	path := constructGrowthPath(mdl, A, gInf, gap, g1, discount)
 	warns := make([]string, 0, 16)
 	warns = appendWarnOnce(warns, macro.Warning)
@@ -401,8 +409,27 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	// C4b 软约束：g1 > SGR 只告警，不降级、不重算参数。
 	warns = appendWarnOnce(warns, verifyC4b(pr.G1, sgr, sgrOK))
 
+	// —— R15 整合版：三档情景参数（基准档直接复用上面的最终变量，不重新推导）——
+	bands := computeScenarioBands(A, x, delta, k > 0, fwd, pr.Model)
+	scenInput := scenarioInput{
+		A: A, Discount: discount, GInf: gInf,
+		Macro: macro.Value, MacroBasis: macro.Basis,
+		Dispersion: dispersion, Delta: delta, Fwd: fwd,
+		SGR: sgr, SGROK: sgrOK, Envelope: envelope,
+		Insufficient: insufficientA, IsCyclical: isCyclical, Position: pos,
+		StructuralMetrics: sm, ROEVals: roeVals,
+		DownsideDispersion: downsideDispersion, StabilityAvailable: stabilityAvailable,
+	}
+	scenarios := buildScenarios(scenInput, bands, pr, path, score, negType)
+
 	// —— R13：基期自由现金流推荐（解耦：只吃 FCF 自身序列 + 周期状态）——
+	// capex 守卫依赖最终模型（two_stage/three_stage），因此 capex 覆盖率必须先于推荐计算。
+	capexRatio, capexOK := 0.0, false
+	if v, ok := capexCoverage(cf, inc); ok {
+		capexRatio, capexOK = v, true
+	}
 	fcfRec := RecommendBaseFCF(fcfByYear, fcfYears, cycle)
+	fcfRec = applyFCFCapexGuard(fcfRec, pr.Model, capexRatio, capexOK, cycle, fcfByYear, fcfYears)
 
 	// R8/P3：研发调整建议（双条件；年份截断到基期年，保证 C7 口径同源）。
 	adjustRD, rdPct := rdAdjustSuggestion(incomeByYear, incomeWindow)
@@ -448,14 +475,17 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 
 	// 基期 FCF（与 R4 套用口径完全一致，供 C5 的 ΔNWC 分量使用）。
 	baseFCF := 0.0
+	fcfWindowStart, fcfWindowEnd := 0, 0
 	if len(fcfYears) > 0 {
-		if v, _, _, err := selectBaseFCF(fcfByYear, fcfYears, fcfRec.Mode, fcfRec.Years, fcfRec.CustomYuan); err == nil {
-			baseFCF = v
+		if v, _, used, err := selectBaseFCF(fcfByYear, fcfYears, fcfRec.Mode, fcfRec.Years, fcfRec.CustomYuan); err == nil {
+			if v > 0 {
+				baseFCF = v
+			}
+			// 推荐窗口首末年：latest 为同一年，custom 无窗口（0）。
+			if fcfRec.Mode != valFCFCustom && len(used) > 0 {
+				fcfWindowStart, fcfWindowEnd = used[0], used[len(used)-1]
+			}
 		}
-	}
-	capexRatio := 0.0
-	if v, ok := capexCoverage(cf, inc); ok {
-		capexRatio = v
 	}
 	deltaRatio := 0.0
 	if baseFCF > 0 {
@@ -467,6 +497,29 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 	if v, n, ok := fcfToProfitMedian(fcfByYear, incomeByYear, fcfYears); ok {
 		fcfProfitRatio, fcfProfitSamples = v, n
 	}
+
+	// —— R15 整合版：基期 FCF 分年构成 + 理由补全（FR-1/FR-7/FR-9）——
+	fcfSeries := make([]model.FCFYearPoint, 0, len(fcfYears))
+	for _, y := range fcfYears {
+		incY, cfY := incomeByYear[y], cfByYear[y]
+		op := v0(cfY, "NETCASH_OPERATE")
+		preserve := preservationCapex(incY, cfY)
+		fcfSeries = append(fcfSeries, model.FCFYearPoint{
+			Year:              y,
+			OperatingCash:     op,
+			PreservationCapex: preserve,
+			FCF:               op - preserve,
+		})
+	}
+	fcfRec = finalizeFCFRationale(fcfRec, fcfRationaleContext{
+		WindowStart:      fcfWindowStart,
+		WindowEnd:        fcfWindowEnd,
+		WindowYears:      len(fcfSeries),
+		CapexRatio:       capexRatio,
+		FCFProfitRatio:   fcfProfitRatio,
+		FCFProfitSamples: fcfProfitSamples,
+		ModeName:         fcfRec.ModeName,
+	})
 
 	warns = appendWarnOnce(warns, c5Warning(pr.Model, pr.G1, gInf, cf, inc, balanceByYear, latest, baseFCF))
 	if fcfProfitRatio > valFCFProfitHigh {
@@ -619,6 +672,34 @@ func recommendValuation(balance, cashflow, income []model.ReportRow,
 		GrowthAdjustment:      growthAdjustment,
 		GrowthTerminal:        gInf,
 		GrowthCap:             cap,
+		// R15 整合版：三档情景 + 增长可观测 + 折现率分步 + 基期 FCF 可解释。
+		Scenarios:              scenarios,
+		ScenarioMethod:         valScenarioMethod,
+		ScenarioBandGrowth:     bands.Growth,
+		ScenarioBandDiscount:   bands.Discount,
+		ScenarioTerminalAdjust: bands.Terminal,
+		ScenarioBandSource:     bands.Source,
+		ScenarioBandRaw:        bands.Raw,
+		GrowthWeights: model.GrowthWeights{
+			History: comp.WHW,
+			Forward: comp.WFwd,
+			Macro:   comp.WMacro,
+		},
+		GrowthAnchorCount: comp.AnchorCount,
+		GrowthDamping:     damping,
+		GrowthEnvelope:    envelope,
+		EquityCost:        dr.EquityCost,
+		DebtWeight:        dr.DebtWeight,
+		EquityWeight:      dr.EquityWeight,
+		DebtCostPretax:    dr.DebtCostPretax,
+		AfterTaxDebtCost:  dr.AfterTaxDebtCost,
+		EffectiveTaxRate:  dr.EffectiveTaxRate,
+		DebtCostEstimated: dr.DebtCostEstimated,
+		FCFSeries:         fcfSeries,
+		FCFBaseValue:      baseFCF,
+		FCFFormulaNote:    valFCFFormulaNote,
+		FCFWindowStart:    fcfWindowStart,
+		FCFWindowEnd:      fcfWindowEnd,
 	}
 }
 
@@ -893,7 +974,7 @@ func sustainableGrowth(balanceByYear, incomeByYear map[int]model.ReportRow, year
 // RecommendBaseFCF 由 FCF 自身序列与周期状态确定性推导基期自由现金流的选取方式
 // （纯函数，无 IO/随机/时间，不读取基准增速 X 或 volatile）。
 //
-// 规则见《技术设计文档》19.7.4（按序命中、唯一出口），窗口按周期动态取 3/5/7 年：
+// 规则见《技术设计文档》19.7.4（按序命中、唯一出口），窗口按周期动态取 3/5/10 年：
 //
 //	R0 无数据 → latest；R1 不足 3 年 → latest；R2 全非正 → latest；
 //	R3 强周期且去极值平均 > 0 → trim_mean（Years=m）；
@@ -901,7 +982,7 @@ func sustainableGrowth(balanceByYear, incomeByYear map[int]model.ReportRow, year
 //	R5 全正 + 单调增 + 增速极差 ≤ 40 + latest ≤ 1.3×median → latest；
 //	R6 latest > 1.3×median 且（FCF 增速中位数 < 0 或增速极差 > 40）→ custom；
 //	R7 单调不增 → latest；R8 latest < 0.7×median → median；
-//	R9 FCF 增速极差 > 40 → median；R10 兜底 → average。
+//	R9 FCF 增速极差 > 40 → median；R10 兜底 → CV>0.30 或正负交替≥1 时 median，否则 average。
 //
 // custom 取整到整亿后 ≤ 0 时不产出 custom，退回 median（保证推荐值 > 0，FR-4 边界）。
 //
@@ -993,11 +1074,17 @@ func recommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fc
 		return withCycleNote(fcfRecMedian(win, fmt.Sprintf("近 %d 年经营自由现金流增速波动较大（极差 %.2f 个百分点），单年不代表常态，取近 %d 年中位数。",
 			m, gSpread, m)), cycle)
 	}
+	// R10：兜底。明显不稳定时禁止普通平均（FR-4）。
+	if cycle.CV > valFCVMildThreshold || cycle.SignChanges >= 1 {
+		return withCycleNote(fcfRecMedian(win, fmt.Sprintf(
+			"近 %d 年经营自由现金流波动较大（变异系数 %.2f，正负交替 %d 次），普通平均会被异常年份拉偏，取近 %d 年中位数。",
+			m, cycle.CV, cycle.SignChanges, m)), cycle)
+	}
 	return withCycleNote(fcfRecommendation{ // R10
 		Mode:      valFCFAverage,
 		ModeName:  valFCFModeNames[valFCFAverage],
 		Years:     m,
-		Rationale: fmt.Sprintf("近年经营自由现金流总体平稳（%s），取近 %d 年平均值。", joinYears(win), m),
+		Rationale: fmt.Sprintf("近 %d 年经营自由现金流总体平稳（%s，变异系数 %.2f），取近 %d 年平均值。", m, joinYears(win), cycle.CV, m),
 	}, cycle)
 }
 
@@ -1005,6 +1092,136 @@ func recommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fc
 func withCycleNote(rec fcfRecommendation, cycle fcfCycle) fcfRecommendation {
 	if cycle.Evaluated && !cycle.Cyclical && cycle.CV > valFCVMildThreshold {
 		rec.Rationale += fmt.Sprintf("（FCF 变异系数 %.2f，已按 %d 年窗口平滑）", cycle.CV, cycle.WindowYears)
+	}
+	return rec
+}
+
+// applyFCFCapexGuard 在推荐出口做 capex 守卫（FR-6）：只影响推荐，不改用户手选参数。
+// capexOK=false（CONSTRUCT_LONG_ASSET 缺失/分母≤0）时不触发；fcfByYear 用于校验候选值 >0。
+// latest 档在高增长假设（two_stage/three_stage）且购建/保全 > 1.3 时改用多年中枢；custom 只追加提示。
+func applyFCFCapexGuard(rec fcfRecommendation, mdl string, capexRatio float64, capexOK bool,
+	cycle fcfCycle, fcfByYear map[int]float64, fcfYears []int) fcfRecommendation {
+	if !capexOK || capexRatio <= valCapexCoverageHigh ||
+		(mdl != valModelTwoStage && mdl != valModelThreeStage) {
+		return rec
+	}
+	note := fmt.Sprintf("高增长假设下，保全口径未扣扩张性资本支出（购建/保全 = %.2f 倍）", capexRatio)
+
+	switch rec.Mode {
+	case valFCFLatest:
+		m := len(fcfYears)
+		if w := fcfWindowYears(cycle); w < m {
+			m = w
+		}
+		if m < valFCFRecMinYears {
+			return appendFCFRationale(rec, "高 capex 但可用年度不足 3 年，无法改用多年中枢")
+		}
+		if cycle.Cyclical {
+			if cand, _, _, err := selectBaseFCF(fcfByYear, fcfYears, valFCFTrimMean, m, 0); err == nil && cand > 0 {
+				return fcfRecommendation{
+					Mode:     valFCFTrimMean,
+					ModeName: valFCFModeNames[valFCFTrimMean],
+					Years:    m,
+					Rationale: fmt.Sprintf("%s；%s，单年 FCF 偏乐观，改用 %d 年去极值平均；推荐按 %d 年窗口，套用后以表单年数为准。",
+						strings.TrimRight(strings.TrimSpace(rec.Rationale), "。"), note, m, m),
+				}
+			}
+		}
+		if cand, _, _, err := selectBaseFCF(fcfByYear, fcfYears, valFCFMedian, m, 0); err == nil && cand > 0 {
+			return fcfRecommendation{
+				Mode:     valFCFMedian,
+				ModeName: valFCFModeNames[valFCFMedian],
+				Years:    m,
+				Rationale: fmt.Sprintf("%s；%s，单年 FCF 偏乐观，改用 %d 年中位数；推荐按 %d 年窗口，套用后以表单年数为准。",
+					strings.TrimRight(strings.TrimSpace(rec.Rationale), "。"), note, m, m),
+			}
+		}
+		return appendFCFRationale(rec,
+			fmt.Sprintf("%s，但近 %d 年中位数/去极值平均非正，保留最近一年并提示风险", note, m))
+	case valFCFCustom:
+		return appendFCFRationale(rec, note+"，自定义值可能偏乐观")
+	}
+	return rec
+}
+
+// appendFCFRationale 追加一句口径说明（去掉原句末尾句号，统一用「；」连接）。
+func appendFCFRationale(rec fcfRecommendation, sentence string) fcfRecommendation {
+	if sentence == "" {
+		return rec
+	}
+	rec.Rationale = strings.TrimRight(strings.TrimSpace(rec.Rationale), "。") + "；" + sentence + "。"
+	return rec
+}
+
+// fcfRationaleContext 理由补全所需的已算出上下文（均为展示口径，不参与计算）。
+type fcfRationaleContext struct {
+	WindowStart, WindowEnd int
+	WindowYears            int
+	CapexRatio             float64
+	FCFProfitRatio         float64
+	FCFProfitSamples       int
+	ModeName               string
+}
+
+// finalizeFCFRationale 按 FR-7 统一补全推荐理由（窗口/模式/一次性项目/资本开支/现金含量）。
+// 只追加缺失信息，不覆盖各 R 分支已写出的触发依据，也不使用「综合判断」等模糊措辞。
+func finalizeFCFRationale(rec fcfRecommendation, ctx fcfRationaleContext) fcfRecommendation {
+	text := strings.TrimSpace(rec.Rationale)
+	parts := make([]string, 0, 6)
+	add := func(sentence string, markers ...string) {
+		if sentence == "" {
+			return
+		}
+		for _, m := range markers {
+			if m != "" && strings.Contains(text, m) {
+				return
+			}
+		}
+		parts = append(parts, sentence)
+	}
+
+	if rec.Mode != valFCFLatest && rec.Mode != valFCFCustom &&
+		ctx.WindowStart > 0 && ctx.WindowEnd > 0 {
+		w := rec.Years
+		if w <= 0 {
+			w = ctx.WindowYears
+		}
+		add(fmt.Sprintf("近 %d 年（%d–%d）", w, ctx.WindowStart, ctx.WindowEnd),
+			fmt.Sprintf("%d–%d", ctx.WindowStart, ctx.WindowEnd))
+		if ctx.WindowYears > 0 && rec.Years > ctx.WindowYears {
+			add(fmt.Sprintf("实际可用 %d 年", ctx.WindowYears), "可用")
+		}
+	}
+
+	switch rec.Mode {
+	case valFCFLatest:
+		add("推荐方式：最近一年", "最近一年")
+	case valFCFCustom:
+		add("推荐方式：自定义", "自定义")
+	default:
+		if rec.Years > 0 {
+			add(fmt.Sprintf("推荐方式：%d 年%s", rec.Years, ctx.ModeName), fmt.Sprintf("%d 年", rec.Years))
+		}
+	}
+
+	add("未剔除一次性项目（免费数据无附注）", "未剔除一次性项目")
+	if ctx.CapexRatio > valCapexCoverageHigh {
+		add(fmt.Sprintf("保全口径未扣扩张性资本支出（购建/保全 = %.2f 倍）", ctx.CapexRatio),
+			"扩张性资本支出")
+	}
+	if ctx.FCFProfitRatio > valFCFProfitHigh && ctx.FCFProfitSamples > 0 {
+		add(fmt.Sprintf("FCF 中位数为净利润的 %.2f 倍，关注折旧摊销、减值与营运资本差异", ctx.FCFProfitRatio),
+			"净利润")
+	}
+
+	if len(parts) == 0 {
+		return rec
+	}
+	base := strings.TrimRight(text, "。；; ")
+	if base == "" {
+		rec.Rationale = strings.Join(parts, "；") + "。"
+	} else {
+		rec.Rationale = base + "；" + strings.Join(parts, "；") + "。"
 	}
 	return rec
 }
@@ -1032,7 +1249,7 @@ func fcfGrowthPoints(fcfByYear map[int]float64, years []int) []float64 {
 	return out
 }
 
-// detectFCFCycle 用最近 ≤7 年 FCF 序列判定周期性（纯函数，无 IO/随机/时间）。
+// detectFCFCycle 用最近 ≤10 年 FCF 序列判定周期性（纯函数，无 IO/随机/时间）。
 //
 // 变异系数 = 总体标准差（÷n）÷ 均值；均值 ≤ 0 时不做判定（CV 无意义）。
 // 原始判据 RawCyclical = CV > 0.5 或相邻非零值符号翻转 ≥ 2 次（0 值跳过、不改 prevSign）。
@@ -1208,7 +1425,7 @@ func downsideIf(values []float64, min int) (float64, bool) {
 
 // fcfWindowYears 按 FCF 周期状态给出推荐窗口年数（不含可用年数截断）。
 // 成长性否决必须放在 CV 分支之前：否决后 Cyclical=false 但 CV 仍可能 >0.5，
-// 若保留旧的 `Cyclical || CV>阈值` 分支会再次返回 7 年，修复失效。
+// 若保留旧的 `Cyclical || CV>阈值` 分支会再次返回 10 年，修复失效。
 func fcfWindowYears(c fcfCycle) int {
 	switch {
 	case !c.Evaluated:
@@ -1397,7 +1614,14 @@ type discountResult struct {
 	IndustryTypeName string  // 行业类型中文名（AI 定性归属，非生效 β 档位）
 	WaccBaseline     float64 // WACC 基线 %（收口前、含债务加权、未加公司风险溢价；缺资产负债表时为 0）
 	RiskPremium      float64 // 公司特定风险溢价 %
-	Warning          string  // 缺资产负债表时的降级提示（否则 ""）
+	// R15 整合版：WACC 分步可观测（只读，供展示与提示词）。
+	DebtWeight        float64 // wD 0–1
+	EquityWeight      float64 // wE 0–1
+	DebtCostPretax    float64 // Rd_pre %
+	AfterTaxDebtCost  float64 // Rd_after %
+	EffectiveTaxRate  float64 // t 0–1（对外乘 100）
+	DebtCostEstimated bool    // Rd 是否走 FR-12 保守估计
+	Warning           string  // 降级提示（缺资产负债表 / Rd 保守估计；否则 ""）
 }
 
 // equityCostCAPM 股权成本 Re = Rf + β × ERP（%）。β=1.0 → 8.0%（与既有硬编码股权成本吻合）。
@@ -1475,8 +1699,19 @@ func recommendDiscountRate(balanceByYear, incomeByYear map[int]model.ReportRow, 
 	}
 
 	// WACC 基线：投入资本=0（无债务且无权益）时退化为纯股权成本 Re。
-	if base := waccWithEquityCost(balanceByYear, incomeByYear, latest, re); base != nil {
-		res.WaccBaseline = *base
+	// FR-12：债务成本不可用时用 clamp(Rf+2.0pp, 3%, 8%) 保守估计（仅估值链路；六维 wacc 不变）。
+	fallbackRd := clampFloat(valRiskFreeRate+valDebtCostFallbackSpread, valDebtCostMin, valDebtCostMax)
+	if detail, ok := waccWithEquityCostDetail(balanceByYear, incomeByYear, latest, re, true, fallbackRd); ok {
+		res.WaccBaseline = detail.Wacc
+		res.DebtWeight = detail.DebtWeight
+		res.EquityWeight = detail.EquityWeight
+		res.DebtCostPretax = detail.DebtCostPretax
+		res.AfterTaxDebtCost = detail.AfterTaxDebtCost
+		res.EffectiveTaxRate = detail.EffectiveTaxRate
+		res.DebtCostEstimated = detail.DebtCostEstimated
+		if detail.DebtCostEstimated {
+			res.Warning = "债务成本不可用，按 Rf+2.0pp 保守估计。"
+		}
 	} else {
 		res.WaccBaseline = re
 	}
@@ -1603,4 +1838,341 @@ func uniqueYears(years []int) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// —— R15 整合版（2026-10-18）：三档情景参数（纯函数，无 IO/随机/时钟）——
+
+// 三档带宽常量与算法版本（Q1/Q7/Q8）。
+const (
+	valScenarioMethod            = "anchor_disagreement_v1"
+	valScenarioBandDiscount      = 1.0  // 折现率带宽 pp（固定，不随公司缩放）
+	valScenarioBandTerminal      = 0.5  // 终值增长率带宽 pp
+	valScenarioBandGrowthMin     = 1.5  // 增长率带宽下限 pp
+	valScenarioBandGrowthMax     = 4.0  // 增长率带宽上限 pp
+	valScenarioFallbackBandRatio = 0.20 // 无历史/前瞻分歧时按 0.2×A 生成最小带宽
+)
+
+// round1 / round2 展示口径舍入（计算链继续用未舍入值）。
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// scenarioBands 三档带宽（纯函数）。
+type scenarioBands struct {
+	Growth   float64 // band_g pp
+	Discount float64 // band_r pp
+	Terminal float64 // band_terminal pp
+	Source   string  // disagreement / fallback / degenerate（FR-31 带宽来源）
+	Raw      float64 // 原始分歧或回退带宽（pp，clamp 前）
+}
+
+// scenarioOffsets 单档相对基准的偏移（base 全 0）。
+type scenarioOffsets struct {
+	Key   string
+	Name  string
+	DA    float64 // pp
+	DR    float64 // pp
+	DGInf float64 // pp
+}
+
+// scenarioInput 三档共用的确定性输入（全部来自基准推导，不含 IO）。
+// 基准档不复用本结构重算，因此不需要 Base* 字段。
+type scenarioInput struct {
+	A                  float64 // 基准复合锚，已 clamp 到 [-5,30]
+	Discount           float64 // 基准折现率（%，0.5 网格）
+	GInf               float64 // 基准终值增长率（%）
+	Macro              float64 // 宏观锚值（%），始终参与终值约束（含 fallback 常量）
+	MacroBasis         string  // dynamic_gdp / fallback_constant，用于 note 措辞
+	Dispersion         float64 // X 离散度（pp）
+	Delta              float64 // 周期调整 pp（Δ_cycle）
+	Fwd                forwardAnchor
+	SGR                float64
+	SGROK              bool
+	Envelope           float64
+	Insufficient       bool
+	IsCyclical         bool
+	Position           float64
+	StructuralMetrics  structuralMetrics
+	ROEVals            []float64
+	DownsideDispersion float64
+	StabilityAvailable bool
+}
+
+// computeScenarioBands 按 FR-31/Q1/Q7/Q8 计算带宽。
+// histA 为历史锚原值（周期修正前），delta 为 Δ_cycle，histOK 表示历史锚可用；
+// fwd 用 Available 判断（0% 也是有效锚）；A 为基准复合锚（已 clamp）；baseModel 为基准档最终模型。
+func computeScenarioBands(A, histA, delta float64, histOK bool, fwd forwardAnchor,
+	baseModel string) scenarioBands {
+	b := scenarioBands{Discount: valScenarioBandDiscount, Terminal: valScenarioBandTerminal}
+	switch {
+	case A < 0 || baseModel == valModelZero:
+		b.Source, b.Growth = "degenerate", 0
+		if histOK && fwd.Available {
+			b.Raw = math.Abs((histA + delta) - fwd.Value)
+		}
+	case histOK && fwd.Available:
+		b.Source = "disagreement"
+		b.Raw = math.Abs((histA + delta) - fwd.Value)
+		b.Growth = clampFloat(roundHalf(b.Raw), valScenarioBandGrowthMin, valScenarioBandGrowthMax)
+	default:
+		b.Source = "fallback"
+		b.Raw = valScenarioFallbackBandRatio * math.Max(A, 0)
+		b.Growth = clampFloat(roundHalf(b.Raw), valScenarioBandGrowthMin, valScenarioBandGrowthMax)
+	}
+	return b
+}
+
+// negTypeForJSON 把内部 "none" 转为空串（配合 omitempty，避免每档输出无意义的 none）。
+func negTypeForJSON(t string) string {
+	if t == "none" {
+		return ""
+	}
+	return t
+}
+
+// buildScenario 单档确定性重算（base 档不要调用它：直接复用基准变量，见 buildBaseScenario）。
+func buildScenario(in scenarioInput, off scenarioOffsets) model.ValuationScenario {
+	A_s := clampFloat(in.A+off.DA, r18CompositeClampLo, r18CompositeClampHi)
+	r_s := clampDiscountRate(in.Discount + off.DR)
+	gInf_s := capTerminalGrowth(in.GInf+off.DGInf, in.Macro, r_s, in.SGR, in.SGROK)
+	gap_s := A_s - gInf_s
+
+	score_s := scoreSignals(A_s, in.DownsideDispersion, in.StabilityAvailable, in.ROEVals)
+	negType_s, negBasis_s, negWarn_s := "none", "", ""
+	if A_s < 0 {
+		negType_s, negBasis_s, negWarn_s = attributeNegativeGrowth(
+			A_s, in.IsCyclical, in.Position, in.Delta, in.Fwd, in.StructuralMetrics)
+	}
+	sceneWarns := make([]string, 0, 3)
+	sceneWarns = appendWarnOnce(sceneWarns, negWarn_s)
+
+	mdl_s, _, _ := classifyGrowthModel(A_s, gap_s, score_s.Score, in.Insufficient, negType_s)
+	g1_s, cap_s, adjust_s := applyDownwardAdjustments(
+		A_s, gap_s, in.Dispersion, in.Delta, in.Fwd, in.SGR, in.SGROK, in.Envelope)
+	path_s := constructGrowthPath(mdl_s, A_s, gInf_s, gap_s, g1_s, r_s)
+	pr_s := paramsFromPath(path_s)
+
+	// 每档独立做 C4a/C4c 复核（与基准逐行同逻辑，互不回写）。
+	if ok, w := verifyC4a(gInf_s, r_s, in.SGR, in.SGROK); !ok {
+		if in.SGROK && in.SGR > 0 && gInf_s > in.SGR {
+			gInf_s = math.Max(0, floorHalf(in.SGR))
+		} else if gInf_s >= r_s {
+			gInf_s = math.Max(0, floorHalf(r_s-1))
+		}
+		gap_s = A_s - gInf_s
+		path_s = constructGrowthPath(mdl_s, A_s, gInf_s, gap_s, g1_s, r_s)
+		pr_s = paramsFromPath(path_s)
+		sceneWarns = appendWarnOnce(sceneWarns, w)
+	}
+	if verifyC4c(pr_s.G1, cap_s, A_s-in.Envelope) {
+		path_s = constructGrowthPath(mdl_s, A_s, gInf_s, gap_s, floorHalf(cap_s), r_s)
+		g1_s = path_s.G1
+		pr_s = paramsFromPath(path_s)
+		sceneWarns = appendWarnOnce(sceneWarns, fmt.Sprintf(
+			"参数出口复核发现 g1 超过软上限，已按 %.2f%% 重新收口。", cap_s))
+	}
+
+	note := joinWarns(append([]string{
+		buildScenarioNote(off, in, A_s, r_s, gInf_s, cap_s, adjust_s, negType_s, negBasis_s, pr_s),
+	}, sceneWarns...))
+
+	return model.ValuationScenario{
+		Key:                off.Key,
+		Name:               off.Name,
+		DiscountRate:       round2(r_s),
+		Model:              pr_s.Model,
+		ModelName:          valuationModelNames[pr_s.Model],
+		GrowthAnchor:       round2(A_s),
+		TerminalGrowth:     round2(gInf_s),
+		DeltaGrowth:        round1(A_s - in.A),
+		DeltaDiscount:      round1(r_s - in.Discount),
+		Params:             append([]model.AIValuationParam{}, pr_s.Params...),
+		Note:               note,
+		CappedBy:           scenarioCappedBy(in, off, A_s, r_s),
+		ModelScore:         round2(score_s.Score),
+		ModelDegraded:      pr_s.Degraded,
+		GrowthFadeYears:    path_s.NTotal,
+		NegativeGrowthType: negTypeForJSON(negType_s),
+	}
+}
+
+// buildBaseScenario 基准档直接复用最终变量，不重新推导（AC-27：与单点输出逐字段一致）。
+func buildBaseScenario(in scenarioInput, pr paramResult, path growthPath,
+	score float64, negType string) model.ValuationScenario {
+	return model.ValuationScenario{
+		Key:                "base",
+		Name:               "基准",
+		DiscountRate:       round2(in.Discount),
+		Model:              pr.Model,
+		ModelName:          valuationModelNames[pr.Model],
+		GrowthAnchor:       round2(in.A),
+		TerminalGrowth:     round2(in.GInf),
+		DeltaGrowth:        0,
+		DeltaDiscount:      0,
+		Params:             append([]model.AIValuationParam{}, pr.Params...),
+		Note:               "基准档，与单点输出一致",
+		CappedBy:           []string{},
+		ModelScore:         round2(score),
+		ModelDegraded:      pr.Degraded,
+		GrowthFadeYears:    path.NTotal,
+		NegativeGrowthType: negTypeForJSON(negType),
+	}
+}
+
+// buildScenarios 固定顺序返回「保守/基准/乐观」三档，长度恒为 3（与 applicable 无关）。
+func buildScenarios(in scenarioInput, bands scenarioBands, pr paramResult,
+	path growthPath, score float64, negType string) []model.ValuationScenario {
+	base := buildBaseScenario(in, pr, path, score, negType)
+	// Q8：增长带宽为 0（负增长/零增长）时，增长参数与终值都不得分档，只让折现率 ±1.0pp。
+	dGInf := bands.Terminal
+	if bands.Growth == 0 {
+		dGInf = 0
+	}
+	cons := buildScenario(in, scenarioOffsets{
+		Key: "conservative", Name: "保守",
+		DA: -bands.Growth, DR: +bands.Discount, DGInf: -dGInf,
+	})
+	opt := buildScenario(in, scenarioOffsets{
+		Key: "optimistic", Name: "乐观",
+		DA: +bands.Growth, DR: -bands.Discount, DGInf: +dGInf,
+	})
+	return []model.ValuationScenario{cons, base, opt}
+}
+
+// scenarioCappedBy 记录单档实际生效的约束键（固定顺序、去重、非 nil）。
+// off 必须显式传入：不要用 A_s − in.A 反推，浮点误差会把「无截断」误判为截断。
+func scenarioCappedBy(in scenarioInput, off scenarioOffsets, A_s, r_s float64) []string {
+	hit := map[string]bool{}
+	rawA := in.A + off.DA
+	rawR := in.Discount + off.DR
+	rawG := in.GInf + off.DGInf
+	if math.Abs(rawA-A_s) > 1e-9 {
+		hit["range"] = true // A 被 [-5,30] 截断
+	}
+	if math.Abs(rawR-r_s) > 1e-9 {
+		hit["discount"] = true // r 被 [8,15] 截断
+	}
+	if rawG < 0 {
+		hit["range"] = true // g∞ 为负被 max(0) 抬到 0
+	}
+
+	// 终值真正生效的上限 = 所有 cap 中的最小值；并列时全部记录（如 macro == SGR）。
+	caps := []struct {
+		key string
+		val float64
+	}{{"gdp", in.Macro}, {"discount", r_s - 1}}
+	if in.SGROK {
+		caps = append(caps, struct {
+			key string
+			val float64
+		}{"sgr", in.SGR})
+	}
+	minCap := rawG
+	for _, c := range caps {
+		if c.val < minCap {
+			minCap = c.val
+		}
+	}
+	if minCap < rawG-1e-9 {
+		for _, c := range caps {
+			if math.Abs(c.val-minCap) <= 1e-9 {
+				hit[c.key] = true
+			}
+		}
+	}
+
+	out := make([]string, 0, 4)
+	for _, k := range []string{"gdp", "sgr", "discount", "range"} {
+		if hit[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// buildScenarioNote 按 20.7.5 模板拼接说明；只读已算出的数值，不二次计算或舍入。
+func buildScenarioNote(off scenarioOffsets, in scenarioInput, A_s, r_s, gInf_s, cap_s float64,
+	adjust_s, negType_s, negBasis_s string, pr_s paramResult) string {
+	if off.Key == "base" {
+		return "基准档，与单点输出一致"
+	}
+
+	parts := make([]string, 0, 7)
+	if off.DA == 0 {
+		parts = append(parts, "增长参数不设区间，仅折现率分档")
+	} else {
+		parts = append(parts, deltaText("增长率", A_s-in.A)+"、"+deltaText("折现率", r_s-in.Discount))
+	}
+
+	for _, k := range scenarioCappedBy(in, off, A_s, r_s) {
+		switch k {
+		case "gdp":
+			basis := "动态 GDP"
+			if in.MacroBasis != "dynamic_gdp" {
+				basis = "宏观锚回退常量"
+			}
+			parts = append(parts, fmt.Sprintf("终值受%s %.1f%% 约束", basis, round1(in.Macro)))
+		case "sgr":
+			parts = append(parts, fmt.Sprintf("终值受 SGR %.1f%% 约束", round1(in.SGR)))
+		case "discount":
+			rawR := in.Discount + off.DR
+			if math.Abs(rawR-r_s) > 1e-9 {
+				if rawR > r_s {
+					parts = append(parts, "折现率受上限约束")
+				} else {
+					parts = append(parts, "折现率受下限约束")
+				}
+			}
+			if math.Abs(gInf_s-floorHalf(r_s-1)) < 1e-9 && in.GInf+off.DGInf >= r_s-1-1e-9 {
+				parts = append(parts, "终值受折现率−1.0pp 约束")
+			}
+		case "range":
+			if math.Abs(in.A+off.DA-A_s) > 1e-9 {
+				parts = append(parts, "复合锚受 [−5,30] 区间约束")
+			}
+			if in.GInf+off.DGInf < 0 {
+				parts = append(parts, "终值按 0 处理")
+			}
+		}
+	}
+
+	// g1 调整只在真正触发软上限/包络收口时解释，避免与顶层 growth_adjustment 重复。
+	if strings.Contains(adjust_s, "已触发") || strings.Contains(adjust_s, "生效") ||
+		(strings.Contains(adjust_s, "按") && strings.Contains(adjust_s, "收口")) {
+		parts = append(parts, adjust_s)
+	}
+	if pr_s.Degraded && pr_s.Warning != "" {
+		parts = append(parts, pr_s.Warning)
+	}
+
+	if A_s < 0 {
+		kind := "结构性"
+		if negType_s == "cyclical" {
+			kind = "周期性"
+		}
+		if off.DA == 0 {
+			parts = append(parts, kind+"负增长，正常化 A 为负")
+		} else {
+			action := "零增长"
+			if negType_s == "cyclical" {
+				action = "低永续"
+			}
+			parts = append(parts, fmt.Sprintf("%s负增长，按%s处理", kind, action))
+		}
+		if negBasis_s != "" {
+			parts = append(parts, "归因："+negBasis_s)
+		}
+	}
+	return joinWarns(parts)
+}
+
+// deltaText 把实际差值写成「X上移/下移 Y.Ypp」；差值为 0 时写「X不变」。
+func deltaText(label string, d float64) string {
+	if math.Abs(d) < 1e-9 {
+		return label + "不变"
+	}
+	dir := "下移"
+	if d > 0 {
+		dir = "上移"
+	}
+	return fmt.Sprintf("%s%s %.1fpp", label, dir, math.Abs(round1(d)))
 }

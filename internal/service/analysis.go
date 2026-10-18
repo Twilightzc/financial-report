@@ -1745,23 +1745,66 @@ func wacc(balanceByYear, incomeByYear map[int]model.ReportRow, year int) *float6
 	return waccWithEquityCost(balanceByYear, incomeByYear, year, 8.0)
 }
 
+// waccDetail WACC 的分步构成（供估值模块展示；分析维度不使用）。
+type waccDetail struct {
+	Wacc              float64 // %
+	EquityCost        float64 // Re %
+	DebtWeight        float64 // wD 0–1
+	EquityWeight      float64 // wE 0–1
+	DebtCostPretax    float64 // Rd_pre %
+	AfterTaxDebtCost  float64 // Rd_after %
+	EffectiveTaxRate  float64 // t 0–1
+	Debt              float64 // 元
+	Equity            float64 // 元
+	DebtCostEstimated bool    // 是否走 FR-12 fallback
+}
+
 // waccWithEquityCost 与 wacc 同构，但股权资本成本由入参给出（R15/P1：供估值模块传入 CAPM 的股权成本 Re）。
 // 复用 debtCapitalCost / effectiveTaxRate / interestBearingDebt / equityValue；投入资本为 0 时返回 nil。
 // 无有息债务（或债务成本不可得）时债务成本项为 0，退化为纯股权成本 equityCost。
 func waccWithEquityCost(balanceByYear, incomeByYear map[int]model.ReportRow, year int, equityCost float64) *float64 {
+	d, ok := waccWithEquityCostDetail(balanceByYear, incomeByYear, year, equityCost, false, 0)
+	if !ok {
+		return nil
+	}
+	return &d.Wacc
+}
+
+// waccWithEquityCostDetail 在 waccWithEquityCost 基础上返回分步构成。
+// debtCostFallback=true 且 D>0 且 debtCapitalCost 不可用时，Rd_pre 取 fallbackDebtCost（估值链路 FR-12）；
+// false 时保持旧语义（Rd 项按 0）。投入资本=0 → ok=false（调用方退化为 Re）。
+// fallbackDebtCost 由调用方算好传入，避免 analysis.go 反向依赖 valuation_recommend.go 的常量。
+func waccWithEquityCostDetail(balanceByYear, incomeByYear map[int]model.ReportRow,
+	year int, equityCost float64, debtCostFallback bool, fallbackDebtCost float64) (waccDetail, bool) {
 	b := balanceByYear[year]
 	debt := interestBearingDebt(b)
 	equity := equityValue(b)
 	invested := debt + equity
 	if invested == 0 {
-		return nil
+		return waccDetail{}, false
+	}
+
+	d := waccDetail{
+		EquityCost:       equityCost,
+		Debt:             debt,
+		Equity:           equity,
+		DebtWeight:       debt / invested,
+		EquityWeight:     equity / invested,
+		EffectiveTaxRate: effectiveTaxRate(incomeByYear[year]),
 	}
 	afterTaxDebtCost := 0.0
 	if dc := debtCapitalCost(balanceByYear, incomeByYear, year); dc != nil {
-		afterTaxDebtCost = *dc * (1 - effectiveTaxRate(incomeByYear[year]))
+		d.DebtCostPretax = *dc
+		afterTaxDebtCost = *dc * (1 - d.EffectiveTaxRate)
+		d.AfterTaxDebtCost = afterTaxDebtCost
+	} else if debt > 0 && debtCostFallback {
+		d.DebtCostPretax = fallbackDebtCost
+		afterTaxDebtCost = fallbackDebtCost * (1 - d.EffectiveTaxRate)
+		d.AfterTaxDebtCost = afterTaxDebtCost
+		d.DebtCostEstimated = true
 	}
-	v := (debt/invested)*afterTaxDebtCost + (equity/invested)*equityCost
-	return &v
+	d.Wacc = (debt/invested)*afterTaxDebtCost + (equity/invested)*equityCost
+	return d, true
 }
 
 // yearValues 对范围内每个年份应用 fn 生成跨年度数值（fn 返回 nil 表示无法计算）。

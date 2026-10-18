@@ -76,6 +76,9 @@ type compositeAnchor struct {
 	Insufficient bool
 	Envelope     float64 // M1 包络：5 或 3（pp）
 	AnchorCount  int     // 有效独立锚数量（动态宏观才计数）
+	WHW          float64 // 历史锚权重 0–1
+	WFwd         float64 // 前瞻锚权重 0–1
+	WMacro       float64 // 宏观锚权重 0–1
 	Warning      string
 }
 
@@ -531,6 +534,7 @@ func composeGrowthAnchor(hist float64, histOK bool, delta float64, fwd forwardAn
 	case fwd.Available:
 		wFwd, wMacro = 0.85, 0.15
 	}
+	res.WHW, res.WFwd, res.WMacro = wHist, wFwd, wMacro
 
 	res.Insufficient = !histOK && !fwd.Available
 	if res.Insufficient {
@@ -900,13 +904,24 @@ func fadeYears(gap float64) int {
 	return n
 }
 
+// capTerminalGrowth 终值增长率收口：g = max(0, floorHalf(min(raw, macro, discount−1, SGR))).
+// 基准与三档情景共用；raw=+Inf 表示只受 caps 约束（基准口径）。
+func capTerminalGrowth(raw, macro, discount, sgr float64, sgrOK bool) float64 {
+	g := math.Min(raw, macro)
+	g = math.Min(g, discount-1.0)
+	if sgrOK {
+		g = math.Min(g, sgr)
+	}
+	return math.Max(0, floorHalf(g))
+}
+
 // terminalGrowth g∞ = max(0, floorHalf(min(macro, discount−1, SGR)))。
 func terminalGrowth(macro, discount, sgr float64, sgrOK bool) (g float64, warning string) {
 	gRaw := math.Min(macro, discount-1.0)
 	if sgrOK {
 		gRaw = math.Min(gRaw, sgr)
 	}
-	g = math.Max(0, floorHalf(gRaw))
+	g = capTerminalGrowth(math.Inf(1), macro, discount, sgr, sgrOK)
 
 	switch {
 	case gRaw < 0:

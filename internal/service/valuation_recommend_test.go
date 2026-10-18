@@ -246,8 +246,8 @@ func TestYearWindow(t *testing.T) {
 	if got := yearWindow(years, 2023, valGrowthWindowYears); !reflect.DeepEqual(got, []int{2019, 2020, 2021, 2022, 2023}) {
 		t.Errorf("基期年截断窗口 = %v，期望 2019~2023", got)
 	}
-	if got := yearWindow(years, 2024, valFCFRecMaxYears); len(got) != 7 || got[6] != 2024 {
-		t.Errorf("7 年窗口 = %v，期望最近 7 年", got)
+	if got := yearWindow(years, 2024, valFCFRecMaxYears); len(got) != 10 || got[9] != 2024 {
+		t.Errorf("10 年窗口 = %v，期望最近 10 年", got)
 	}
 	if got := yearWindow(nil, 2024, 5); len(got) != 0 {
 		t.Errorf("空年份应返回空切片，实际 %v", got)

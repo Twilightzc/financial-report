@@ -179,12 +179,13 @@ func (h *Handler) computeAIAnalysis(
 	if rec.GrowthForwardOK {
 		forwardLog = fmt.Sprintf("%.2f%%", rec.GrowthForward)
 	}
-	log.Printf("AI 增长锚: code=%s 复合锚=%.2f%%（历史=%.2f%% 前瞻=%s 宏观=%.2f%%/%s） 终值=%.2f%% 软上限=%.2f%% 回归年数=%d 周期=%s(%+.2f,Δ=%+.1f,pp) 负增长=%s 一致预期=%v(%d家/%d年/%s) 留存口径=%s 调整=%s",
+	log.Printf("AI 增长锚: code=%s 复合锚=%.2f%%（历史=%.2f%% 前瞻=%s 宏观=%.2f%%/%s） 终值=%.2f%% 软上限=%.2f%% 回归年数=%d 周期=%s(%+.2f,Δ=%+.1f,pp) 负增长=%s 一致预期=%v(%d家/%d年/%s) 留存口径=%s 调整=%s scenarios=%d band_g=%.1f model=%s",
 		code, rec.GrowthComposite, rec.GrowthHistory, forwardLog, rec.GrowthMacro, rec.GrowthMacroBasis,
 		rec.GrowthTerminal, rec.GrowthCap, rec.GrowthFadeYears,
 		rec.CyclePositionLabel, rec.CyclePosition, rec.GrowthCycleAdjust, rec.NegativeGrowthType,
 		rec.ConsensusFetched, rec.ConsensusInstitutions, rec.ConsensusYears, rec.ConsensusReliability,
-		rec.RetentionBasis, rec.GrowthAdjustment)
+		rec.RetentionBasis, rec.GrowthAdjustment,
+		len(rec.Scenarios), rec.ScenarioBandGrowth, rec.Model)
 
 	// ★R17：汇合（正常情况下 LLM 耗时已覆盖两个 2s 请求，此处近零等待）。
 	board := <-leaderCh

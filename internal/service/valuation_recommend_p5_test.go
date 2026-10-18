@@ -55,19 +55,28 @@ func p5GrowthFixture() (balance, cashflow, income []model.ReportRow) {
 }
 
 // p5CyclicalFixture 中远海控 601919 的结构：营收最小同比 -55.13%、毛利率极差 27.9pp（真周期），
-// FCF 7 年窗口 CV>0.5 且全为正（trim_mean 可算）。
+// FCF 10 年窗口 CV>0.5 且全为正（trim_mean 可算）。
 func p5CyclicalFixture() (balance, cashflow, income []model.ReportRow) {
-	years := []int{2019, 2020, 2021, 2022, 2023, 2024, 2025}
+	years := []int{2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025}
 	rev := map[int]float64{
+		2016: 1800.00e8, 2017: 2200.00e8, 2018: 2500.00e8,
 		2019: 2847.00e8, 2020: 2932.00e8,
 		2021: 3336.94e8, 2022: 3910.56e8, 2023: 1754.67e8, 2024: 2338.80e8, 2025: 2195.20e8,
 	}
-	gm := map[int]float64{2019: 35.0, 2020: 38.0, 2021: 44.3, 2022: 40.0, 2023: 16.4, 2024: 30.0, 2025: 25.0}
-	np := map[int]float64{2019: 70e8, 2020: 80e8, 2021: 100e8, 2022: 120e8, 2023: 48e8, 2024: 67.2e8, 2025: 60.48e8}
+	gm := map[int]float64{
+		2016: 30.0, 2017: 32.0, 2018: 34.0,
+		2019: 35.0, 2020: 38.0, 2021: 44.3, 2022: 40.0, 2023: 16.4, 2024: 30.0, 2025: 25.0,
+	}
+	np := map[int]float64{
+		2016: 50e8, 2017: 60e8, 2018: 65e8,
+		2019: 70e8, 2020: 80e8, 2021: 100e8, 2022: 120e8, 2023: 48e8, 2024: 67.2e8, 2025: 60.48e8,
+	}
 	fcf := map[int]float64{
+		2016: 0.5e8, 2017: 1.2e8, 2018: 0.7e8,
 		2019: 1.0e8, 2020: 1.1e8, 2021: 1.0e8, 2022: 9.0e8, 2023: 0.2e8, 2024: 7.5e8, 2025: 0.8e8,
 	}
 	equity := map[int]float64{
+		2016: 50e8, 2017: 55e8, 2018: 58e8,
 		2019: 60e8, 2020: 65e8, 2021: 70e8, 2022: 76e8, 2023: 72e8, 2024: 76e8, 2025: 74e8,
 	}
 	return p5FixtureRows(years, rev, gm, np, fcf, equity)
@@ -210,10 +219,10 @@ func TestFCFWindowYearsGrowthVeto(t *testing.T) {
 		want int
 	}{
 		{"否决→5", fcfCycle{Evaluated: true, RawCyclical: true, GrowthVeto: true, CV: 0.51}, valFCFYearsGrowth},
-		{"原始周期未否决→7", fcfCycle{Evaluated: true, RawCyclical: true, Cyclical: true, CV: 0.51}, valFCFYearsCyclical},
+		{"原始周期未否决→10", fcfCycle{Evaluated: true, RawCyclical: true, Cyclical: true, CV: 0.51}, valFCFYearsCyclical},
 		{"中等波动→5", fcfCycle{Evaluated: true, CV: 0.4}, valFCFYearsMild},
 		{"稳定→3", fcfCycle{Evaluated: true, CV: 0.2}, valFCFYearsStable},
-		{"不可判定→7", fcfCycle{}, valFCFRecMaxYears},
+		{"不可判定→10", fcfCycle{}, valFCFRecMaxYears},
 	}
 	for _, c := range cases {
 		if got := fcfWindowYears(c.c); got != c.want {
@@ -355,7 +364,7 @@ func TestRecommendValuationGrowthCompany(t *testing.T) {
 	}
 }
 
-// U8：真周期股不被成长性否决，仍走 trim_mean + 7 年。
+// U8：真周期股不被成长性否决，仍走 trim_mean + 10 年。
 func TestRecommendValuationCyclical(t *testing.T) {
 	balance, cashflow, income := p5CyclicalFixture()
 	rec := RecommendValuation(balance, cashflow, income)

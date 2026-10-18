@@ -36,6 +36,41 @@ type AIValuationParam struct {
 	Value float64 `json:"value"` // 数值（增长率 %、年数为整数）
 }
 
+// ValuationScenario 单档情景参数（Q2：P0 只输出参数，不含股权价值）。
+type ValuationScenario struct {
+	Key                string             `json:"key"`                            // conservative / base / optimistic
+	Name               string             `json:"name"`                           // 保守 / 基准 / 乐观
+	DiscountRate       float64            `json:"discount_rate"`                  // r_s，%
+	Model              string             `json:"model"`                          // zero / perpetual / two_stage / three_stage
+	ModelName          string             `json:"model_name"`                     // 中文名
+	GrowthAnchor       float64            `json:"growth_anchor"`                  // A_s，%
+	TerminalGrowth     float64            `json:"terminal_growth"`                // g∞_s，%
+	DeltaGrowth        float64            `json:"delta_growth"`                   // A_s − A_base，pp；不 omitempty
+	DeltaDiscount      float64            `json:"delta_discount"`                 // r_s − r_base，pp；不 omitempty
+	Params             []AIValuationParam `json:"params"`                         // 该档 g1/n1/g2/n2/g3
+	Note               string             `json:"note,omitempty"`                 // 生效约束/退化说明
+	CappedBy           []string           `json:"capped_by"`                      // gdp/sgr/discount/range；无约束为空数组
+	ModelScore         float64            `json:"model_score"`                    // 该档得分（Q10/FR-32）
+	ModelDegraded      bool               `json:"model_degraded"`                 // 该档是否发生降级
+	GrowthFadeYears    int                `json:"growth_fade_years,omitempty"`    // n_total
+	NegativeGrowthType string             `json:"negative_growth_type,omitempty"` // structural/cyclical；非负增长省略
+}
+
+// GrowthWeights 复合锚三权重（FR-19）。三者之和为 1，或数据不足时全 0。
+type GrowthWeights struct {
+	History float64 `json:"history"`
+	Forward float64 `json:"forward"`
+	Macro   float64 `json:"macro"`
+}
+
+// FCFYearPoint 基期 FCF 分年构成（FR-1；金额单位：元）。
+type FCFYearPoint struct {
+	Year              int     `json:"year"`
+	OperatingCash     float64 `json:"operating_cash"`     // NETCASH_OPERATE
+	PreservationCapex float64 `json:"preservation_capex"` // 保全性资本支出（正数）
+	FCF               float64 `json:"fcf"`                // OperatingCash − PreservationCapex
+}
+
 // AIValuation AI 推荐的估值模型与参数。
 type AIValuation struct {
 	Model        string             `json:"model"`         // zero / perpetual / two_stage / three_stage
@@ -98,7 +133,7 @@ type AIValuation struct {
 	FCFCyclical    bool    `json:"fcf_cyclical,omitempty"`     // 生效强周期（原始判据 && !成长性否决）
 	FCFCV          float64 `json:"fcf_cv,omitempty"`           // FCF 变异系数（不可判定为 0）
 	FCFSignChanges int     `json:"fcf_sign_changes,omitempty"` // FCF 符号翻转次数
-	FCFWindowYears int     `json:"fcf_window_years,omitempty"` // 判定/推荐窗口年数（3/5/7）
+	FCFWindowYears int     `json:"fcf_window_years,omitempty"` // 判定/推荐窗口年数（3/5/10）
 	RDExpansion    float64 `json:"rd_expansion,omitempty"`     // 研发投入同比扩张额（元；未扩张/上年缺失为 0）
 
 	// R15/P4 新增：一致性校验（C4~C7）的可观测字段（服务端确定性回填，只读；全部 omitempty）。
@@ -138,6 +173,39 @@ type AIValuation struct {
 	SGRRole               string  `json:"sgr_role,omitempty"`               // long_run_reference
 	RetentionBasis        string  `json:"retention_basis,omitempty"`        // payout/equity_growth/unavailable
 	GrowthAdjustment      string  `json:"growth_adjustment,omitempty"`      // 实际生效的调整及原因
+
+	// R15 整合版（2026-10-18）：增长可观测、折现率分步、基期 FCF 可解释、三档情景。
+	// 不设 omitempty 的是契约字段：0 / 空 / 全 0 权重均为显式语义，缺字段会让前端无法区分。
+	ScenarioMethod         string              `json:"scenario_method"`               // 带宽算法版本 anchor_disagreement_v1
+	ScenarioBandGrowth     float64             `json:"scenario_band_growth"`          // 增长率带宽 pp（1 位小数，0 也输出）
+	ScenarioBandDiscount   float64             `json:"scenario_band_discount"`        // 折现率带宽 pp（固定 1.0）
+	ScenarioTerminalAdjust float64             `json:"scenario_terminal_adjust"`      // 终值增长率带宽 pp（固定 0.5）
+	ScenarioBandSource     string              `json:"scenario_band_source"`          // disagreement / fallback / degenerate
+	ScenarioBandRaw        float64             `json:"scenario_band_raw"`             // clamp 前的原始分歧/回退带宽（pp）
+	Scenarios              []ValuationScenario `json:"scenarios"`                     // 恒 3 个：保守/基准/乐观
+	GrowthWeights          GrowthWeights       `json:"growth_weights"`                // 复合锚三权重（全 0 表示数据不足）
+	GrowthAnchorCount      int                 `json:"growth_anchor_count"`           // 有效独立锚数 0–3
+	GrowthDamping          float64             `json:"growth_damping"`                // g1 实际折减 pp（0 表示未折减）
+	GrowthCap              float64             `json:"growth_cap"`                    // g1 软上限 %
+	GrowthEnvelope         float64             `json:"growth_envelope"`               // 包络 ±pp（5 或 3）
+	GrowthTerminal         float64             `json:"growth_terminal"`               // 基准 g∞ %
+	ScoreGrowth            float64             `json:"score_growth"`                  // 增速分 sg（0–100，2 位）
+	ScoreStability         float64             `json:"score_stability"`               // 稳定性分 st（不可用时仍为 0）
+	HasStabilityScore      bool                `json:"has_stability_score"`           // 稳定性信号是否可用
+	ScoreROE               float64             `json:"score_roe"`                     // ROE 分 sr
+	HasROEScore            bool                `json:"has_roe_score"`                 // ROE 信号是否可用
+	EquityCost             float64             `json:"equity_cost,omitempty"`         // Re %
+	DebtWeight             float64             `json:"debt_weight,omitempty"`         // wD 0–1（无债务时不输出）
+	EquityWeight           float64             `json:"equity_weight,omitempty"`       // wE 0–1
+	DebtCostPretax         float64             `json:"debt_cost_pretax,omitempty"`    // Rd_pre %
+	AfterTaxDebtCost       float64             `json:"after_tax_debt_cost,omitempty"` // Rd_after %
+	EffectiveTaxRate       float64             `json:"effective_tax_rate,omitempty"`  // t，百分数（0–100）
+	DebtCostEstimated      bool                `json:"debt_cost_estimated,omitempty"` // Rd 是否走了 FR-12 保守估计
+	FCFSeries              []FCFYearPoint      `json:"fcf_series,omitempty"`          // 最近 ≤10 年，升序，单位元
+	FCFBaseValue           float64             `json:"fcf_base_value,omitempty"`      // 最终选中模式的基期 FCF（元）
+	FCFFormulaNote         string              `json:"fcf_formula_note,omitempty"`    // 固定口径说明
+	FCFWindowStart         int                 `json:"fcf_window_start,omitempty"`    // 推荐窗口首年
+	FCFWindowEnd           int                 `json:"fcf_window_end,omitempty"`      // 推荐窗口末年
 }
 
 // ValuationRecommendation 由财报数据确定性推导的估值参数推荐（纯计算结果，无 IO、无随机）。
@@ -203,7 +271,7 @@ type ValuationRecommendation struct {
 	FCFCyclical    bool    // 生效强周期（原始判据 && !成长性否决）
 	FCFCV          float64 // FCF 变异系数（不可判定为 0）
 	FCFSignChanges int     // FCF 符号翻转次数
-	FCFWindowYears int     // 本次实际使用的窗口年数（3/5/7）
+	FCFWindowYears int     // 本次实际使用的窗口年数（3/5/10）
 	RDExpansion    float64 // 研发投入同比扩张额（元；未扩张/上年缺失为 0）
 
 	// R15/P4：一致性校验（C4~C7）的可观测字段（只读）。
@@ -246,6 +314,31 @@ type ValuationRecommendation struct {
 	GrowthAdjustment      string
 	GrowthTerminal        float64 // g∞，仅内部/prompt 使用
 	GrowthCap             float64 // g1_cap，仅内部/prompt/日志使用
+
+	// R15 整合版（2026-10-18）：三档情景与新增可观测分量（无 JSON tag，经 Apply 回填）。
+	Scenarios              []ValuationScenario
+	ScenarioMethod         string  // 常量 anchor_disagreement_v1
+	ScenarioBandGrowth     float64 // band_g，pp
+	ScenarioBandDiscount   float64 // band_r，pp（1.0）
+	ScenarioTerminalAdjust float64 // band_terminal，pp（0.5）
+	ScenarioBandSource     string  // disagreement / fallback / degenerate
+	ScenarioBandRaw        float64 // clamp 前的原始分歧/回退带宽（pp）
+	GrowthWeights          GrowthWeights
+	GrowthAnchorCount      int
+	GrowthDamping          float64 // dampedCandidate 返回的实际折减 pp
+	GrowthEnvelope         float64 // 5 或 3 pp
+	EquityCost             float64 // Re %
+	DebtWeight             float64 // wD 0–1
+	EquityWeight           float64 // wE 0–1
+	DebtCostPretax         float64 // Rd_pre %
+	AfterTaxDebtCost       float64 // Rd_after %
+	EffectiveTaxRate       float64 // t，0–1（对外乘 100）
+	DebtCostEstimated      bool    // Rd 是否走保守估计
+	FCFSeries              []FCFYearPoint
+	FCFBaseValue           float64 // 最终选中模式下、套用后的基期 FCF（元）
+	FCFFormulaNote         string
+	FCFWindowStart         int
+	FCFWindowEnd           int
 }
 
 // LeaderCompany 行业龙头（R17：后端确定性回填，非 AI 输出）。

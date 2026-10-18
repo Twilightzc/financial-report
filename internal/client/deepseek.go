@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -13,7 +14,7 @@ import (
 )
 
 // DeepSeek 接入 DeepSeek 大模型（OpenAI 兼容 Chat Completions 协议）。
-// apikey 由请求参数传入；baseURL / model / reasoningEffort 可配置，缺省指向 DeepSeek 官方与 deepseek-v4-pro。
+// apikey 由请求参数传入；baseURL / model / reasoningEffort 可配置，缺省指向 DeepSeek 官方与快速模型 deepseek-flash。
 type DeepSeek struct {
 	hc              *http.Client
 	apiKey          string
@@ -22,14 +23,14 @@ type DeepSeek struct {
 	reasoningEffort string
 }
 
-// NewDeepSeek 构造 DeepSeek 客户端。baseURL 空则用官方地址，model 空则用 deepseek-v4-pro，
-// reasoningEffort 空则用 low（推理模型降思考强度以提速）。
+// NewDeepSeek 构造 DeepSeek 客户端。baseURL 空则用官方地址，model 空则用快速模型 deepseek-flash，
+// reasoningEffort 空则用 low（仅推理模型发送，flash 不发送该字段）。
 func NewDeepSeek(apiKey, baseURL, model, reasoningEffort string) *DeepSeek {
 	if baseURL == "" {
 		baseURL = "https://api.deepseek.com/v1"
 	}
 	if model == "" {
-		model = "deepseek-v4-pro"
+		model = "deepseek-flash"
 	}
 	if reasoningEffort == "" {
 		reasoningEffort = "low"
@@ -58,13 +59,14 @@ type chatRequest struct {
 	Messages        []chatMessage   `json:"messages"`
 	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
 	Temperature     float64         `json:"temperature"`
-	ReasoningEffort string          `json:"reasoning_effort,omitempty"` // 推理强度 low/medium/high，降低可提速
-	MaxTokens       int             `json:"max_tokens,omitempty"`       // 推理+回答合计上限，给足避免推理耗尽导致 content 为空
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"` // 仅推理模型发送（low/medium/high）
+	MaxTokens       int             `json:"max_tokens,omitempty"`       // 输出 token 上限
 }
 
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message      chatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -79,6 +81,13 @@ type chatResponse struct {
 // chatMaxAttempts 大模型调用的最大尝试次数（限流/网关抖动会自动重试）。
 const chatMaxAttempts = 5
 
+// isReasoningModel 推理模型白名单：只有这些模型接受 reasoning_effort。
+// 采用前缀匹配，兼容官方滚动版本（如 deepseek-v4-pro-xxxx）；未知模型一律不发送，避免参数错误。
+func isReasoningModel(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(n, "deepseek-v4-pro") || strings.HasPrefix(n, "deepseek-reasoner")
+}
+
 // Chat 发送一轮对话（system + user），返回助手回复文本与 token 用量。
 // 对限流(429)/5xx/网关 HTML 等临时失败自动重试（指数退避 2s、4s、8s、16s）。
 func (d *DeepSeek) Chat(system, user string) (string, model.TokenUsage, error) {
@@ -88,12 +97,14 @@ func (d *DeepSeek) Chat(system, user string) (string, model.TokenUsage, error) {
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		ResponseFormat:  &responseFormat{Type: "json_object"},
-		Temperature:     0.0,
-		ReasoningEffort: d.reasoningEffort,
-		// deepseek-v4-pro 是推理模型，max_tokens 连同「推理 + 回答」一起封顶：设太小会导致推理耗尽额度、
-		// 最终 content 为空；这里设一个足够大的值（8192）给足空间，避免触发空内容。输出实际长度仍靠提示词约束。
+		ResponseFormat: &responseFormat{Type: "json_object"},
+		Temperature:    0.0,
+		// 8192 为输出 token 上限（flash 为 CED 非推理模型，不发送 reasoning_effort）。
 		MaxTokens: 8192,
+	}
+	// reasoning_effort 只对白名单内的推理模型发送；未知/快速模型一律不带，避免参数错误。
+	if isReasoningModel(d.model) {
+		req.ReasoningEffort = d.reasoningEffort
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -140,7 +151,8 @@ func (d *DeepSeek) chatOnce(body []byte) (string, model.TokenUsage, bool, error)
 
 	if resp.StatusCode != http.StatusOK {
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return "", model.TokenUsage{}, retryable, fmt.Errorf("大模型接口返回状态码 %d: %s", resp.StatusCode, truncate(string(respBody), 300))
+		return "", model.TokenUsage{}, retryable, fmt.Errorf("大模型接口返回状态码 %d（model=%s）: %s",
+			resp.StatusCode, d.model, truncate(string(respBody), 300))
 	}
 
 	// 200 但内容不是 JSON（网关/代理返回的 HTML 页面）→ 视为临时失败，可重试。
@@ -158,13 +170,7 @@ func (d *DeepSeek) chatOnce(body []byte) (string, model.TokenUsage, bool, error)
 		return "", model.TokenUsage{}, false, fmt.Errorf("大模型返回错误: %s", cr.Error.Message)
 	}
 	if len(cr.Choices) == 0 {
-		return "", model.TokenUsage{}, false, fmt.Errorf("大模型返回内容为空")
-	}
-	if cr.Choices[0].Message.Content == "" {
-		if cr.Choices[0].Message.ReasoningContent != "" {
-			return "", model.TokenUsage{}, false, fmt.Errorf("大模型只返回了推理过程、未返回最终结果（可能被输出额度截断）")
-		}
-		return "", model.TokenUsage{}, false, fmt.Errorf("大模型返回内容为空")
+		return "", model.TokenUsage{}, false, fmt.Errorf("大模型返回内容为空（model=%s）", d.model)
 	}
 
 	var usage model.TokenUsage
@@ -175,7 +181,19 @@ func (d *DeepSeek) chatOnce(body []byte) (string, model.TokenUsage, bool, error)
 			TotalTokens:      cr.Usage.TotalTokens,
 		}
 	}
-	return cr.Choices[0].Message.Content, usage, false, nil
+	choice := cr.Choices[0]
+	if choice.Message.Content == "" || choice.FinishReason == "length" {
+		log.Printf("大模型输出可能被截断: model=%s finish_reason=%s completion_tokens=%d",
+			d.model, choice.FinishReason, usage.CompletionTokens)
+	}
+	if choice.Message.Content == "" {
+		if choice.Message.ReasoningContent != "" {
+			return "", usage, false, fmt.Errorf("大模型只返回了推理过程、未返回最终结果（model=%s finish_reason=%s，可能被输出额度截断）",
+				d.model, choice.FinishReason)
+		}
+		return "", usage, false, fmt.Errorf("大模型返回内容为空（model=%s finish_reason=%s）", d.model, choice.FinishReason)
+	}
+	return choice.Message.Content, usage, false, nil
 }
 
 // truncate 截断过长的错误信息，避免把整段响应塞进错误提示。
