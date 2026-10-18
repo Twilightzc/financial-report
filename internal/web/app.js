@@ -1214,6 +1214,7 @@ const app = createApp({
         aiResult.value = cached;
         aiElapsed.value = null;
         aiValDetailOpen.value = false;
+        autoApplyAIValuation(); // 缓存命中同样自动套用，避免估值卡片停留在默认参数
         await renderRadarAfterRender();
         return;
       }
@@ -1238,6 +1239,7 @@ const app = createApp({
         }
         aiCache.set(cacheKey, json.data);
         aiResult.value = json.data;
+        autoApplyAIValuation(); // 分析结果落地后自动套用推荐参数到估值表单（仍可手动改）
         // 成功后展示本次请求耗时（秒，1 位小数）；加载态与失败态保持 null。
         aiElapsed.value = Number(((nowMs() - startedAt) / 1000).toFixed(1));
         await renderRadarAfterRender();
@@ -1455,14 +1457,22 @@ const app = createApp({
     }
 
     // 把 AI 推荐的估值模型与参数套用到「公司估值」表单并计算。
-    function applyAIValuation(v) {
-      if (!v || !v.model) return;
+    // silent=true 时不弹成功提示（AI 分析完成后自动套用场景使用）。
+    function applyAIValuation(v, silent = false) {
+      if (!v || !v.model || v.applicable === false) return;
       applyValuationFormParams(aiValuationToFormParams(v));
       // ref 写入同步生效，紧随其后的 fetchValuation() 读到的已是新值，故开关与请求参数一致。
       // 与卡片完全一致：推荐关闭时必须关闭，否则表单 FCF 会多算研发加回。
       valAdjustRD.value = v.adjust_rd === true;
       fetchValuation('ai'); // R16 FR-1：AI 套用为主动动作，记录来源标记 ai
-      ElementPlus.ElMessage.success('已应用估值参数');
+      if (!silent) ElementPlus.ElMessage.success('已应用估值参数');
+    }
+
+    // AI 分析结果落地后自动套用推荐参数（与手动按钮同一入口，只是静默）。
+    // 无估值推荐 / 不适用时不动表单，避免把默认值或无效参数写进去。
+    function autoApplyAIValuation() {
+      const v = aiResult.value && aiResult.value.valuation;
+      if (v && v.model && v.applicable !== false) applyAIValuation(v, true);
     }
 
     // R18：从 AI 估值 params 中取参数值（不存在返回 null，供模板守卫）。
