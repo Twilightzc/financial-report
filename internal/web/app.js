@@ -336,7 +336,7 @@ const app = createApp({
     const aiApplyScenario = ref('base');
     const aiElapsed = ref(null); // 最近一次 AI 分析耗时（秒，1 位小数；加载中/缓存命中/失败为 null）
     const aiRadarRef = ref(null);
-    const aiReasoning = ref('low'); // 分析模式：low 简洁 / medium 标准 / high 详细
+    const aiReasoning = ref('high'); // 分析模式：low 简洁 / medium 标准 / high 详细（默认详细）
     // R15：估值卡片内长文本/逐年明细的展开态（换股票或重新分析时复位）。
     const aiFCFSeriesOpen = ref(false);
     const aiFCFRationaleOpen = ref(false);
@@ -701,10 +701,26 @@ const app = createApp({
       }
     }
 
-    // 删除单条：成功以后端返回列表为准；失败保留记录并提示重试。
+    // 删除单条：先二次确认（含危险色、默认焦点在取消），确认后再执行删除；取消不做任何操作。
     async function deleteValuationRecord(cd) {
       const rec = valuationHistory.value.find(x => x.code === cd);
       if (!rec || valHistoryDeleting.value) return;
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          `确定删除 ${rec.name || rec.code} 的估值记录？此操作不可恢复。`,
+          '删除估值记录',
+          { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+            confirmButtonClass: 'el-button--danger', autofocus: false }
+        );
+      } catch (e) {
+        return; // 取消：什么都不做
+      }
+      await doDeleteValuationRecord(rec);
+    }
+
+    // 执行单条删除：成功以后端返回列表为准；失败保留记录并提示重试。
+    async function doDeleteValuationRecord(rec) {
+      const cd = rec.code;
       valHistoryDeleting.value = cd;
       const seq = ++valHistorySeq;
       valHistoryLoading.value = false;
