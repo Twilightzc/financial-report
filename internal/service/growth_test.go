@@ -523,20 +523,22 @@ func TestTerminalGrowth(t *testing.T) {
 		discount   float64
 		sgr        float64
 		sgrOK      bool
+		stability  float64
+		sgrYears   int
 		want       float64
 		constraint string
 		words      string
 	}{
-		{"宏观锚最低", 4.5, 10, 6.8, true, 4.5, "macro", "宏观锚"},
-		{"SGR 约束", 7, 8, 6.8, true, 6.5, "sgr", "长期内生增速 6.8%"},
-		{"折现率约束", 7, 6.5, 9, true, 5.5, "discount", "折现率"},
-		{"SGR 不可用", 7, 10, 0, false, 7, "macro", "宏观锚"},
-		{"折现率下限", 4.5, 4.2, 0, false, 3, "discount", "折现率"},
-		{"上限为负", -1, 10, 0, false, 0, "zero", "终值按 0"},
-		{"网格向下取整", 4.7, 10, 0, false, 4.5, "macro", "向下取整"},
+		{"稳定度上限生效", 4.5, 10, 6.8, true, 1.0, 5, 4.5, "stability", "稳定度 1.00"},
+		{"SGR 约束", 7, 8, 6.8, true, 1.0, 5, 6.5, "sgr", "长期内生增速 6.8%（近 5 年平均）"},
+		{"折现率约束", 7, 6.5, 9, true, 1.0, 5, 5.5, "discount", "折现率"},
+		{"SGR 不可用", 4.5, 10, 0, false, 0.7, 0, 3.5, "stability", "稳定度 0.70"},
+		{"折现率下限", 4.5, 4.2, 0, false, 0.7, 0, 3.0, "discount", "折现率"},
+		{"上限为负", -1, 10, 0, false, 0.7, 0, 0, "zero", "终值按 0"},
+		{"网格向下取整", 4.7, 10, 0, false, 1.0, 0, 4.5, "stability", "稳定度"},
 	}
 	for _, c := range cases {
-		got, constraint, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK, false)
+		got, constraint, note := terminalGrowth(c.macro, c.discount, c.sgr, c.sgrOK, c.stability, c.sgrYears)
 		if got != c.want {
 			t.Errorf("%s：g∞ = %v，期望 %v", c.name, got, c.want)
 		}
@@ -549,7 +551,7 @@ func TestTerminalGrowth(t *testing.T) {
 	}
 	// g∞ 永不低于 0 且 < 折现率。
 	for _, d := range []float64{8, 10, 15} {
-		g, _, _ := terminalGrowth(10, d, 0, false, false)
+		g, _, _ := terminalGrowth(10, d, 0, false, 0.7, 0)
 		if g < 0 || g >= d {
 			t.Errorf("discount=%v 时 g∞=%v 越界", d, g)
 		}

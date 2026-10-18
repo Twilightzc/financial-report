@@ -242,6 +242,8 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 		latest = latestYear(incomeYears, cfYears, balanceYears)
 	}
 
+	sgrYearCandidates := commonYears(balanceYears, incomeYears)
+
 	incomeWindow := yearWindow(incomeYears, latest, valGrowthWindowYears)
 	fcfYears := yearWindow(commonYears(incomeYears, cfYears), latest, valFCFRecMaxYears)
 	fcfGrowthYears := yearWindow(fcfYears, latest, valGrowthWindowYears)
@@ -295,8 +297,8 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 
 	// 周期位置与负增长归因。
 	cycleWindow := yearWindow(incomeYears, latest, r18CycleMaxWindowYears)
-	profitCycle, _ := detectProfitCycle(incomeByYear, cycleWindow, gp)
-	isCyclical, _ := detectCyclical(input.IndustryType, cycle, gp, profitCycle)
+	profitCycle := detectProfitCycleDetail(incomeByYear, cycleWindow, gp)
+	isCyclical, _ := detectCyclical(input.IndustryType, cycle, gp, profitCycle.Hit)
 	pos, posLabel, _, posWarn := 0.0, "中位", "", ""
 	if r18CyclePositionEnabled {
 		pos, posLabel, _, posWarn = computeCyclePosition(incomeByYear, cycleWindow, isCyclical, gp)
@@ -314,10 +316,13 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	A := anchor.Final
 	insufficientA := !histOK && !fwd.Available
 
-	// SGR 与终值。
-	sgr, retention, retentionBasis, sgrOK, sgrWarn :=
-		sustainableGrowthR18(balanceByYear, incomeByYear, latest, input.Snapshot.Dividends)
-	gInf, terminalConstraint, terminalNote := terminalGrowth(macro.Value, discount.DiscountRate, sgr, sgrOK, isCyclical)
+	// SGR（多年平滑）与终值（稳定度连续化）。
+	sgr, retention, sgrWindowYears, retentionBasis, sgrOK, sgrWarn :=
+		sustainableGrowthSmoothed(balanceByYear, incomeByYear, sgrYearCandidates,
+			latest, input.Snapshot.Dividends)
+	stability := terminalStability(input.IndustryType, cycle, profitCycle, gp)
+	gInf, terminalConstraint, terminalNote := terminalGrowth(
+		macro.Value, discount.DiscountRate, sgr, sgrOK, stability, sgrWindowYears)
 
 	// 负增长归因（结构性→零增长；周期性→低永续）。
 	sm := computeStructuralMetrics(incomeByYear, cycleWindow)
@@ -339,7 +344,7 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 
 	gap := A - gInf
 	mdl, _, _ := classifyGrowthModel(A, gap, ms.Score, insufficientA, negType)
-	g1, g1Constraint, g1Note := growthG1(A, gInf, fwd.Value, sgr, fwd.Available, sgrOK)
+	g1, g1Constraint, g1Note := growthG1(A, gInf, fwd.Value, sgr, fwd.Available, sgrOK, sgrWindowYears)
 	path := constructGrowthPath(mdl, A, gInf, g1, discount.DiscountRate)
 	pr := paramsFromPath(path)
 	modelName := valuationModelNames[pr.Model]
@@ -457,9 +462,12 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	case "cyclical":
 		negativeNote = "处于周期低位，按低永续增长处理。"
 	}
-	sgrOut, retentionOut := 0.0, 0.0
-	if sgrOK && terminalConstraint == "sgr" {
-		sgrOut, retentionOut = round2(sgr), round4(retention)
+	sgrOut, retentionOut, sgrYearsOut := 0.0, 0.0, 0
+	if sgrOK {
+		sgrYearsOut = sgrWindowYears
+		if terminalConstraint == "sgr" {
+			sgrOut, retentionOut = round2(sgr), round4(retention)
+		}
 	}
 
 	fcfYearsOut := 0
@@ -500,8 +508,10 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 		GrowthMacro: round2(macro.Value), GrowthMacroBasis: macro.Basis, GDPAsOf: macro.AsOf,
 		ConsensusAsOf: fwd.AsOf, ConsensusInstitutions: fwd.Institutions, ConsensusYears: fwd.Years,
 		ConsensusReliability: fwd.Reliability,
-		GrowthTerminal:       round1(gInf), TerminalConstraint: terminalConstraint, TerminalNote: terminalNote,
+		GrowthTerminal:       round1(gInf), TerminalStability: stability,
+		TerminalConstraint: terminalConstraint, TerminalNote: terminalNote,
 		SGR: sgrOut, RetentionRate: retentionOut, RetentionBasis: retentionBasis,
+		SGRWindowYears:     sgrYearsOut,
 		NegativeGrowthType: negType, NegativeGrowthNote: negativeNote,
 		G1Constraint: g1Constraint, G1Note: g1Note,
 

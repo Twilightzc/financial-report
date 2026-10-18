@@ -115,19 +115,19 @@ func TestValuationDiscountNoBalance(t *testing.T) {
 // TestGrowthG1Rules g1 上限与终值收口规则。
 func TestGrowthG1Rules(t *testing.T) {
 	// A=20、SGR=15、前瞻锚=12 → 上限 min(30, max(12, 15)+1)=16。
-	if g1, constraint, _ := growthG1(20, 4.5, 12, 15, true, true); g1 != 16 || constraint != "upper" {
+	if g1, constraint, _ := growthG1(20, 4.5, 12, 15, true, true, 0); g1 != 16 || constraint != "upper" {
 		t.Errorf("上限规则 = %v/%s，期望 16/upper", g1, constraint)
 	}
 	// A=10 正常落在 [g∞, 上限]。
-	if g1, constraint, _ := growthG1(10, 4.5, 9, 11, true, true); g1 != 10 || constraint != "none" {
+	if g1, constraint, _ := growthG1(10, 4.5, 9, 11, true, true, 0); g1 != 10 || constraint != "none" {
 		t.Errorf("正常 g1 = %v/%s", g1, constraint)
 	}
 	// A 低于终值 → 按终值收口。
-	if g1, constraint, _ := growthG1(3, 4.5, 9, 11, true, true); g1 != 4.5 || constraint != "terminal" {
+	if g1, constraint, _ := growthG1(3, 4.5, 9, 11, true, true, 0); g1 != 4.5 || constraint != "terminal" {
 		t.Errorf("终值收口 = %v/%s", g1, constraint)
 	}
 	// 上限低于终值 → 按终值收口。
-	if g1, constraint, _ := growthG1(20, 4.5, -1, 2, true, true); g1 != 4.5 || constraint != "cap_below_terminal" {
+	if g1, constraint, _ := growthG1(20, 4.5, -1, 2, true, true, 0); g1 != 4.5 || constraint != "cap_below_terminal" {
 		t.Errorf("上限低于终值 = %v/%s", g1, constraint)
 	}
 }

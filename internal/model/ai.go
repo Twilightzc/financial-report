@@ -180,10 +180,13 @@ type AIValuation struct {
 	ConsensusYears         int               `json:"consensus_years,omitempty"`
 	ConsensusReliability   string            `json:"consensus_reliability,omitempty"` // high/medium/unavailable
 	GrowthTerminal         float64           `json:"growth_terminal"`                 // g∞，%
-	TerminalConstraint     string            `json:"terminal_constraint"`             // macro/sgr/discount/cyclical/zero
+	TerminalStability      float64           `json:"terminal_stability,omitempty"`    // 稳定度 0–1，2 位小数；新计算恒输出
+	TerminalConstraint     string            `json:"terminal_constraint"`             // stability/sgr/discount/zero；cyclical/macro 仅历史兼容
 	TerminalNote           string            `json:"terminal_note,omitempty"`
-	SGR                    float64           `json:"sgr,omitempty"`                  // 仅在终值受 SGR 约束时输出
-	RetentionRate          float64           `json:"retention_rate,omitempty"`       // 留存率 0–1
+	SGR                    float64           `json:"sgr,omitempty"`                  // 仅在终值受 SGR 约束时输出；语义为近 N 年平均
+	RetentionRate          float64           `json:"retention_rate,omitempty"`       // 平均留存率 0–1
+	RetentionBasis         string            `json:"retention_basis,omitempty"`      // payout/equity_growth/mixed/unavailable
+	SGRWindowYears         int               `json:"sgr_window_years,omitempty"`     // 实际有效年度数；回落单年=1，不可用省略
 	NegativeGrowthType     string            `json:"negative_growth_type,omitempty"` // structural/cyclical
 	NegativeGrowthNote     string            `json:"negative_growth_note,omitempty"`
 	G1Constraint           string            `json:"g1_constraint,omitempty"` // none/upper/terminal/cap_below_terminal
@@ -258,11 +261,13 @@ type ValuationRecommendation struct {
 	ConsensusYears        int
 	ConsensusReliability  string
 	GrowthTerminal        float64
+	TerminalStability     float64 // 稳定度 0–1，完整精度；Apply 时 round2
 	TerminalConstraint    string
 	TerminalNote          string
 	SGR                   float64
 	RetentionRate         float64
 	RetentionBasis        string
+	SGRWindowYears        int // 有效年度数；SGR 不可用时为 0
 	NegativeGrowthType    string
 	NegativeGrowthNote    string
 	G1Constraint          string

@@ -45,8 +45,32 @@ const (
 
 	// R20 估值增长与终值保守化。
 	g1CapBufferPP = 1.0 // g1 相对上限锚（前瞻锚/SGR 取较高者）的近似误差缓冲（用户确认，不得扩大）
-	// R21：周期/商品股终值上限由 2.0% 调整为 2.5%（长期通胀区间 2.0%–3.0% 的中点）。
-	r20CyclicalTerminalPP = 2.5 // 周期/商品股终值上限 = 长期通胀
+)
+
+// R22 估值参数平滑与终值连续化。
+const (
+	r22SGRMinValidYears = 3 // SGR 平滑最少有效年度
+
+	r22TerminalInflationPP = 2.0  // 固定长期通胀假设
+	r22StabilityMaxCycle   = 0.80 // 周期强度上限
+	r22StabilityVetoCap    = 0.15 // 成长性否决覆盖上限
+
+	r22StabilityWeightIndustry = 0.50
+	r22StabilityWeightFCF      = 0.30
+	r22StabilityWeightProfit   = 0.20
+
+	r22StabilityIndustryCyclical = 0.85
+	r22StabilityIndustryGeneral  = 0.15
+	r22StabilityIndustryUtility  = 0.05
+	r22StabilityIndustryMissing  = 0.30
+
+	r22StabilityFCVCVLow  = 0.15
+	r22StabilityFCVCVHigh = 0.60
+	r22StabilityFCFHigh   = 0.80
+
+	r22StabilityProfitRangeLow  = 3.0
+	r22StabilityProfitRangeHigh = 15.0
+	r22StabilityProfitHigh      = 0.80
 )
 
 // macroAnchor 宏观锚推导结果。
@@ -589,27 +613,47 @@ func oppositeSigns(a, b float64) bool {
 	return (a > 0 && b < 0) || (a < 0 && b > 0)
 }
 
-// detectProfitCycle 盈利周期：毛利率极差 ≥8pp，且营收/净利润同比同时出现 ≤−5% 与 ≥+10%。
-func detectProfitCycle(incomeByYear map[int]model.ReportRow, years []int, gp growthPattern) (bool, string) {
-	if gp.Veto {
-		return false, "成长性豁免命中，不判盈利周期"
-	}
-	if len(years) < r18CycleMinYears {
-		return false, "盈利周期窗口不足 3 年"
-	}
-	gms := make([]float64, 0, len(years))
-	for _, y := range years {
-		rev, cost := revenue(incomeByYear[y]), operateCost(incomeByYear[y])
-		if rev > 0 && cost > 0 {
-			gms = append(gms, (rev-cost)/rev*100)
+// profitCycleDetail 盈利周期明细：Hit 供周期判定，GMRange/GMRangeOK 供 R22 稳定度使用。
+type profitCycleDetail struct {
+	Hit       bool
+	GMRange   float64 // pp
+	GMRangeOK bool
+	Basis     string
+}
+
+// detectProfitCycleDetail 盈利周期明细：毛利率极差 ≥8pp，且营收/净利润同比同时出现 ≤−5% 与 ≥+10%。
+// 成长性否决时 Hit=false，但毛利率极差仍照常计算。
+func detectProfitCycleDetail(incomeByYear map[int]model.ReportRow, years []int, gp growthPattern) profitCycleDetail {
+	d := profitCycleDetail{}
+	if len(years) >= r18CycleMinYears {
+		gms := make([]float64, 0, len(years))
+		for _, y := range years {
+			rev, cost := revenue(incomeByYear[y]), operateCost(incomeByYear[y])
+			if rev > 0 && cost > 0 {
+				gms = append(gms, (rev-cost)/rev*100)
+			}
+		}
+		if len(gms) >= 2 {
+			d.GMRange = spread(gms)
+			d.GMRangeOK = true
 		}
 	}
-	if len(gms) < 2 {
-		return false, "毛利率样本不足，未判盈利周期"
+
+	if gp.Veto {
+		d.Basis = "成长性豁免命中，不判盈利周期"
+		return d
 	}
-	gmRange := spread(gms)
-	if gmRange < r18ProfitCycleGMRangePP {
-		return false, fmt.Sprintf("毛利率极差 %.2fpp（<%.0fpp），未判盈利周期", gmRange, r18ProfitCycleGMRangePP)
+	if len(years) < r18CycleMinYears {
+		d.Basis = "盈利周期窗口不足 3 年"
+		return d
+	}
+	if !d.GMRangeOK {
+		d.Basis = "毛利率样本不足，未判盈利周期"
+		return d
+	}
+	if d.GMRange < r18ProfitCycleGMRangePP {
+		d.Basis = fmt.Sprintf("毛利率极差 %.2fpp（<%.0fpp），未判盈利周期", d.GMRange, r18ProfitCycleGMRangePP)
+		return d
 	}
 
 	revYoY := rowYoY(incomeByYear, years, revenue)
@@ -617,9 +661,18 @@ func detectProfitCycle(incomeByYear map[int]model.ReportRow, years []int, gp gro
 	revDown, revUp := hasDownUp(revYoY, r18ProfitCycleDownPP, r18ProfitCycleUpPP)
 	npDown, npUp := hasDownUp(npYoY, r18ProfitCycleDownPP, r18ProfitCycleUpPP)
 	if revDown && revUp && npDown && npUp {
-		return true, fmt.Sprintf("盈利周期（毛利率极差 %.2fpp，营收/净利润同比出现 ≤−5%% 与 ≥+10%%）", gmRange)
+		d.Hit = true
+		d.Basis = fmt.Sprintf("盈利周期（毛利率极差 %.2fpp，营收/净利润同比出现 ≤−5%% 与 ≥+10%%）", d.GMRange)
+		return d
 	}
-	return false, fmt.Sprintf("毛利率极差 %.2fpp，但营收/净利润同比未同时出现 ≤−5%% 与 ≥+10%%", gmRange)
+	d.Basis = fmt.Sprintf("毛利率极差 %.2fpp，但营收/净利润同比未同时出现 ≤−5%% 与 ≥+10%%", d.GMRange)
+	return d
+}
+
+// detectProfitCycle 盈利周期布尔判定（薄包装，保持既有签名与文案）。
+func detectProfitCycle(incomeByYear map[int]model.ReportRow, years []int, gp growthPattern) (bool, string) {
+	d := detectProfitCycleDetail(incomeByYear, years, gp)
+	return d.Hit, d.Basis
 }
 
 // profitYoY 由净利润函数计算窗口同比：上正下负记 −100%、上负下正记 +100%，两年均非正跳过。
@@ -905,18 +958,16 @@ func fadeYears(gap float64) int {
 	return n
 }
 
-// terminalGrowth g∞（R20，R21 调整周期股上限）：
+// terminalGrowth g∞（R22 连续化）：
 //
-//	周期/商品股：上限 = 2.5%；非周期股：上限 = 宏观锚。
-//	g_raw = min(上限, r − 1.0, SGR 可用时)
+//	cap  = 2% + (宏观锚 − 2%) × 稳定度
+//	g_raw = min(cap, r − 1.0, SGR 可用时)
 //	g∞    = max(0, floorHalf(g_raw))
 //
-// constraint 取真正生效的 sgr / discount / cyclical / macro / zero（并列时按 sgr > discount > 上限 取主约束）。
-func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g float64, constraint, note string) {
-	capValue, capKey, capName := macro, "macro", "宏观锚"
-	if isCyclical {
-		capValue, capKey, capName = r20CyclicalTerminalPP, "cyclical", "周期股长期通胀 2.5% 上限"
-	}
+// constraint 取真正生效的 sgr / discount / stability / zero（并列时按 sgr > discount > stability 取主约束）。
+func terminalGrowth(macro, discount, sgr float64, sgrOK bool, stability float64, sgrYears int) (g float64, constraint, note string) {
+	capValue := r22TerminalInflationPP + (macro-r22TerminalInflationPP)*stability
+	capName := fmt.Sprintf("稳定度 %.2f 对应的长期上限", round2(stability))
 
 	gRaw := math.Min(capValue, discount-1.0)
 	if sgrOK {
@@ -931,10 +982,10 @@ func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g flo
 		key string
 		val float64
 	}
-	sources := []source{{key: "discount", val: discount - 1.0}, {key: capKey, val: capValue}}
+	sources := []source{{key: "discount", val: discount - 1.0}, {key: "stability", val: capValue}}
 	if sgrOK {
-		// 主约束优先级 sgr > discount > 上限：sgr 放最前，比较时同值取先出现者。
-		sources = []source{{key: "sgr", val: sgr}, {key: "discount", val: discount - 1.0}, {key: capKey, val: capValue}}
+		// 主约束优先级 sgr > discount > stability：sgr 放最前，比较时同值取先出现者。
+		sources = []source{{key: "sgr", val: sgr}, {key: "discount", val: discount - 1.0}, {key: "stability", val: capValue}}
 	}
 	primary := sources[0]
 	ties := make([]string, 0, 2)
@@ -948,15 +999,17 @@ func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g flo
 		}
 	}
 	names := map[string]string{
-		"sgr":      fmt.Sprintf("长期内生增速 %.1f%%", sgr),
-		"discount": "折现率−1pp",
-		capKey:     capName,
+		"sgr":       fmt.Sprintf("长期内生增速 %.1f%%%s", sgr, sgrWindowSuffix(sgrYears)),
+		"discount":  "折现率−1pp",
+		"stability": capName,
 	}
-	// 周期股 2.5% 为真正生效的约束时用固定业务句，不暴露内部键名。
-	if primary.key == "cyclical" {
-		note = "终值增长率按周期股长期通胀 2.5% 封顶。"
-	} else {
-		note = fmt.Sprintf("终值受%s约束，向下取整至 %.2f%%。", names[primary.key], g)
+	switch primary.key {
+	case "stability":
+		note = fmt.Sprintf("终值增长率按稳定度 %.2f 对应的长期上限 %.1f%% 封顶。", round2(stability), g)
+	case "sgr":
+		note = fmt.Sprintf("终值受长期内生增速 %.1f%%%s约束。", sgr, sgrWindowSuffix(sgrYears))
+	default: // discount
+		note = fmt.Sprintf("终值受折现率−1pp约束，向下取整至 %.2f%%。", g)
 	}
 	if len(ties) > 0 {
 		tieNames := make([]string, 0, len(ties))
@@ -968,13 +1021,116 @@ func terminalGrowth(macro, discount, sgr float64, sgrOK, isCyclical bool) (g flo
 	return g, primary.key, note
 }
 
-// sustainableGrowthR18 SGR = ROE × 留存率（ROE 已是 %）。
+// sgrWindowSuffix SGR 窗口后缀：「近 N 年平均」/「按最近一年」/ 空。
+func sgrWindowSuffix(years int) string {
+	switch {
+	case years >= 2:
+		return fmt.Sprintf("（近 %d 年平均）", years)
+	case years == 1:
+		return "（按最近一年）"
+	default:
+		return ""
+	}
+}
+
+// stabilityIndustryComponent 稳定度行业分量：缺失/非法按 0.30。
+func stabilityIndustryComponent(industryKey string) float64 {
+	switch industryKey {
+	case valIndustryCyclical:
+		return r22StabilityIndustryCyclical
+	case valIndustryGeneral:
+		return r22StabilityIndustryGeneral
+	case valIndustryUtility:
+		return r22StabilityIndustryUtility
+	default:
+		return r22StabilityIndustryMissing
+	}
+}
+
+// stabilityFCFComponent FCF 分量：CV 0.15–0.60 线性；符号翻转 ≥2 次时至少 0.80。
+func stabilityFCFComponent(cycle fcfCycle) (value float64, available bool) {
+	if !cycle.Evaluated {
+		return 0, false
+	}
+	switch {
+	case cycle.CV <= r22StabilityFCVCVLow:
+		value = 0
+	case cycle.CV >= r22StabilityFCVCVHigh:
+		value = 1
+	default:
+		value = (cycle.CV - r22StabilityFCVCVLow) / (r22StabilityFCVCVHigh - r22StabilityFCVCVLow)
+	}
+	if cycle.SignChanges >= valCycleSignChanges {
+		value = math.Max(value, r22StabilityFCFHigh)
+	}
+	return clampFloat(value, 0, 1), true
+}
+
+// stabilityProfitComponent 盈利周期分量：毛利率极差 3–15pp 线性；盈利周期命中时至少 0.80。
+func stabilityProfitComponent(pc profitCycleDetail) (value float64, available bool) {
+	if !pc.GMRangeOK {
+		return 0, false
+	}
+	switch {
+	case pc.GMRange <= r22StabilityProfitRangeLow:
+		value = 0
+	case pc.GMRange >= r22StabilityProfitRangeHigh:
+		value = 1
+	default:
+		value = (pc.GMRange - r22StabilityProfitRangeLow) / (r22StabilityProfitRangeHigh - r22StabilityProfitRangeLow)
+	}
+	if pc.Hit {
+		value = math.Max(value, r22StabilityProfitHigh)
+	}
+	return clampFloat(value, 0, 1), true
+}
+
+// cyclicIntensity 加权周期强度 c_raw：缺失分量按剩余权重归一化；行业分量始终可用。
+func cyclicIntensity(industryKey string, cycle fcfCycle, pc profitCycleDetail) float64 {
+	num := r22StabilityWeightIndustry * stabilityIndustryComponent(industryKey)
+	den := r22StabilityWeightIndustry
+	if v, ok := stabilityFCFComponent(cycle); ok {
+		num += r22StabilityWeightFCF * v
+		den += r22StabilityWeightFCF
+	}
+	if v, ok := stabilityProfitComponent(pc); ok {
+		num += r22StabilityWeightProfit * v
+		den += r22StabilityWeightProfit
+	}
+	return num / den
+}
+
+// terminalStability 稳定度 = 1 − min(0.8, 加权周期强度)；成长性否决且非周期行业时强度 ≤0.15。
+func terminalStability(industryType string, cycle fcfCycle, pc profitCycleDetail, gp growthPattern) float64 {
+	key := normalizeIndustryType(industryType)
+	c := cyclicIntensity(key, cycle, pc)
+	if gp.Veto && key != valIndustryCyclical {
+		c = math.Min(c, r22StabilityVetoCap)
+	}
+	c = math.Min(c, r22StabilityMaxCycle)
+	return 1 - c
+}
+
+// sgrYearDetail 单年 SGR 明细；聚合时 ROE 与留存率使用同一有效年度集合。
+type sgrYearDetail struct {
+	ROE            float64 // %
+	Retention      float64 // 0–1
+	SGR            float64 // %
+	Basis          string  // payout / equity_growth / unavailable
+	OK             bool
+	ParentFallback bool
+	PayoutExceeded bool
+	Warning        string
+}
+
+// sgrSingleYear 单年 SGR = ROE × 留存率（ROE 已是 %）。
 // 按 FR-6.2 / 附录 A：留存率分母与 ROE 分子均取归母净利润；字段缺失/非正时回落重构净利润并标注。
-func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, year int,
-	div model.DividendSnapshot) (sgr, retention float64, basis string, ok bool, warning string) {
-	basis = "unavailable"
+func sgrSingleYear(balanceByYear, incomeByYear map[int]model.ReportRow, year int,
+	div model.DividendSnapshot) sgrYearDetail {
+	d := sgrYearDetail{Basis: "unavailable"}
 	if year <= 0 {
-		return 0, 0, basis, false, "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
+		d.Warning = "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
+		return d
 	}
 	equity := equityValue(balanceByYear[year])
 	np := v0(incomeByYear[year], "PARENT_NETPROFIT")
@@ -982,9 +1138,11 @@ func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, y
 	if np <= 0 {
 		np = netProfitReconstructed(incomeByYear[year])
 		npNote = "归母净利润缺失或非正，留存率与 ROE 按重构净利润近似。"
+		d.ParentFallback = true
 	}
 	if equity <= 0 || np <= 0 {
-		return 0, 0, basis, false, "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
+		d.Warning = "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
+		return d
 	}
 	roeSGR := np / equity * 100
 
@@ -992,19 +1150,92 @@ func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, y
 		cash, records := dividendForYear(div.Records, year)
 		if records > 0 {
 			payout := cash / np
-			retention = clampFloat(1-payout, valRetentionMin, valRetentionMax)
-			sgr = roeSGR * retention
+			d.Retention = clampFloat(1-payout, valRetentionMin, valRetentionMax)
+			d.ROE, d.SGR, d.Basis, d.OK = roeSGR, roeSGR*d.Retention, "payout", true
 			if payout > 1 {
-				return sgr, retention, "payout", true,
-					joinWarns([]string{npNote, "现金分红超过归母净利润，留存率按 0 计。"})
+				d.PayoutExceeded = true
+				d.Warning = joinWarns([]string{npNote, "现金分红超过归母净利润，留存率按 0 计。"})
+			} else {
+				d.Warning = npNote
 			}
-			return sgr, retention, "payout", true, npNote
+			return d
 		}
 	}
 	if ret, okRet := retentionRate(balanceByYear, incomeByYear, year); okRet {
-		return roeSGR * ret, ret, "equity_growth", true, npNote
+		d.ROE, d.Retention, d.SGR = roeSGR, ret, roeSGR*ret
+		d.Basis, d.OK, d.Warning = "equity_growth", true, npNote
+		return d
 	}
-	return 0, 0, "unavailable", false, "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
+	d.Warning = "留存率/ROE 数据不足，自筹资金可持续增速不可用，终值不施加该约束。"
+	return d
+}
+
+// sustainableGrowthR18 单年 SGR 薄包装（保持既有签名与数值/文案完全不变）。
+func sustainableGrowthR18(balanceByYear, incomeByYear map[int]model.ReportRow, year int,
+	div model.DividendSnapshot) (sgr, retention float64, basis string, ok bool, warning string) {
+	d := sgrSingleYear(balanceByYear, incomeByYear, year, div)
+	return d.SGR, d.Retention, d.Basis, d.OK, d.Warning
+}
+
+// sustainableGrowthSmoothed R22 多年平滑：最近 5 年有效年度算术平均 ROE × 算术平均留存率。
+// 有效年度 ≥3 时平滑；否则回落最近一年；回落仍不可用则整体不可用。
+func sustainableGrowthSmoothed(balanceByYear, incomeByYear map[int]model.ReportRow,
+	years []int, latest int, div model.DividendSnapshot,
+) (sgr, retention float64, windowYears int, basis string, ok bool, warning string) {
+	candidates := yearWindow(years, latest, valGrowthWindowYears)
+	effs := make([]sgrYearDetail, 0, len(candidates))
+	parentFallback, payoutExceeded := false, false
+	payoutYears, equityYears := 0, 0
+	for _, y := range candidates {
+		d := sgrSingleYear(balanceByYear, incomeByYear, y, div)
+		if !d.OK {
+			continue
+		}
+		effs = append(effs, d)
+		parentFallback = parentFallback || d.ParentFallback
+		payoutExceeded = payoutExceeded || d.PayoutExceeded
+		switch d.Basis {
+		case "payout":
+			payoutYears++
+		case "equity_growth":
+			equityYears++
+		}
+	}
+
+	if len(effs) >= r22SGRMinValidYears {
+		roeSum, retSum := 0.0, 0.0
+		for _, d := range effs {
+			roeSum += d.ROE
+			retSum += d.Retention
+		}
+		n := float64(len(effs))
+		roeAvg, retAvg := roeSum/n, retSum/n
+		switch {
+		case payoutYears > 0 && equityYears > 0:
+			basis = "mixed"
+		case payoutYears > 0:
+			basis = "payout"
+		default:
+			basis = "equity_growth"
+		}
+		warns := make([]string, 0, 2)
+		if parentFallback {
+			warns = append(warns, "归母净利润缺失或非正，留存率与 ROE 按重构净利润近似。")
+		}
+		if payoutExceeded {
+			warns = append(warns, "现金分红超过归母净利润，留存率按 0 计。")
+		}
+		return roeAvg * retAvg, retAvg, len(effs), basis, true, joinWarns(warns)
+	}
+
+	// 有效年度不足 3 年：回落最近一年的单年口径。
+	d := sgrSingleYear(balanceByYear, incomeByYear, latest, div)
+	if d.OK {
+		return d.SGR, d.Retention, 1, d.Basis, true,
+			joinWarns([]string{d.Warning, "可用年度不足 3 年，自筹资金可持续增速按最近一年计算。"})
+	}
+	return 0, 0, 0, "unavailable", false,
+		"可用年度不足 3 年，且最近一年数据不可用，自筹资金可持续增速不可用，终值不施加该约束。"
 }
 
 // dividendForYear 汇总某一报告年度的现金分红（中期 + 年度 + 特别分红）。
@@ -1072,7 +1303,7 @@ func classifyGrowthModel(A, gap, score float64, insufficient bool, negType strin
 // 仅 SGR 可用：capG1 = min(30, max(0, SGR + 1pp))。
 // 仅前瞻锚可用：capG1 = min(30, max(0, 前瞻锚 + 1pp))；两者都不可用：30。
 // g1 = floorHalf(clamp(A, g∞, capG1))。
-func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constraint, note string) {
+func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool, sgrYears int) (g1 float64, constraint, note string) {
 	capG1 := 30.0
 	capSource := "none" // 内部使用，不输出
 	switch {
@@ -1100,7 +1331,7 @@ func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constra
 	// 排除 A 仅被 0.5pp 网格向下取整、并未真正触顶的情况。
 	switch {
 	case A > capG1+1e-9:
-		return g1, "upper", r20G1UpperNote(capSource, fwd, sgr)
+		return g1, "upper", r20G1UpperNote(capSource, fwd, sgr, sgrYears)
 	case A < gInf-1e-9:
 		return g1, "terminal", "g1 按终值收口。"
 	default:
@@ -1109,18 +1340,19 @@ func growthG1(A, gInf, fwd, sgr float64, fwdOK, sgrOK bool) (g1 float64, constra
 }
 
 // r20G1UpperNote g1 触顶时的依据句（只含业务语言与实际数字，不输出内部键名）。
-func r20G1UpperNote(capSource string, fwd, sgr float64) string {
+func r20G1UpperNote(capSource string, fwd, sgr float64, sgrYears int) string {
 	switch capSource {
 	case "sgr":
+		suffix := sgrWindowSuffix(sgrYears)
 		switch {
 		case sgr <= -1.0:
-			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%），高增长期增长率按 0 收口。", sgr)
+			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%）%s，高增长期增长率按 0 收口。", sgr, suffix)
 		case sgr <= 0:
-			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%），高增长期增长率按 1pp 上限收口。", sgr)
+			return fmt.Sprintf("自筹资金可持续增速非正（%.1f%%）%s，高增长期增长率按 1pp 上限收口。", sgr, suffix)
 		case sgr+g1CapBufferPP > 30.0:
-			return fmt.Sprintf("自筹资金可持续增速 %.1f%%，高增长期增长率按 30%% 上限约束。", sgr)
+			return fmt.Sprintf("自筹资金可持续增速 %.1f%%%s，高增长期增长率按 30%% 上限约束。", sgr, suffix)
 		default:
-			return fmt.Sprintf("高增长期增长率受自筹资金可持续增速 %.1f%% + 1pp 上限约束。", sgr)
+			return fmt.Sprintf("高增长期增长率受自筹资金可持续增速 %.1f%%%s + 1pp 上限约束。", sgr, suffix)
 		}
 	case "forward":
 		switch {

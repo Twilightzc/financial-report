@@ -304,10 +304,11 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 	}
 	discounts := []float64{8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0}
 	for _, d := range discounts {
-		// 零快照 → 宏观锚回退 4.5% → g∞=4.5；所有档位必须使用同一个 g∞。
-		gInf, _, _ := terminalGrowth(r18GDPFallbackPP, d, 0, false, false)
-		if gInf != 4.5 {
-			t.Fatalf("回退宏观锚下 g∞ = %v，期望 4.5", gInf)
+		// 零快照 → 宏观锚回退 4.5% + 全信号缺失稳定度 0.70 → 上限 3.75%，g∞=3.5；
+		// 所有档位必须使用同一个 g∞。
+		gInf, _, _ := terminalGrowth(r18GDPFallbackPP, d, 0, false, 0.7, 0)
+		if gInf != 3.5 {
+			t.Fatalf("回退宏观锚下 g∞ = %v，期望 3.5", gInf)
 		}
 		for _, x := range []float64{0, 3, 8, 12, 19.9, 20, 30} {
 			sc := scoreSignals(x, 0, false, nil).Score
@@ -317,7 +318,7 @@ func TestRecommendParamsGridCompliance(t *testing.T) {
 				negType = "structural"
 			}
 			mdl, _, _ := classifyGrowthModel(x, gap, sc, false, negType)
-			g1, _, _ := growthG1(x, gInf, 0, 0, false, false)
+			g1, _, _ := growthG1(x, gInf, 0, 0, false, false, 0)
 			path := constructGrowthPath(mdl, x, gInf, g1, d)
 			pr := paramsFromPath(path)
 			if got := paramKeys(pr.Params); !reflect.DeepEqual(got, wantKeys[pr.Model]) {
@@ -686,8 +687,8 @@ func TestRecommendValuationDeterministic(t *testing.T) {
 			t.Fatalf("第 %d 次调用结果与首次不一致：\n首次 %+v\n本次 %+v", i+2, first, got)
 		}
 	}
-	// R20：A=19、r=8，g1=floorHalf(min(A, SGR+1))=10.0，
-	// 三阶段 g2=roundHalf((g1+g∞)/2)=7.5 < r，三阶段成立、不降级。
+	// R20/R22：A=19、r=8，g1=floorHalf(min(A, 平滑SGR+1))=10.0，
+	// 三阶段 g2=roundHalf((g1+g∞)/2)=7.0 < r，三阶段成立、不降级。
 	if first.Model != valModelThreeStage || first.ModelDegraded {
 		t.Errorf("三指标增速约 20%% 应为 three_stage，实际 %s degraded=%v（A=%v）",
 			first.Model, first.ModelDegraded, first.GrowthAnchor.Final)
