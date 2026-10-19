@@ -392,7 +392,7 @@ func TestVerifyApplyValuationRecommendationHostile(t *testing.T) {
 		},
 		GrowthTerminal: 4.5, TerminalConstraint: "macro",
 		CapexCheck:     model.CapexCoverageDetail{Available: true, Ratio: 0.8},
-		FCFProfitCheck: model.FCFProfitDetail{Available: true, Ratio: 1.1, ProfitBasis: "parent"},
+		FCFProfitCheck: model.FCFProfitDetail{Available: true, Ratio: 1.1, ProfitBasis: "reconstructed"},
 		Applicable:     true, BaseYear: 2024,
 		Warnings: []string{"w"},
 	}

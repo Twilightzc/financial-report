@@ -743,7 +743,7 @@ func recommendedStub() model.ValuationRecommendation {
 		},
 		FCFProfitCheck: model.FCFProfitDetail{
 			Available: true, Ratio: 1.25, FCF: 12.34e8, Profit: 9.87e8,
-			ProfitBasis: "parent", Mode: valFCFAverage,
+			ProfitBasis: "reconstructed", Mode: valFCFAverage,
 			WindowStart: 2022, WindowEnd: 2024, Years: 3, Note: "口径",
 		},
 		BaseYear: 2024,

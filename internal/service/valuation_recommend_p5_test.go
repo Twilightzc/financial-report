@@ -397,7 +397,7 @@ func TestValuationPromptNoiseFix(t *testing.T) {
 	for _, want := range []string{
 		"【估值参数事实（只读，不得改动）】", "基期 FCF：12.34 亿元",
 		"净资本支出/保全性资本支出 0.90（2022–2024）",
-		"FCF/归母净利润 1.25（2022–2024）", "公司特定风险",
+		"FCF/净利润（重构口径，含少数股东损益） 1.25（2022–2024）", "公司特定风险",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("prompt 缺少「%s」：\n%s", want, block)

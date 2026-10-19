@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"financial-report/internal/model"
@@ -10,11 +11,12 @@ import (
 var cvDates = []string{"2020-12-31", "2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31"}
 
 // cvFixture 构造 2020–2024 五年的三张表：
-// 经营现金流净额逐年上升 {500,520,540,560,580}，保全性资本支出恒 122
+// 经营现金流净额逐年上升 {500,520,540,560,580}，保全性资本支出（R3 maintenanceCapex）恒 122
 //
-//	（减值 10+5 + 折旧 80 + 使用权摊销 10 + 无形资产摊销 6 + 长期待摊摊销 4 + 处置损失 5 + 报废损失 2）
+//	（折旧 80 + 使用权摊销 10 + 无形资产摊销 6 + 长期待摊摊销 4 + 资产减值准备 20 + 报废损失 2）
 //	→ 经营资产自由现金流 = {378,398,418,438,458}（逐年上升）；
 //
+// 利润表减值（10+5）与处置损失 9 为 R23 诱饵，不得再计入。
 // 金融资产（货币资金）= {600,610,620,630,640}；长期股权投资账面 = {200,201,202,203,204}。
 func cvFixture() (balance, cashflow, income []model.ReportRow) {
 	netOperate := []float64{500, 520, 540, 560, 580}
@@ -31,12 +33,13 @@ func cvFixture() (balance, cashflow, income []model.ReportRow) {
 			"USERIGHT_ASSET_AMORTIZE": 10,
 			"IA_AMORTIZE":             6,
 			"LPE_AMORTIZE":            4,
-			"DISPOSAL_LONGASSET_LOSS": 5,
+			"ASSET_IMPAIRMENT":        20,
 			"FA_SCRAP_LOSS":           2,
+			"DISPOSAL_LONGASSET_LOSS": 9, // R23 诱饵：不得再计入
 		}))
 		income = append(income, rowWith(d, map[string]float64{
-			"ASSET_IMPAIRMENT_INCOME":  -10, // 收益口径：负值=损失 10
-			"CREDIT_IMPAIRMENT_INCOME": -5,  // 负值=损失 5
+			"ASSET_IMPAIRMENT_INCOME":  -10, // R23 诱饵（收益口径：负值=损失 10）
+			"CREDIT_IMPAIRMENT_INCOME": -5,  // R23 诱饵（负值=损失 5）
 		}))
 	}
 	return balance, cashflow, income
@@ -208,8 +211,8 @@ func TestComputeCompanyValueBalanceFieldMissing(t *testing.T) {
 	}
 }
 
-// TestComputeCompanyValueIncomeYearMissing 利润表缺失年份：FCF 仍算（减值计 0），Note 标注该年。
-func TestComputeCompanyValueIncomeYearMissing(t *testing.T) {
+// TestComputeCompanyValueIncomeNotUsed 利润表不再参与 FCF：删除某年利润表后 FCF 与完整数据完全相同。
+func TestComputeCompanyValueIncomeNotUsed(t *testing.T) {
 	balance, cashflow, income := cvFixture()
 	filtered := income[:0:0]
 	for _, r := range income {
@@ -218,28 +221,36 @@ func TestComputeCompanyValueIncomeYearMissing(t *testing.T) {
 		}
 		filtered = append(filtered, r)
 	}
-	cv := ComputeCompanyValue(balance, cashflow, filtered, 2020, 2024)
-	it := cvIndicatorByKey(t, cv, "operating_fcf")
+	withMissing := ComputeCompanyValue(balance, cashflow, filtered, 2020, 2024)
+	full := ComputeCompanyValue(balance, cashflow, income, 2020, 2024)
+	it := cvIndicatorByKey(t, withMissing, "operating_fcf")
+	fullIt := cvIndicatorByKey(t, full, "operating_fcf")
 
 	idx := -1
-	for i, y := range cv.Years {
+	for i, y := range withMissing.Years {
 		if y == 2023 {
 			idx = i
 		}
 	}
-	// 2023 减值计 0 → FCF = NETCASH_OPERATE(560) − (折旧 80+使用权 10+无形 6+长期待摊 4+处置 5+报废 2 = 107)
+	// 2023 FCF = NETCASH_OPERATE(560) − maintenanceCapex(122) = 438，与完整数据相同。
 	if v := it.Values[idx]; v == nil {
-		t.Fatalf("operating_fcf 2023 = nil, want 非 nil（利润表缺失仍计算）")
-	} else if *v != 453 {
-		t.Errorf("operating_fcf 2023 = %v, want 453（减值计 0）", *v)
+		t.Fatalf("operating_fcf 2023 = nil, want 非 nil（利润表缺失不影响 FCF）")
+	} else if *v != 438 {
+		t.Errorf("operating_fcf 2023 = %v, want 438", *v)
 	}
-	if it.Note == "" {
-		t.Errorf("operating_fcf.Note 为空，期望标注 2023 年利润表缺失")
+	if it.Note != "" {
+		t.Errorf("operating_fcf.Note = %q, want 空（利润表不再参与 FCF，无缺失标注）", it.Note)
 	}
-	// 其余年份有利润表，不应误报
-	for i, y := range cv.Years {
-		if y != 2023 && it.Values[i] == nil {
-			t.Errorf("operating_fcf %d = nil, want 有值", y)
+	if !strings.Contains(it.Interpretation, "与财务指标分析同口径") {
+		t.Errorf("operating_fcf.Interpretation = %q，期望含「与财务指标分析同口径」", it.Interpretation)
+	}
+	// 其余年份与完整数据逐项相等。
+	for i := range withMissing.Years {
+		if it.Values[i] == nil || fullIt.Values[i] == nil {
+			t.Fatalf("operating_fcf %d 存在 nil（withMissing=%v, full=%v）", withMissing.Years[i], it.Values[i], fullIt.Values[i])
+		}
+		if *it.Values[i] != *fullIt.Values[i] {
+			t.Errorf("operating_fcf %d = %v, 完整数据 = %v，期望一致", withMissing.Years[i], *it.Values[i], *fullIt.Values[i])
 		}
 	}
 }
@@ -255,8 +266,9 @@ func TestComputeCompanyValueFCFNegative(t *testing.T) {
 				"IA_AMORTIZE":             6,
 				"LPE_AMORTIZE":            4,
 				"USERIGHT_ASSET_AMORTIZE": 10,
-				"DISPOSAL_LONGASSET_LOSS": 5,
+				"ASSET_IMPAIRMENT":        20,
 				"FA_SCRAP_LOSS":           2,
+				"DISPOSAL_LONGASSET_LOSS": 5, // 诱饵：不计入
 			})
 		}
 	}

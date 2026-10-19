@@ -25,8 +25,9 @@ func rowAt(date string, fields map[string]float64) model.ReportRow {
 // valuationFixture 构造估值用的三张表最新年报。
 // 金融资产 = 1000（货币资金）；长期股权投资账面 = 200、收益 = 20（收益率 10%）；
 // 有息债务 = 短期借款 300 + 长期借款 200 = 500；股东权益 = 1500。
-// 经营现金流净额 = 500；保全性资本支出 = 资产减值 10 + 信用减值 5 + 折旧 80 + 使用权摊销 10 +
-// 无形资产摊销 6 + 长期待摊摊销 4 + 处置损失 5 + 报废损失 2 = 122 → FCF = 378。
+// 经营现金流净额 = 500；保全性资本支出（R3 maintenanceCapex）= 折旧 80 + 使用权摊销 10 +
+// 无形资产摊销 6 + 长期待摊摊销 4 + 资产减值准备 20 + 报废损失 2 = 122 → FCF = 378。
+// 利润表减值（10+5）与现金流量表处置损失 9 为 R23 诱饵，不得再计入。
 func valuationFixture() (balance, cashflow, income model.ReportRow) {
 	balance = row(map[string]float64{
 		"MONETARYFUNDS":      1000,
@@ -42,13 +43,14 @@ func valuationFixture() (balance, cashflow, income model.ReportRow) {
 		"USERIGHT_ASSET_AMORTIZE": 10,
 		"IA_AMORTIZE":             6,
 		"LPE_AMORTIZE":            4,
-		"DISPOSAL_LONGASSET_LOSS": 5,
+		"ASSET_IMPAIRMENT":        20, // 现金流量表补充资料；保全性支出合计 = 80+10+6+4+20+2 = 122
 		"FA_SCRAP_LOSS":           2,
+		"DISPOSAL_LONGASSET_LOSS": 9, // R23 诱饵：不得再计入
 	})
 	income = row(map[string]float64{
 		"INVEST_JOINT_INCOME":      20,
-		"ASSET_IMPAIRMENT_INCOME":  -10, // 收益口径，负值 = 损失 10
-		"CREDIT_IMPAIRMENT_INCOME": -5,  // 收益口径，负值 = 损失 5
+		"ASSET_IMPAIRMENT_INCOME":  -10, // R23 诱饵：不得再计入 FCF（收益口径，负值 = 损失 10）
+		"CREDIT_IMPAIRMENT_INCOME": -5,  // R23 诱饵（收益口径，负值 = 损失 5）
 	})
 	return
 }
@@ -56,8 +58,9 @@ func valuationFixture() (balance, cashflow, income model.ReportRow) {
 func approx(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 func TestOperatingFreeCashFlow(t *testing.T) {
-	_, cf, inc := valuationFixture()
-	got := operatingFreeCashFlow(inc, cf)
+	_, cf, _ := valuationFixture()
+	got := operatingFreeCashFlow(cf)
+	// 利润表减值（15）与处置损失（9）为诱饵；若被计入会得到 500−126=374，而非 378。
 	if want := 378.0; !approx(got, want) {
 		t.Errorf("经营资产自由现金流 = %v，期望 %v", got, want)
 	}
@@ -227,7 +230,7 @@ func TestComputeValuationErrors(t *testing.T) {
 		t.Errorf("无年报数据期望返回错误")
 	}
 
-	// 自由现金流 <= 0。
+	// 自由现金流 <= 0：50 − (80+10+6+4+0+2) = −52（无 ASSET_IMPAIRMENT 按 0）。
 	negCf := row(map[string]float64{
 		"NETCASH_OPERATE":         50,
 		"FA_IR_DEPR":              80,

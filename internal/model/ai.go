@@ -88,7 +88,7 @@ type FCFProfitDetail struct {
 	Ratio       float64 `json:"ratio"`        // 2 位小数
 	FCF         float64 `json:"fcf"`          // 元，等于展示的 fcf_base_value
 	Profit      float64 `json:"profit"`       // 元，同窗口同聚合
-	ProfitBasis string  `json:"profit_basis"` // parent / reconstructed
+	ProfitBasis string  `json:"profit_basis"` // R23 起恒为 "reconstructed"（重构净利润，含少数股东损益）
 	Mode        string  `json:"mode"`
 	WindowStart int     `json:"window_start"`
 	WindowEnd   int     `json:"window_end"`
@@ -103,7 +103,7 @@ type FCFProfitDetail struct {
 type FCFYearPoint struct {
 	Year              int     `json:"year"`
 	OperatingCash     float64 `json:"operating_cash"`     // NETCASH_OPERATE
-	PreservationCapex float64 `json:"preservation_capex"` // 保全性资本支出（正数）
+	PreservationCapex float64 `json:"preservation_capex"` // 保全性资本支出（与 R3 财务指标分析同口径，正数）
 	FCF               float64 `json:"fcf"`                // OperatingCash − PreservationCapex
 }
 

@@ -31,16 +31,6 @@ func commonBaseYear(incomeYears, cfYears []int) int {
 	return base
 }
 
-// preservationCapex 保全性资本支出（估值口径，与 operatingFreeCashFlow 完全一致）：
-// 资产减值损失 + 信用减值损失 + 折旧摊销（含使用权资产摊销）+ 处置长期资产损失 + 固定资产报废损失。
-// 减值取利润表（沿用既有简化：减值全部归经营），其余取现金流量表补充资料；处置损失仅计损失。
-func preservationCapex(income, cf model.ReportRow) float64 {
-	return assetImpairmentLoss(income) + creditImpairmentLoss(income) +
-		v0(cf, "FA_IR_DEPR") + v0(cf, "USERIGHT_ASSET_AMORTIZE") +
-		v0(cf, "IA_AMORTIZE") + v0(cf, "LPE_AMORTIZE") +
-		disposalLongAssetLoss(cf) + v0(cf, "FA_SCRAP_LOSS")
-}
-
 // effectiveWindow 返回与基期 FCF 一致的校验窗口：多年度方式用 selectBaseFCF 的实际年份，
 // latest/custom 用最新年报。
 func effectiveWindow(mode string, usedYears []int, latest int) []int {
@@ -54,10 +44,11 @@ func effectiveWindow(mode string, usedYears []int, latest int) []int {
 }
 
 // capexCoverageDetail 净资本支出（购建−处置收回）÷ 保全性资本支出，窗口与聚合方式与基期 FCF 一致。
-func capexCoverageDetail(cfByYear, incomeByYear map[int]model.ReportRow, years []int, mode string) model.CapexCoverageDetail {
+// 保全性资本支出复用 R3 maintenanceCapex（analysis.go），与财务指标分析同口径。
+func capexCoverageDetail(cfByYear map[int]model.ReportRow, years []int, mode string) model.CapexCoverageDetail {
 	det := model.CapexCoverageDetail{Mode: mode}
 	if len(years) == 0 {
-		det.Reason = "缺少现金流量表或利润表年度"
+		det.Reason = "缺少现金流量表年度"
 		return det
 	}
 	det.WindowStart, det.WindowEnd = years[0], years[len(years)-1]
@@ -69,7 +60,7 @@ func capexCoverageDetail(cfByYear, incomeByYear map[int]model.ReportRow, years [
 			return det
 		}
 		det.Numerator += *construct - v0(cf, "DISPOSAL_LONG_ASSET")
-		det.Denominator += preservationCapex(incomeByYear[y], cf)
+		det.Denominator += maintenanceCapex(cf)
 	}
 	if det.Denominator <= 0 {
 		det.Reason = "保全性资本支出≤0"
@@ -78,7 +69,7 @@ func capexCoverageDetail(cfByYear, incomeByYear map[int]model.ReportRow, years [
 	det.Available = true
 	det.Ratio = round2(det.Numerator / det.Denominator)
 	det.Note = fmt.Sprintf(
-		"净资本支出（购建−处置收回）/ 保全性资本支出（含非现金减值/处置项）；窗口 %d–%d。",
+		"净资本支出（购建−处置收回）/ 保全性资本支出（折旧摊销、资产减值准备、固定资产报废损失，与财务指标分析同口径）；窗口 %d–%d。",
 		det.WindowStart, det.WindowEnd)
 	if mode == valFCFCustom {
 		det.Note += "自定义 FCF，覆盖率按最新年报。"
@@ -107,11 +98,14 @@ func aggregateProfit(values []float64, mode string) float64 {
 	}
 }
 
-// fcfProfitDetail 基期 FCF（含研发调整）÷ 同窗口同聚合净利润。
+// fcfProfitDetail 基期 FCF（含研发调整）÷ 同窗口同聚合重构净利润（含少数股东损益）。
+// R23 起分母固定为 netProfitReconstructed，与财务指标分析「净利润现金含量」同口径，
+// 不再优先取归母净利润（利润表 PARENT_NETPROFIT）。
 func fcfProfitDetail(fcfBase float64, adjustRD bool, rdExpansion float64,
 	incomeByYear map[int]model.ReportRow, years []int, mode string) model.FCFProfitDetail {
 	det := model.FCFProfitDetail{
 		FCF: fcfBase, Mode: mode, AdjustRD: adjustRD, RDExpansion: rdExpansion,
+		ProfitBasis: "reconstructed", // R23 起恒为重构口径（含少数股东损益），不可用响应也输出
 	}
 	if fcfBase <= 0 {
 		det.Reason = "基期 FCF≤0"
@@ -124,38 +118,11 @@ func fcfProfitDetail(fcfBase float64, adjustRD bool, rdExpansion float64,
 	det.WindowStart, det.WindowEnd = years[0], years[len(years)-1]
 	det.Years = len(years)
 
-	parent := make([]float64, 0, len(years))
-	parentOK := true
+	recon := make([]float64, 0, len(years))
 	for _, y := range years {
-		v := incomeByYear[y].Fields["PARENT_NETPROFIT"]
-		if v == nil {
-			parentOK = false
-			break
-		}
-		parent = append(parent, *v)
+		recon = append(recon, netProfitReconstructed(incomeByYear[y]))
 	}
-	basis := "parent"
-	profit := 0.0
-	if parentOK {
-		profit = aggregateProfit(parent, mode)
-	} else {
-		basis = "reconstructed"
-		recon := make([]float64, 0, len(years))
-		for _, y := range years {
-			recon = append(recon, netProfitReconstructed(incomeByYear[y]))
-		}
-		profit = aggregateProfit(recon, mode)
-	}
-	// 归母口径聚合后 ≤0：整个窗口统一换重构净利润（含少数股东损益），不剔除亏损年。
-	if profit <= 0 && basis == "parent" {
-		recon := make([]float64, 0, len(years))
-		for _, y := range years {
-			recon = append(recon, netProfitReconstructed(incomeByYear[y]))
-		}
-		if v := aggregateProfit(recon, mode); v > 0 {
-			profit, basis = v, "reconstructed"
-		}
-	}
+	profit := aggregateProfit(recon, mode)
 	if profit <= 0 {
 		det.Reason = "净利润≤0"
 		return det
@@ -164,21 +131,16 @@ func fcfProfitDetail(fcfBase float64, adjustRD bool, rdExpansion float64,
 	det.Available = true
 	det.Ratio = round2(fcfBase / profit)
 	det.Profit = profit
-	det.ProfitBasis = basis
 	rdText := "未含研发调整"
 	if adjustRD {
 		rdText = "含研发调整"
-	}
-	basisText := "同期归母净利润"
-	if basis == "reconstructed" {
-		basisText = "同期含少数股东损益的重构净利润"
 	}
 	modeName := valFCFModeNames[mode]
 	if modeName == "" {
 		modeName = "最近一年"
 	}
-	det.Note = fmt.Sprintf("基期 FCF（%s）/ %s；窗口 %d–%d；聚合方式 %s；有效 %d 年。",
-		rdText, basisText, det.WindowStart, det.WindowEnd, modeName, det.Years)
+	det.Note = fmt.Sprintf("基期 FCF（%s）/ 同期重构净利润（含少数股东损益）；窗口 %d–%d；聚合方式 %s；有效 %d 年。",
+		rdText, det.WindowStart, det.WindowEnd, modeName, det.Years)
 	return det
 }
 

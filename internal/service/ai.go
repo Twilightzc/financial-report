@@ -160,12 +160,8 @@ func valuationPromptBlock(rec model.ValuationRecommendation) string {
 			rec.CapexCheck.Ratio, rec.CapexCheck.WindowStart, rec.CapexCheck.WindowEnd))
 	}
 	if rec.FCFProfitCheck.Available {
-		basis := "归母净利润"
-		if rec.FCFProfitCheck.ProfitBasis == "reconstructed" {
-			basis = "重构净利润"
-		}
-		checks = append(checks, fmt.Sprintf("FCF/%s %.2f（%d–%d）",
-			basis, rec.FCFProfitCheck.Ratio, rec.FCFProfitCheck.WindowStart, rec.FCFProfitCheck.WindowEnd))
+		checks = append(checks, fmt.Sprintf("FCF/净利润（重构口径，含少数股东损益） %.2f（%d–%d）",
+			rec.FCFProfitCheck.Ratio, rec.FCFProfitCheck.WindowStart, rec.FCFProfitCheck.WindowEnd))
 	}
 	if len(checks) > 0 {
 		b.WriteString("- 关键校验：" + strings.Join(checks, "；") + "\n")

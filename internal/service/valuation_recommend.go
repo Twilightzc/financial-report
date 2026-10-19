@@ -249,7 +249,7 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	fcfGrowthYears := yearWindow(fcfYears, latest, valGrowthWindowYears)
 	fcfByYear := make(map[int]float64, len(fcfYears))
 	for _, y := range fcfYears {
-		fcfByYear[y] = operatingFreeCashFlow(incomeByYear[y], cfByYear[y])
+		fcfByYear[y] = operatingFreeCashFlow(cfByYear[y])
 	}
 
 	// 周期与成长性判定。
@@ -382,7 +382,7 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 		baseFCF += rdExpand
 	}
 	fcfWindow := effectiveWindow(fcfRec.Mode, usedYears, latest)
-	capexCheck := capexCoverageDetail(cfByYear, incomeByYear, fcfWindow, fcfRec.Mode)
+	capexCheck := capexCoverageDetail(cfByYear, fcfWindow, fcfRec.Mode)
 	// 分子取展示值（round2），保证卡片上的 fcf_base_value 与校验分子完全一致。
 	fcfProfitCheck := fcfProfitDetail(round2(baseFCF), adjustRD, rdExpand, incomeByYear, fcfWindow, fcfRec.Mode)
 	fcfNote := buildFCFNote(fcfRec.Mode, fcfRec.ModeName, fcfWindow, adjustRD, rdExpand, fcfCustomYuan)
@@ -391,7 +391,7 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	fcfSeries := make([]model.FCFYearPoint, 0, len(fcfYears))
 	for _, y := range fcfYears {
 		op := v0(cfByYear[y], "NETCASH_OPERATE")
-		preserve := preservationCapex(incomeByYear[y], cfByYear[y])
+		preserve := maintenanceCapex(cfByYear[y])
 		fcfSeries = append(fcfSeries, model.FCFYearPoint{
 			Year: y, OperatingCash: op, PreservationCapex: preserve, FCF: op - preserve,
 		})

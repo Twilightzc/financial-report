@@ -159,7 +159,7 @@ func ComputeValuation(balance, cashflow, income []model.ReportRow, params model.
 	// 逐年自由现金流（未含研发调整），按基期选取方式汇总。
 	fcfByYear := make(map[int]float64, len(cfYears))
 	for _, y := range cfYears {
-		fcfByYear[y] = operatingFreeCashFlow(incomeByYear[y], cfByYear[y])
+		fcfByYear[y] = operatingFreeCashFlow(cfByYear[y])
 	}
 	fcf, fcfModeName, usedYears, err := selectBaseFCF(fcfByYear, cfYears, params.FCFMode, params.FCFYears, params.FCFCustomValue)
 	if err != nil {
@@ -508,22 +508,7 @@ func dcfThreeStage(fcf, g1, n1, g2, n2, g3, r float64) float64 {
 }
 
 // operatingFreeCashFlow 经营资产自由现金流 = 经营活动现金流量净额 − 保全性资本支出。
-//
-// 保全性资本支出按《公司股票估值》文档近似 = 长期经营资产减值损失 + 信用减值损失 +
-// 固定资产折旧、油气资产折耗、生产性生物资产折旧、使用权资产折旧 + 无形资产摊销 +
-// 长期待摊费用摊销 + 处置长期资产的损失 + 固定资产报废损失。
-// 减值取利润表「资产减值损失 + 信用减值损失」（沿用既有简化：减值全部归经营）；折旧摊销、
-// 处置损失、报废损失取现金流量表补充资料；处置损失仅计损失（收益按 0）。
-func operatingFreeCashFlow(income, cf model.ReportRow) float64 {
-	return v0(cf, "NETCASH_OPERATE") - preservationCapex(income, cf)
-}
-
-// disposalLongAssetLoss 处置长期资产的损失（仅计损失，收益按 0 计）。
-// 现金流量表补充资料 DISPOSAL_LONGASSET_LOSS 为「处置固定资产、无形资产和其他长期资产的损失（收益以"-"号填列）」。
-func disposalLongAssetLoss(cf model.ReportRow) float64 {
-	v := v0(cf, "DISPOSAL_LONGASSET_LOSS")
-	if v < 0 {
-		return 0
-	}
-	return v
+// 保全性资本支出复用 R3 maintenanceCapex（analysis.go），与财务指标分析同口径。
+func operatingFreeCashFlow(cf model.ReportRow) float64 {
+	return v0(cf, "NETCASH_OPERATE") - maintenanceCapex(cf)
 }

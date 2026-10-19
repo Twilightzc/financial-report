@@ -1838,8 +1838,11 @@ func mergerNet(cf model.ReportRow) float64 {
 	return v0(cf, "OBTAIN_SUBSIDIARY_OTHER") - v0(cf, "DISPOSAL_SUBSIDIARY_OTHER")
 }
 
-// maintenanceCapex 保全性资本支出近似值：折旧 + 摊销（含使用权资产摊销）+ 资产减值准备 + 固定资产报废损失。
-// 对应《公司财务指标分析》文档「保全性资本支出」定义，暂用现金流量表补充资料科目近似。
+// maintenanceCapex 保全性资本支出（全项目唯一权威实现，R23）：
+// 折旧摊销（含使用权资产摊销）+ 资产减值准备（现金流量表补充资料）+ 固定资产报废损失。
+// 对应《公司财务指标分析》文档「保全性资本支出」定义，用现金流量表补充资料科目近似。
+// 估值链路（operatingFreeCashFlow / capexCoverageDetail / fcfSeries）必须调用本函数，
+// 不得再用利润表减值损失或处置长期资产损失另写一套。
 func maintenanceCapex(cf model.ReportRow) float64 {
 	return v0(cf, "FA_IR_DEPR") + v0(cf, "IA_AMORTIZE") + v0(cf, "LPE_AMORTIZE") +
 		v0(cf, "USERIGHT_ASSET_AMORTIZE") + v0(cf, "ASSET_IMPAIRMENT") + v0(cf, "FA_SCRAP_LOSS")

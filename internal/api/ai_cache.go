@@ -18,8 +18,8 @@ const (
 	aiCacheTTL = 10 * time.Minute
 	aiCacheMax = 64 // 条目上限，满则先清过期、仍满整体清空
 
-	// aiCacheSchema 结果结构版本：R19 重构后旧缓存（含三档字段）不再复用。
-	aiCacheSchema = "r19"
+	// aiCacheSchema 结果结构版本：R23 起估值关键校验与 FCF 序列口径变化，旧缓存不再复用。
+	aiCacheSchema = "r23"
 )
 
 // aiCacheKey 缓存 key：三个维度均会改变最终分析结果，必须全部参与。
@@ -27,7 +27,7 @@ const (
 // 在计算时确定）与「显式指定 0/0」（rangeOK=true，随后按非法年份返回 400）——两者语义与
 // 结果不同，若共用 key 会互相污染缓存。
 type aiCacheKey struct {
-	Schema         string // 结果结构版本（R19：Schema=r19）
+	Schema         string // 结果结构版本（R23：Schema=r23）
 	Code           string // 6 位股票代码
 	Reasoning      string // low / medium / high（已归一化）
 	StartYear      int
