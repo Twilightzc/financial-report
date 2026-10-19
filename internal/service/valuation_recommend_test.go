@@ -618,30 +618,49 @@ func TestRecommendValuationWithIndustry(t *testing.T) {
 	}
 }
 
-// TestRecommendValuationIndependence 行业类型只影响 β 链，且在相同 industryType 下逐位幂等。
+// TestRecommendValuationIndependence 行业类型影响 β 链；R24 起 cyclical 还改变历史锚增速口径，
+// 因此仅对 β 无关且口径无关的字段做等值断言。同 industryType 下逐位幂等。
 func TestRecommendValuationIndependence(t *testing.T) {
 	balance, cashflow, income := recommendFixture()
-	types := []string{"cyclical", "general", "utility"}
-	var ref model.ValuationRecommendation
-	for i, it := range types {
-		rec := RecommendValuation(ValuationRecommendInput{
+	calc := func(it string) model.ValuationRecommendation {
+		return RecommendValuation(ValuationRecommendInput{
 			Balance: balance, Cashflow: cashflow, Income: income,
 			MarketCap: 100e8, IndustryType: it,
 		})
-		if rec.DiscountRate < valDiscountRateMin || rec.DiscountRate > valDiscountRateMax ||
-			math.Abs(rec.DiscountRate*2-math.Round(rec.DiscountRate*2)) > 1e-9 {
-			t.Errorf("行业 %q 折现率 %v 不在 [8,15] 或非 0.5 整数倍", it, rec.DiscountRate)
+	}
+	general, utility, cyclical := calc("general"), calc("utility"), calc("cyclical")
+	for _, r := range []model.ValuationRecommendation{general, utility, cyclical} {
+		if r.DiscountRate < valDiscountRateMin || r.DiscountRate > valDiscountRateMax ||
+			math.Abs(r.DiscountRate*2-math.Round(r.DiscountRate*2)) > 1e-9 {
+			t.Errorf("行业 %q 折现率 %v 不在 [8,15] 或非 0.5 整数倍", r.IndustryType, r.DiscountRate)
 		}
-		if i == 0 {
-			ref = rec
-			continue
-		}
-		// 增长锚 / FCFMode / AdjustRD 与 β 无关 → 恒等；模型可能因折现率变化触发
-		// 三阶段 g2<r 的降级链而不同，属设计允许的 β 间接影响。
-		if !reflect.DeepEqual(rec.GrowthAnchor, ref.GrowthAnchor) ||
-			rec.FCFMode != ref.FCFMode || rec.AdjustRD != ref.AdjustRD {
-			t.Errorf("行业 %q 的 β 无关字段与 %q 不一致：\n%+v\n%+v", it, types[0], rec, ref)
-		}
+	}
+
+	// general 与 utility 均为非周期，除 β 链外逐字段相等（含历史锚）。
+	if !reflect.DeepEqual(general.GrowthAnchor, utility.GrowthAnchor) ||
+		general.FCFMode != utility.FCFMode || general.AdjustRD != utility.AdjustRD ||
+		general.GrowthHistoryBasis != valHistoryBasisRobustMedian ||
+		utility.GrowthHistoryBasis != valHistoryBasisRobustMedian ||
+		general.GrowthHistoryNote != "" || utility.GrowthHistoryNote != "" {
+		t.Errorf("general 与 utility 的 β/口径无关字段不一致：\n%+v\n%+v", general, utility)
+	}
+
+	// cyclical 走 CAGR 口径；营收/净利润同比恒 20%，CAGR 与中位数同值；FCF 两种口径略有差异，
+	// 但 0.5pp 取整后 GrowthAnchor.Final 与 general 相同，故不再整体 DeepEqual 增长锚。
+	if cyclical.GrowthHistoryBasis != valHistoryBasisCyclicalCAGR {
+		t.Errorf("cyclical 历史锚口径应为 %s，实际 %q", valHistoryBasisCyclicalCAGR, cyclical.GrowthHistoryBasis)
+	}
+	if !approxEq(cyclical.GrowthRevenue, general.GrowthRevenue, 1e-9) ||
+		!approxEq(cyclical.GrowthProfit, general.GrowthProfit, 1e-9) {
+		t.Errorf("cyclical 营收/净利润增速应与 general 相同：%v/%v vs %v/%v",
+			cyclical.GrowthRevenue, cyclical.GrowthProfit, general.GrowthRevenue, general.GrowthProfit)
+	}
+	if cyclical.FCFMode != general.FCFMode || cyclical.AdjustRD != general.AdjustRD {
+		t.Errorf("cyclical 的 FCFMode/AdjustRD 应与 general 相同：%+v", cyclical)
+	}
+	if cyclical.GrowthAnchor.Final != general.GrowthAnchor.Final {
+		t.Errorf("cyclical 复合锚 A = %v，应与 general 的 %v 相同（0.5pp 取整吸收 FCF 口径差异）",
+			cyclical.GrowthAnchor.Final, general.GrowthAnchor.Final)
 	}
 	// 同行业类型连调 3 次逐字段相同。
 	input := ValuationRecommendInput{

@@ -237,40 +237,46 @@ func TestAssessFCFGrowthReliability(t *testing.T) {
 	lumpy := map[int]float64{2021: 0.5e8, 2022: 1.0e8, 2023: 2.5e8, 2024: -1.77e8, 2025: 10.94e8}
 
 	// 原始强周期 → 未计入，原因含「序列波动」。
-	term := assessFCFGrowth(lumpy, years, true, fcfCycle{Evaluated: true, RawCyclical: true, CV: 1.61, SignChanges: 2})
+	term := assessFCFGrowth(lumpy, years, true, fcfCycle{Evaluated: true, RawCyclical: true, CV: 1.61, SignChanges: 2}, false)
 	if !term.Available || term.Included || !strings.Contains(term.Reason, "序列波动") {
 		t.Errorf("原始强周期应剔除 FCF：%+v", term)
 	}
 
 	// 稳定序列 → 计入。
 	stable := map[int]float64{2021: 100, 2022: 110, 2023: 121, 2024: 133.1, 2025: 146.41}
-	term = assessFCFGrowth(stable, years, true, fcfCycle{Evaluated: true})
+	term = assessFCFGrowth(stable, years, true, fcfCycle{Evaluated: true}, false)
 	if !term.Included || term.Reason != "" || !approxEq(term.Value, 10, 1e-9) {
 		t.Errorf("稳定序列应计入 FCF：%+v", term)
 	}
 
+	// R24：周期股口径走全窗口 CAGR（稳定序列与中位数同值）。
+	term = assessFCFGrowth(stable, years, true, fcfCycle{Evaluated: true}, true)
+	if !term.Available || !term.Included || term.Basis != growthBasisCAGR || !approxEq(term.Value, 10, 1e-9) {
+		t.Errorf("周期股 FCF 应使用 CAGR：%+v", term)
+	}
+
 	// 仅 1 个有效同比点 → 未计入。
 	onePoint := map[int]float64{2023: 1e8, 2024: 2e8}
-	term = assessFCFGrowth(onePoint, []int{2023, 2024}, true, fcfCycle{})
+	term = assessFCFGrowth(onePoint, []int{2023, 2024}, true, fcfCycle{}, false)
 	if !term.Available || term.Included || !strings.Contains(term.Reason, "有效同比点不足") {
 		t.Errorf("单点同比应剔除 FCF：%+v", term)
 	}
 
 	// 增速极差 > 40pp → 未计入。
 	spreadOut := map[int]float64{2021: 1e8, 2022: 2e8, 2023: 10e8, 2024: 12e8}
-	term = assessFCFGrowth(spreadOut, []int{2021, 2022, 2023, 2024}, true, fcfCycle{})
+	term = assessFCFGrowth(spreadOut, []int{2021, 2022, 2023, 2024}, true, fcfCycle{}, false)
 	if term.Included || !strings.Contains(term.Reason, "极差") {
 		t.Errorf("增速极差过大应剔除 FCF：%+v", term)
 	}
 
 	// 仅 FCF 可用且不稳定 → 仍计入（避免 k=0）。
-	term = assessFCFGrowth(lumpy, years, false, fcfCycle{Evaluated: true, RawCyclical: true, CV: 1.61, SignChanges: 2})
+	term = assessFCFGrowth(lumpy, years, false, fcfCycle{Evaluated: true, RawCyclical: true, CV: 1.61, SignChanges: 2}, false)
 	if !term.Available || !term.Included || term.Reason != "" {
 		t.Errorf("FCF 是唯一可用分项时应保留：%+v", term)
 	}
 
 	// FCF 不可用 → Available=false、Included=false（计入 missing，而不是 excluded）。
-	term = assessFCFGrowth(map[int]float64{2024: 1e8}, []int{2024}, true, fcfCycle{})
+	term = assessFCFGrowth(map[int]float64{2024: 1e8}, []int{2024}, true, fcfCycle{}, false)
 	if term.Available || term.Included || term.Reason != "" {
 		t.Errorf("FCF 不可用时不应产出增速/原因：%+v", term)
 	}
@@ -343,6 +349,11 @@ func TestRecommendValuationGrowthCompany(t *testing.T) {
 	if rec.GrowthDispersion <= 0 {
 		t.Errorf("净利润下行 12%% 时离散度应 >0，实际 %v", rec.GrowthDispersion)
 	}
+	// R24：非周期股历史锚口径与说明不变。
+	if rec.GrowthHistoryBasis != valHistoryBasisRobustMedian || rec.GrowthHistoryNote != "" {
+		t.Errorf("非周期股应为 %s 且无说明：basis=%q note=%q",
+			valHistoryBasisRobustMedian, rec.GrowthHistoryBasis, rec.GrowthHistoryNote)
+	}
 }
 
 // U8：真周期股不被成长性否决，仍走 trim_mean + 10 年。
@@ -362,9 +373,20 @@ func TestRecommendValuationCyclical(t *testing.T) {
 	if !rec.GrowthFCFOK {
 		t.Errorf("周期股 FCF 增速应可算：ok=%v value=%v", rec.GrowthFCFOK, rec.GrowthFCF)
 	}
-	// 强周期 FCF 不计入历史锚 → 历史锚基数 = 营收/净利润两项等权均值。
+	// R24：周期股 7 年 CAGR；FCF 原始强周期仍剔除 → 历史锚由营收/净利润两项等权。
 	if want := round2((rec.GrowthRevenue + rec.GrowthProfit) / 2); !approxEq(rec.GrowthHistoryBase, want, 0.01) {
 		t.Errorf("历史锚基数应为营收/净利润两项均值 %.2f，实际 %.2f", want, rec.GrowthHistoryBase)
+	}
+	if !approxEq(rec.GrowthRevenue, -4.24, 0.02) || !approxEq(rec.GrowthProfit, -2.41, 0.02) ||
+		!approxEq(rec.GrowthHistoryBase, -3.32, 0.02) {
+		t.Errorf("周期股应按 2019–2025 年 CAGR：rev=%v np=%v base=%v",
+			rec.GrowthRevenue, rec.GrowthProfit, rec.GrowthHistoryBase)
+	}
+	if rec.GrowthHistoryBasis != valHistoryBasisCyclicalCAGR {
+		t.Errorf("周期股历史锚口径应为 %s，实际 %q", valHistoryBasisCyclicalCAGR, rec.GrowthHistoryBasis)
+	}
+	if !strings.Contains(rec.GrowthHistoryNote, "2019–2025") || !strings.Contains(rec.GrowthHistoryNote, "复合增速") {
+		t.Errorf("周期股应输出窗口口径说明，实际 %q", rec.GrowthHistoryNote)
 	}
 }
 
@@ -387,6 +409,11 @@ func TestRecommendValuationStableUnaffected(t *testing.T) {
 	}
 	if rec.Model == valModelZero {
 		t.Errorf("稳定增长公司不应落到零增长：%+v", rec)
+	}
+	// R24：非周期股历史锚口径与说明不变。
+	if rec.GrowthHistoryBasis != valHistoryBasisRobustMedian || rec.GrowthHistoryNote != "" {
+		t.Errorf("非周期股应为 %s 且无说明：basis=%q note=%q",
+			valHistoryBasisRobustMedian, rec.GrowthHistoryBasis, rec.GrowthHistoryNote)
 	}
 }
 

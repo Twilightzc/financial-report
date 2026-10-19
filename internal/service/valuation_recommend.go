@@ -74,6 +74,19 @@ const (
 
 	valFCFCustomGrowthCap = 15.0
 	valFCFGrowthMinPoints = 2
+
+	// R24：周期股历史锚 CAGR 窗口（用户锁定；与周期位置窗口 r18CycleMaxWindowYears 解耦）。
+	valCyclicalCAGRWindowYears = 7
+)
+
+// 增速口径标签与历史锚口径枚举（R24）。
+const (
+	growthBasisMedian = "同比去极值中位数"
+	growthBasisCAGR   = "CAGR"
+
+	valHistoryBasisCyclicalCAGR  = "cyclical_cagr"
+	valHistoryBasisCyclicalMixed = "cyclical_mixed"
+	valHistoryBasisRobustMedian  = "robust_median"
 )
 
 // FCF 周期识别与动态窗口。
@@ -252,16 +265,50 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 		fcfByYear[y] = operatingFreeCashFlow(cfByYear[y])
 	}
 
-	// 周期与成长性判定。
+	// 周期与成长性判定（判定输入窗口不变，保证 isCyclical/pos/delta 与移动前一致）。
 	gp := assessGrowthPattern(incomeByYear, incomeWindow)
 	cycle := detectFCFCycle(fcfByYear, fcfYears, gp)
 
+	// R24：完整周期判定前置；历史锚、pos、delta、负增长归因共用同一个 isCyclical。
+	cycleWindow := yearWindow(incomeYears, latest, r18CycleMaxWindowYears)
+	profitCycle := detectProfitCycleDetail(incomeByYear, cycleWindow, gp)
+	isCyclical, _ := detectCyclical(input.IndustryType, cycle, gp, profitCycle.Hit)
+	pos, posLabel, _, posWarn := 0.0, "中位", "", ""
+	if r18CyclePositionEnabled {
+		pos, posLabel, _, posWarn = computeCyclePosition(incomeByYear, cycleWindow, isCyclical, gp)
+	}
+	delta := 0.0
+	if r18CyclePositionEnabled && isCyclical && !gp.Veto {
+		delta = cycleAdjustment(pos)
+	}
+
+	// R24：历史锚窗口。周期股取最近 ≤7 个年报 CAGR，非周期保持 5 年同比中位数。
+	historyWindow := incomeWindow
+	fcfHistoryYears := fcfGrowthYears
+	if isCyclical {
+		historyWindow = yearWindow(incomeYears, latest, valCyclicalCAGRWindowYears)
+		fcfHistoryYears = yearWindow(fcfYears, latest, valCyclicalCAGRWindowYears)
+	}
+
 	// 历史锚：营收 / 重构净利润 / FCF 稳健增速等权。
-	xRev, _, okRev := rowSeriesGrowth(incomeByYear, incomeWindow, revenue)
-	xNP, _, okNP := rowSeriesGrowth(incomeByYear, incomeWindow, netProfitReconstructed)
-	fcfTerm := assessFCFGrowth(fcfByYear, fcfGrowthYears, okRev || okNP, cycle)
+	xRev, basisRev, okRev := rowSeriesGrowth(incomeByYear, historyWindow, revenue, isCyclical)
+	xNP, basisNP, okNP := rowSeriesGrowth(incomeByYear, historyWindow, netProfitReconstructed, isCyclical)
+	fcfTerm := assessFCFGrowth(fcfByYear, fcfHistoryYears, okRev || okNP, cycle, isCyclical)
 	x, k := weightedGrowth(xRev, okRev, xNP, okNP, fcfTerm.Value, fcfTerm.Included)
 	histOK := k > 0
+
+	includedBases := make([]string, 0, 3)
+	if okRev {
+		includedBases = append(includedBases, basisRev)
+	}
+	if okNP {
+		includedBases = append(includedBases, basisNP)
+	}
+	if fcfTerm.Included {
+		includedBases = append(includedBases, fcfTerm.Basis)
+	}
+	historyBasis := resolveHistoryBasis(isCyclical, histOK, includedBases)
+	historyNote := historyBasisNote(historyBasis, historyWindow, fcfHistoryYears)
 
 	// 波动与稳定性信号。
 	revYoY := rowYoY(incomeByYear, incomeWindow, revenue)
@@ -294,19 +341,6 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 	// 折现率：CAPM + WACC + 取整/区间对账。
 	discount := valuationDiscount(balanceByYear, incomeByYear, latest,
 		input.IndustryType, input.MarketCap, riskPremium, fallbackCyclical)
-
-	// 周期位置与负增长归因。
-	cycleWindow := yearWindow(incomeYears, latest, r18CycleMaxWindowYears)
-	profitCycle := detectProfitCycleDetail(incomeByYear, cycleWindow, gp)
-	isCyclical, _ := detectCyclical(input.IndustryType, cycle, gp, profitCycle.Hit)
-	pos, posLabel, _, posWarn := 0.0, "中位", "", ""
-	if r18CyclePositionEnabled {
-		pos, posLabel, _, posWarn = computeCyclePosition(incomeByYear, cycleWindow, isCyclical, gp)
-	}
-	delta := 0.0
-	if r18CyclePositionEnabled && isCyclical && !gp.Veto {
-		delta = cycleAdjustment(pos)
-	}
 
 	// 宏观锚 / 前瞻锚 / 复合锚构成表。
 	macro := resolveMacroAnchor(input.Snapshot.GDP)
@@ -503,8 +537,10 @@ func RecommendValuation(input ValuationRecommendInput) model.ValuationRecommenda
 		IndustryType: discount.IndustryType, IndustryTypeName: discount.IndustryTypeName,
 
 		GrowthAnchor: anchor, GrowthHistoryBase: growthHistoryBase,
-		GrowthHistoryAdjusted: growthHistoryAdjusted, GrowthCycleAdjust: round1(delta),
-		GrowthCycleNote: cycleNote, GrowthForward: growthForward, GrowthForwardOK: fwd.Available,
+		GrowthHistoryAdjusted: growthHistoryAdjusted,
+		GrowthHistoryBasis:    historyBasis, GrowthHistoryNote: historyNote,
+		GrowthCycleAdjust: round1(delta),
+		GrowthCycleNote:   cycleNote, GrowthForward: growthForward, GrowthForwardOK: fwd.Available,
 		GrowthMacro: round2(macro.Value), GrowthMacroBasis: macro.Basis, GDPAsOf: macro.AsOf,
 		ConsensusAsOf: fwd.AsOf, ConsensusInstitutions: fwd.Institutions, ConsensusYears: fwd.Years,
 		ConsensusReliability: fwd.Reliability,
@@ -611,33 +647,107 @@ func indicatorGrowth(years []int, values []float64) (value float64, basis string
 		if len(gs) >= 4 {
 			sorted := append([]float64(nil), gs...)
 			sort.Float64s(sorted)
-			return medianOf(sorted[1 : len(sorted)-1]), "同比去极值中位数", true
+			return medianOf(sorted[1 : len(sorted)-1]), growthBasisMedian, true
 		}
-		return medianOf(gs), "同比去极值中位数", true
+		return medianOf(gs), growthBasisMedian, true
 	}
 	first, last := values[0], values[len(values)-1]
 	span := years[len(years)-1] - years[0]
 	if first > 0 && last > 0 && span > 0 {
 		v := (math.Pow(last/first, 1/float64(span)) - 1) * 100
-		return v, "CAGR", true
+		return v, growthBasisCAGR, true
 	}
 	return 0, "", false
 }
 
-func rowSeriesGrowth(byYear map[int]model.ReportRow, years []int, value func(model.ReportRow) float64) (float64, string, bool) {
+// windowCAGR 窗口首末年度复合增速（%）。
+// 要求 years 升序、与 values 等长；首值/末值必须为正，跨度必须为正。
+func windowCAGR(years []int, values []float64) (float64, bool) {
+	if len(years) < valGrowthMinSamples || len(values) != len(years) {
+		return 0, false
+	}
+	first, last := values[0], values[len(values)-1]
+	span := years[len(years)-1] - years[0]
+	if first <= 0 || last <= 0 || span <= 0 {
+		return 0, false
+	}
+	v := (math.Pow(last/first, 1/float64(span)) - 1) * 100
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	return v, true
+}
+
+// historyGrowth 历史锚单指标增速。
+// 非周期股：完全沿用 indicatorGrowth（同比去极值中位数优先）。
+// 周期股：优先窗口首末 CAGR；CAGR 无定义时回退 indicatorGrowth（有效同比点 → 中位数）。
+func historyGrowth(years []int, values []float64, cyclical bool) (value float64, basis string, ok bool) {
+	if !cyclical {
+		return indicatorGrowth(years, values)
+	}
+	if v, okC := windowCAGR(years, values); okC {
+		return v, growthBasisCAGR, true
+	}
+	return indicatorGrowth(years, values)
+}
+
+// resolveHistoryBasis 历史锚口径枚举（只统计实际计入的分项）。
+func resolveHistoryBasis(isCyclical, histOK bool, included []string) string {
+	if !histOK {
+		return ""
+	}
+	if !isCyclical {
+		return valHistoryBasisRobustMedian
+	}
+	for _, b := range included {
+		if b != growthBasisCAGR {
+			return valHistoryBasisCyclicalMixed
+		}
+	}
+	return valHistoryBasisCyclicalCAGR
+}
+
+// historyBasisNote 生成一句弱化说明；非周期/不可用返回空串。
+func historyBasisNote(basis string, historyWindow, fcfWindow []int) string {
+	years := historyWindow
+	if len(years) < 2 {
+		years = fcfWindow
+	}
+	span := ""
+	if len(years) >= 2 {
+		span = fmt.Sprintf("%d–%d 年", years[0], years[len(years)-1])
+	}
+	switch basis {
+	case valHistoryBasisCyclicalCAGR:
+		if span == "" {
+			return "周期股历史锚按窗口复合增速计算。"
+		}
+		return fmt.Sprintf("周期股历史锚按 %s复合增速计算。", span)
+	case valHistoryBasisCyclicalMixed:
+		if span == "" {
+			return "周期股历史锚部分分项因首末值非正改用同比中位数。"
+		}
+		return fmt.Sprintf("周期股历史锚按 %s窗口计算，首末值非正的分项改用同比中位数。", span)
+	default:
+		return ""
+	}
+}
+
+func rowSeriesGrowth(byYear map[int]model.ReportRow, years []int,
+	value func(model.ReportRow) float64, cyclical bool) (float64, string, bool) {
 	vals := make([]float64, len(years))
 	for i, y := range years {
 		vals[i] = value(byYear[y])
 	}
-	return indicatorGrowth(years, vals)
+	return historyGrowth(years, vals, cyclical)
 }
 
-func fcfSeriesGrowth(fcfByYear map[int]float64, years []int) (float64, string, bool) {
+func fcfSeriesGrowth(fcfByYear map[int]float64, years []int, cyclical bool) (float64, string, bool) {
 	vals := make([]float64, len(years))
 	for i, y := range years {
 		vals[i] = fcfByYear[y]
 	}
-	return indicatorGrowth(years, vals)
+	return historyGrowth(years, vals, cyclical)
 }
 
 func rowYoY(byYear map[int]model.ReportRow, years []int, value func(model.ReportRow) float64) []float64 {
@@ -952,8 +1062,10 @@ func assessGrowthPattern(incomeByYear map[int]model.ReportRow, years []int) grow
 }
 
 // assessFCFGrowth 计算 FCF 增速并判定是否计入 X。
-func assessFCFGrowth(fcfByYear map[int]float64, years []int, otherAvailable bool, cycle fcfCycle) fcfGrowthTerm {
-	v, basis, ok := fcfSeriesGrowth(fcfByYear, years)
+// R24：增速口径随周期股切换（计入时与营收/净利润同为 CAGR），剔除规则不变。
+func assessFCFGrowth(fcfByYear map[int]float64, years []int,
+	otherAvailable bool, cycle fcfCycle, cyclical bool) fcfGrowthTerm {
+	v, basis, ok := fcfSeriesGrowth(fcfByYear, years, cyclical)
 	t := fcfGrowthTerm{Value: v, Basis: basis, Available: ok, Included: ok}
 	if !ok || !otherAvailable {
 		return t

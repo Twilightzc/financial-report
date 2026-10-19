@@ -166,9 +166,11 @@ type AIValuation struct {
 
 	// 四、增长参数
 	GrowthAnchor           GrowthAnchorTable `json:"growth_anchor"`
-	GrowthHistoryBase      float64           `json:"growth_history_base"`     // 历史锚周期修正前，%
-	GrowthHistoryAdjusted  float64           `json:"growth_history_adjusted"` // 历史锚周期修正后，%
-	GrowthCycleAdjust      float64           `json:"growth_cycle_adjust"`     // pp，1 位小数
+	GrowthHistoryBase      float64           `json:"growth_history_base"`            // 历史锚周期修正前，%
+	GrowthHistoryAdjusted  float64           `json:"growth_history_adjusted"`        // 历史锚周期修正后，%
+	GrowthHistoryBasis     string            `json:"growth_history_basis,omitempty"` // R24：口径枚举 cyclical_cagr/cyclical_mixed/robust_median
+	GrowthHistoryNote      string            `json:"growth_history_note,omitempty"`  // R24：一句说明；非周期/不可用省略
+	GrowthCycleAdjust      float64           `json:"growth_cycle_adjust"`            // pp，1 位小数
 	GrowthCycleNote        string            `json:"growth_cycle_note,omitempty"`
 	GrowthForward          float64           `json:"growth_forward"`            // %；不可用为 0
 	GrowthForwardAvailable bool              `json:"growth_forward_available"`  // 前瞻锚是否可用
@@ -249,6 +251,8 @@ type ValuationRecommendation struct {
 	GrowthAnchor          GrowthAnchorTable
 	GrowthHistoryBase     float64
 	GrowthHistoryAdjusted float64
+	GrowthHistoryBasis    string // R24：cyclical_cagr/cyclical_mixed/robust_median；历史锚不可用时为空
+	GrowthHistoryNote     string // R24：一句弱化说明；非周期或不可用为空
 	GrowthCycleAdjust     float64
 	GrowthCycleNote       string
 	GrowthForward         float64

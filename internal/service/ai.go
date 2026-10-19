@@ -791,6 +791,8 @@ func ApplyValuationRecommendation(r *model.AIAnalysisResult, rec model.Valuation
 		GrowthAnchor:          rec.GrowthAnchor,
 		GrowthHistoryBase:     round2(rec.GrowthHistoryBase),
 		GrowthHistoryAdjusted: round2(rec.GrowthHistoryAdjusted),
+		GrowthHistoryBasis:    rec.GrowthHistoryBasis,
+		GrowthHistoryNote:     rec.GrowthHistoryNote,
 		GrowthCycleAdjust:     round1(rec.GrowthCycleAdjust), GrowthCycleNote: rec.GrowthCycleNote,
 		GrowthForward: round2(rec.GrowthForward), GrowthForwardAvailable: rec.GrowthForwardOK,
 		GrowthMacro: round2(rec.GrowthMacro), GrowthMacroBasis: rec.GrowthMacroBasis,

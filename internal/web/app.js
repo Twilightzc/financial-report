@@ -2760,6 +2760,7 @@ const app = createApp({
                           </table>
                           <div class="ai-v ai-val-reconcile" v-if="anchorReconcile(aiResult.valuation)">{{ anchorReconcile(aiResult.valuation) }}</div>
                           <div class="ai-v ai-val-muted" v-if="anchorTable(aiResult.valuation).note">{{ anchorTable(aiResult.valuation).note }}</div>
+                          <div class="ai-v ai-val-muted" v-if="aiResult.valuation.growth_history_note">{{ aiResult.valuation.growth_history_note }}</div>
                           <div class="ai-v ai-val-muted" v-if="aiResult.valuation.growth_cycle_note">{{ aiResult.valuation.growth_cycle_note }}</div>
                           <div class="ai-v ai-val-muted" v-if="aiResult.valuation.g1_note">{{ aiResult.valuation.g1_note }}</div>
                           <div class="ai-v ai-val-muted" v-if="aiResult.valuation.terminal_note">{{ aiResult.valuation.terminal_note }}</div>
