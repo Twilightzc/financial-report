@@ -55,7 +55,7 @@ func p5GrowthFixture() (balance, cashflow, income []model.ReportRow) {
 }
 
 // p5CyclicalFixture 中远海控 601919 的结构：营收最小同比 -55.13%、毛利率极差 27.9pp（真周期），
-// FCF 10 年窗口 CV>0.5 且全为正（trim_mean 可算）。
+// FCF 10 年窗口 CV>0.5 且全为正（trim_mean 可算）；R25 起基期 FCF 取最近 5 年。
 func p5CyclicalFixture() (balance, cashflow, income []model.ReportRow) {
 	years := []int{2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025}
 	rev := map[int]float64{
@@ -356,7 +356,7 @@ func TestRecommendValuationGrowthCompany(t *testing.T) {
 	}
 }
 
-// U8：真周期股不被成长性否决，仍走 trim_mean + 10 年。
+// U8：真周期股不被成长性否决，仍走 trim_mean；R25 起窗口为 3/5 年（本 fixture 非加速 → 5 年）。
 func TestRecommendValuationCyclical(t *testing.T) {
 	balance, cashflow, income := p5CyclicalFixture()
 	rec := RecommendValuation(ValuationRecommendInput{
@@ -366,9 +366,16 @@ func TestRecommendValuationCyclical(t *testing.T) {
 	if !rec.FCFCyclical {
 		t.Errorf("中远海控型真周期股应判周期：CV=%v 翻转=%d", rec.FCFCV, rec.FCFSignChanges)
 	}
-	if rec.FCFMode != valFCFTrimMean || rec.FCFYears != valFCFYearsCyclical {
+	// R25：周期股非加速（latest 0.8 < prev 7.5）→ 5 年 trim_mean；近 5 年 [1.0,9.0,0.2,7.5,0.8] 去极值平均 = 3.1 亿。
+	if rec.FCFMode != valFCFTrimMean || rec.FCFYears != valFCFRecoveryYears {
 		t.Errorf("真周期股应取 %d 年 trim_mean：mode=%s years=%d",
-			valFCFYearsCyclical, rec.FCFMode, rec.FCFYears)
+			valFCFRecoveryYears, rec.FCFMode, rec.FCFYears)
+	}
+	if !approxEq(rec.FCFBaseValue, 3.1e8, 1e6) {
+		t.Errorf("周期股基期 FCF 应为 3.1 亿，实际 %v", rec.FCFBaseValue)
+	}
+	if rec.FCFWindowStart != 2021 || rec.FCFWindowEnd != 2025 {
+		t.Errorf("周期股选取窗口应为 2021–2025，实际 %d–%d", rec.FCFWindowStart, rec.FCFWindowEnd)
 	}
 	if !rec.GrowthFCFOK {
 		t.Errorf("周期股 FCF 增速应可算：ok=%v value=%v", rec.GrowthFCFOK, rec.GrowthFCF)

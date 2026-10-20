@@ -210,7 +210,7 @@ func TestRecommendBaseFCFDeterministic(t *testing.T) {
 	}
 }
 
-// TestRecommendBaseFCFDynamicWindow G9：窗口按 FCF 周期动态取 3/5/10 年，且不超过可用年数。
+// TestRecommendBaseFCFDynamicWindow G9：窗口按 FCF 周期动态取 3/5 年（R25 封顶），且不超过可用年数。
 func TestRecommendBaseFCFDynamicWindow(t *testing.T) {
 	years := []int{2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024}
 	fcf := make(map[int]float64, len(years))
@@ -227,17 +227,17 @@ func TestRecommendBaseFCFDynamicWindow(t *testing.T) {
 	if got := RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, CV: 0.4, WindowYears: 8}); got.Mode != valFCFLatest {
 		t.Errorf("中等波动 + 单调增应命中 latest，实际 %+v", got)
 	}
-	// 强周期 → 10 年，且强制去极值平均。
+	// R25：强周期 + 复苏加速（latest 109 > prev 108 > positiveMedian5 107）→ 3 年去极值平均。
 	got = RecommendBaseFCF(fcf, years, fcfCycle{Evaluated: true, Cyclical: true, CV: 0.6, WindowYears: 8})
-	if got.Mode != valFCFTrimMean || got.Years != valFCFYearsCyclical {
-		t.Errorf("强周期应取 %d 年去极值平均，实际 %+v", valFCFYearsCyclical, got)
+	if got.Mode != valFCFTrimMean || got.Years != valFCFRecoveryAccelYears {
+		t.Errorf("强周期+复苏加速应取 %d 年去极值平均，实际 %+v", valFCFRecoveryAccelYears, got)
 	}
 
-	// 可用年数不足窗口时按可用年数：6 年且不可判定 → m=6。
+	// R25：全局封顶 5 年——6 年且不可判定 → m=5。
 	short := []int{2019, 2020, 2021, 2022, 2023, 2024}
 	same := map[int]float64{2019: 1.1e8, 2020: 1.2e8, 2021: 1.1e8, 2022: 1.2e8, 2023: 1.1e8, 2024: 1.2e8}
-	if got := RecommendBaseFCF(same, short, fcfCycle{}); got.Mode != valFCFAverage || got.Years != 6 {
-		t.Errorf("6 年可用时应取 6 年，实际 %+v", got)
+	if got := RecommendBaseFCF(same, short, fcfCycle{}); got.Mode != valFCFAverage || got.Years != valFCFAutoMaxYears {
+		t.Errorf("6 年可用时应封顶为 %d 年，实际 %+v", valFCFAutoMaxYears, got)
 	}
 }
 

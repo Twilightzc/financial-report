@@ -27,6 +27,13 @@ const (
 	valFCFRecMinYears = 3
 	valFCFHighRatio   = 1.3
 	valFCFLowRatio    = 0.7
+
+	// R25：自动选取窗口上限、复苏门与 RF 收缩窗口（用户锁定 Q1–Q7）。
+	valFCFAutoMaxYears       = 5 // 自动推荐多年度窗口全局上限（FR-1）
+	valFCFRecoveryYears      = 5 // 周期/复苏默认窗口（FR-2）
+	valFCFRecoveryAccelYears = 3 // 复苏加速窗口（FR-2）
+	valFCFRecoveryLookback   = 5 // 复苏门/加速判定的近期窗口（mean5 / positiveMedian5）
+	valFCFRFNonPositiveYears = 2 // 5 年窗口内非正年数达到该值 → RF 收缩到 3 年（FR-4）
 )
 
 // CAPM / WACC 常量。
@@ -840,37 +847,63 @@ func RecommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fc
 }
 
 // recommendBaseFCF 按序命中的规则主体。
+// R25：周期/复苏 3–5 年自适应 trim_mean；自动多年度窗口全局封顶 5 年；
+// RF 取近期中位数；多年度结果为非正且最近一年为正时退回最近一年。
 func recommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fcfRecommendation {
 	available := len(years)
 	if available == 0 {
 		return fcfRecLatest("无可用经营自由现金流数据，退回最近一年。")
 	}
+	latest := fcfByYear[years[available-1]]
+
+	// R25 FR-2/FR-3：周期股与深亏后复苏共用 3/5 年自适应 trim_mean。
+	// 复苏门只读 FCF 序列，不写回 cycle（Q1）；mean10<=0 与 cycle.Evaluated=true 互斥，
+	// 因此稳定/温和/成长否决路径不会进入本分支（FR-8 零回归）。
+	if cycle.Cyclical || fcfRecoveryEligible(fcfByYear, years) {
+		n := fcfRecoveryWindowYears(fcfByYear, years)
+		if n > available {
+			n = available
+		}
+		if n < valFCFRecMinYears {
+			return fcfRecLatest("可用年度不足，退回最近一年。")
+		}
+		win, vals := fcfRecentWindow(fcfByYear, years, n)
+		if allNonPositive(vals) {
+			return fcfRecLatest("近年经营自由现金流均为非正，退回最近一年。")
+		}
+		if trim := trimMeanOf(vals); trim > 0 {
+			rationale := fmt.Sprintf("近 %d 年去极值平均。", len(win))
+			if len(win) == valFCFRecoveryAccelYears {
+				rationale = "近 3 年复苏窗口去极值平均。"
+			}
+			return fcfRecommendation{
+				Mode: valFCFTrimMean, ModeName: valFCFModeNames[valFCFTrimMean], Years: len(win),
+				Rationale: rationale,
+			}
+		}
+		// FR-2：trimMean<=0 时一律退回最近一年，不再落入通用多年度规则。
+		if latest > 0 {
+			return fcfRecLatest("多年度结果非正，退回最近一年。")
+		}
+		return fcfRecLatest("最近一年经营自由现金流为非正，退回最近一年。")
+	}
+
+	// R25 FR-1：自动多年度窗口全局封顶 5 年；fcfWindowYears 的 10 年只作名义上界。
 	m := available
 	if w := fcfWindowYears(cycle); w < m {
 		m = w
 	}
-	win := years[available-m:]
-	vals := make([]float64, m)
-	for i, y := range win {
-		vals[i] = fcfByYear[y]
+	if m > valFCFAutoMaxYears {
+		m = valFCFAutoMaxYears
 	}
-
 	if m < valFCFRecMinYears {
 		return fcfRecLatest("可用年度不足，退回最近一年。")
 	}
+	win, vals := fcfRecentWindow(fcfByYear, years, m)
 	if allNonPositive(vals) {
 		return fcfRecLatest("近年经营自由现金流均为非正，退回最近一年。")
 	}
-	if cycle.Cyclical {
-		if trim := trimMeanOf(vals); trim > 0 {
-			return fcfRecommendation{
-				Mode: valFCFTrimMean, ModeName: valFCFModeNames[valFCFTrimMean], Years: m,
-				Rationale: "近年在完整周期内取去极值平均。",
-			}
-		}
-	}
 
-	latest := vals[m-1]
 	median := medianOf(vals)
 	if latest <= 0 {
 		return fcfRecLatest("最近一年经营自由现金流为非正，退回最近一年。")
@@ -896,25 +929,38 @@ func recommendBaseFCF(fcfByYear map[int]float64, years []int, cycle fcfCycle) fc
 				Rationale: "最近一年明显高于多年中枢，按可持续中枢下调。",
 			}
 		}
-		return fcfRecMedian(win, "可持续中枢不足 1 亿元，退回中位数。")
+		return fcfRecMultiYearGuard(fcfRecMedian(win, "可持续中枢不足 1 亿元，退回中位数。"), fcfByYear, years)
 	}
 
 	if monotoneDown(vals) {
 		return fcfRecLatest("经营自由现金流逐年下滑，取最近一年。")
 	}
 	if latest < valFCFLowRatio*median {
-		return fcfRecMedian(win, "最近一年明显低于多年中枢，取中位数。")
+		return fcfRecMultiYearGuard(fcfRecMedian(win, "最近一年明显低于多年中枢，取中位数。"), fcfByYear, years)
 	}
 	if gSpread > valFCFGrowthSpread {
-		return withCycleNote(fcfRecMedian(win, "增速波动较大，取中位数。"), cycle)
+		// R25 FR-4：RF 只缩短、不拉长窗口；仅 5 年窗口且非正年数 ≥2 时收缩到 3 年。
+		n := m
+		if n == valFCFAutoMaxYears {
+			_, rfVals := fcfRecentWindow(fcfByYear, years, valFCFAutoMaxYears)
+			if countNonPositive(rfVals) >= valFCFRFNonPositiveYears {
+				n = valFCFRecoveryAccelYears
+			}
+		}
+		if n < valFCFRecMinYears {
+			return fcfRecLatest("可用年度不足，退回最近一年。")
+		}
+		rfWin, _ := fcfRecentWindow(fcfByYear, years, n)
+		rec := fcfRecMedian(rfWin, fmt.Sprintf("增速波动较大，取近 %d 年中位数。", n))
+		return fcfRecMultiYearGuard(rec, fcfByYear, years)
 	}
 	if cycle.CV > valFCVMildThreshold || cycle.SignChanges >= 1 {
-		return withCycleNote(fcfRecMedian(win, "波动较大，取中位数。"), cycle)
+		return fcfRecMultiYearGuard(withCycleNote(fcfRecMedian(win, "波动较大，取中位数。"), cycle), fcfByYear, years)
 	}
-	return withCycleNote(fcfRecommendation{
+	return fcfRecMultiYearGuard(withCycleNote(fcfRecommendation{
 		Mode: valFCFAverage, ModeName: valFCFModeNames[valFCFAverage], Years: m,
 		Rationale: "近年现金流总体平稳，取平均值。",
-	}, cycle)
+	}, cycle), fcfByYear, years)
 }
 
 func withCycleNote(rec fcfRecommendation, cycle fcfCycle) fcfRecommendation { return rec }
@@ -938,6 +984,111 @@ func fcfGrowthPoints(fcfByYear map[int]float64, years []int) []float64 {
 		out = append(out, (fcfByYear[y]-prev)/prev*100)
 	}
 	return out
+}
+
+// fcfRecentWindow 取 years 末尾 n 个年报及对应 FCF 值（升序）。
+// n<=0 或 years 为空时返回 nil；n 超过可用年数时取全部。
+func fcfRecentWindow(fcfByYear map[int]float64, years []int, n int) ([]int, []float64) {
+	if n <= 0 || len(years) == 0 {
+		return nil, nil
+	}
+	if n > len(years) {
+		n = len(years)
+	}
+	win := years[len(years)-n:]
+	vals := make([]float64, len(win))
+	for i, y := range win {
+		vals[i] = fcfByYear[y]
+	}
+	return win, vals
+}
+
+func meanOf(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range vals {
+		sum += v
+	}
+	return sum / float64(len(vals))
+}
+
+func countNonPositive(vals []float64) int {
+	n := 0
+	for _, v := range vals {
+		if v <= 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// positiveMedianOf 正值中位数；无正值时 ok=false。
+func positiveMedianOf(vals []float64) (float64, bool) {
+	pos := positiveValues(vals)
+	if len(pos) == 0 {
+		return 0, false
+	}
+	return medianOf(pos), true
+}
+
+// fcfRecoveryEligible R25 FR-3：深亏后复苏的可评估门。
+// available>=3 && mean(最近<=5)>0 && latest>0 && mean(最近<=10)<=0。
+// 只读 FCF 序列，不写回 cycle（Q1）。
+func fcfRecoveryEligible(fcfByYear map[int]float64, years []int) bool {
+	if len(years) < valFCFRecMinYears {
+		return false
+	}
+	_, recent := fcfRecentWindow(fcfByYear, years, valFCFRecoveryLookback)
+	_, long := fcfRecentWindow(fcfByYear, years, valCycleWindowYears)
+	return meanOf(recent) > 0 && recent[len(recent)-1] > 0 && meanOf(long) <= 0
+}
+
+// fcfRecoveryAccelerating R25 FR-2：最近一年高于上一年且高于近 5 年正值中位数。
+func fcfRecoveryAccelerating(fcfByYear map[int]float64, years []int) bool {
+	if len(years) < 2 {
+		return false
+	}
+	latest := fcfByYear[years[len(years)-1]]
+	prev := fcfByYear[years[len(years)-2]]
+	if latest <= 0 || prev <= 0 || latest <= prev {
+		return false
+	}
+	_, recent := fcfRecentWindow(fcfByYear, years, valFCFRecoveryLookback)
+	pm, ok := positiveMedianOf(recent)
+	return ok && latest > pm
+}
+
+// fcfRecoveryWindowYears 周期/复苏路径窗口：加速 3 年，否则 5 年。
+// 调用方再与可用年数取小（FR-1）。
+func fcfRecoveryWindowYears(fcfByYear map[int]float64, years []int) int {
+	if fcfRecoveryAccelerating(fcfByYear, years) {
+		return valFCFRecoveryAccelYears
+	}
+	return valFCFRecoveryYears
+}
+
+// fcfRecMultiYearGuard R25 FR-5 第 4 条：
+// 多年度聚合结果 <=0 且 latest>0 时退回最近一年。
+// 用 selectBaseFCF 复算，保证推荐 (mode, years) 与 DCF 侧完全一致。
+func fcfRecMultiYearGuard(rec fcfRecommendation, fcfByYear map[int]float64, years []int) fcfRecommendation {
+	if len(years) == 0 {
+		return rec
+	}
+	switch rec.Mode {
+	case valFCFAverage, valFCFMedian, valFCFTrimMean:
+	default:
+		return rec
+	}
+	v, _, _, err := selectBaseFCF(fcfByYear, years, rec.Mode, rec.Years, 0)
+	if err != nil || v > 0 {
+		return rec
+	}
+	if latest := fcfByYear[years[len(years)-1]]; latest > 0 {
+		return fcfRecLatest("多年度结果非正，退回最近一年。")
+	}
+	return rec
 }
 
 // detectFCFCycle 用最近 ≤10 年 FCF 序列判定周期性。
@@ -1102,7 +1253,9 @@ func downsideIf(values []float64, min int) (float64, bool) {
 	return -lo, true
 }
 
-// fcfWindowYears 按 FCF 周期状态给出推荐窗口年数。
+// fcfWindowYears 按 FCF 周期状态给出「名义」推荐窗口年数（R13 语义）。
+// R25：返回值保持不变，10 年只作周期判定/展示的名义上界；
+// 实际自动选取窗口由 recommendBaseFCF 再与 valFCFAutoMaxYears（5 年）及可用年数取小。
 func fcfWindowYears(c fcfCycle) int {
 	switch {
 	case !c.Evaluated:

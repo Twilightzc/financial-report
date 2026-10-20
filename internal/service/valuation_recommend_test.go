@@ -1286,11 +1286,12 @@ func TestRecommendBaseFCFCyclical(t *testing.T) {
 	cycle := fcfCycle{Evaluated: true, Cyclical: true, CV: 0.6, SignChanges: 2}
 	fcf := map[int]float64{2021: 1e8, 2022: 5e8, 2023: 2e8, 2024: 6e8}
 	got := RecommendBaseFCF(fcf, []int{2021, 2022, 2023, 2024}, cycle)
-	if got.Mode != valFCFTrimMean || got.Years != 4 {
-		t.Errorf("强周期且去极值平均 > 0 应取 trim_mean/4 年：%+v", got)
+	// R25：latest 6 > prev 2 > positiveMedian5 3.5 → 复苏加速 → trim_mean/3（trimMean(3) 即中位数）。
+	if got.Mode != valFCFTrimMean || got.Years != valFCFRecoveryAccelYears {
+		t.Errorf("强周期且复苏加速应取 trim_mean/%d 年：%+v", valFCFRecoveryAccelYears, got)
 	}
-	if !strings.Contains(got.Rationale, "完整周期") {
-		t.Errorf("口径说明应说明按完整周期取去极值平均：%q", got.Rationale)
+	if !strings.Contains(got.Rationale, "近 3 年") || !strings.Contains(got.Rationale, "复苏") {
+		t.Errorf("口径说明应为近 3 年复苏窗口去极值平均：%q", got.Rationale)
 	}
 
 	// 去极值平均 ≤ 0（但并非全部非正）→ 不进入 R3；最近一年非正 → R4 latest。

@@ -490,3 +490,10 @@ func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 		assertCacheEmpty(t, h)
 	})
 }
+
+// R25 AC-11：缓存 schema 升版，r24 条目不再命中。
+func TestAICacheSchemaR25(t *testing.T) {
+	if aiCacheSchema != "r25" {
+		t.Fatalf("aiCacheSchema = %q，期望 r25", aiCacheSchema)
+	}
+}
