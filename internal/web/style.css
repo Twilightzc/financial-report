@@ -804,10 +804,7 @@ td.num, .val, .yoy {
 
 /* ===================== R5 AI 分析 ===================== */
 
-.ai-form { display: flex; flex-direction: column; gap: 10px; }
-.ai-form-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .ai-hint { color: var(--muted); font-size: 12px; }
-.ai-mode-label { color: var(--ink-2); font-size: 13px; flex-shrink: 0; }
 
 .ai-radar { margin: 4px 0; }
 /* 雷达图容器：高度交给 CSS，横竖屏切换时浏览器自动改高，ECharts 靠 resize() 重新测量（FR-11）。
@@ -855,6 +852,38 @@ td.num, .val, .yoy {
 }
 .ai-model { font-weight: 700; color: var(--brand-bright); font-size: 14px; }
 .ai-usage { margin-top: 16px; color: var(--muted-2); font-size: 12px; }
+
+/* ===================== R26 AI 模块卡片 ===================== */
+/* 每个已上线模块一张纵向堆叠卡片：标题/描述 + 状态徽标 + 独立「一键分析」按钮。 */
+.ai-module-card {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.ai-module-card + .ai-module-card { margin-top: 14px; }
+.ai-module-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.ai-module-title-wrap { display: flex; flex-direction: column; gap: 2px; margin-right: auto; min-width: 0; }
+.ai-module-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); }
+.ai-module-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.ai-module-status {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 12px;
+}
+.ai-module-status.is-loading { color: var(--amber); }
+.ai-module-status.is-ok { color: var(--good); }
+.ai-module-status.is-error { color: var(--bad); }
+.ai-module-empty {
+  padding: 18px 0 6px;
+  color: var(--muted-2);
+  font-size: 13px;
+  text-align: center;
+}
+.ai-all-usage { margin-top: 14px; }
 
 /* R19 估值参数展示：六块紧凑排布（模型 / 基期 FCF / 折现率 / 增长参数 / 关键校验 / 结论），
    锚构成表与 FCF 明细共用 ai-weight-table；窄屏改为纵向堆叠，避免横向滚动。 */
@@ -1324,6 +1353,11 @@ td.num, .val, .yoy {
 
   .card-head { padding: 14px 16px; }
   .card-body { padding: 16px; }
+
+  /* R26 模块卡片：窄屏标题占满一行，状态与按钮换行后靠右 */
+  .ai-module-card { padding: 12px; }
+  .ai-module-title-wrap { flex-basis: 100%; margin-right: 0; }
+  .ai-module-status { margin-left: auto; }
   /* 区块标题右侧辅助信息换行到标题下方、年份控件占满宽度 */
   .card-head .year-filter { width: 100%; }
   .year-filter .el-select { flex: 1 1 0; width: auto; }

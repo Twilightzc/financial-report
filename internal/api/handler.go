@@ -28,6 +28,41 @@ type Handler struct {
 	growth *growthSnapshotCache
 	// history 估值历史记录文件存储（可为 nil，handler 需防御）。
 	history *store.ValuationHistoryStore
+	// aiChat 大模型调用入口；可注入便于测试，默认走 client.NewDeepSeek(...).Chat。
+	aiChat aiChatFunc
+	// aiSource 上游取数入口；可注入便于测试 AI 取数编排，默认绑定真实 client。
+	aiSource aiDataSource
+}
+
+// aiChatFunc 一次大模型调用：传入系统提示词与用户消息，返回原始文本与 token 用量。
+type aiChatFunc func(apiKey, baseURL, modelName, system, user string) (string, model.TokenUsage, error)
+
+// defaultAIChat 默认实现：DeepSeek OpenAI 兼容客户端，固定详细档（reasoning_effort=high）。
+func defaultAIChat(apiKey, baseURL, modelName, system, user string) (string, model.TokenUsage, error) {
+	return client.NewDeepSeek(apiKey, baseURL, modelName, "high").Chat(system, user)
+}
+
+// aiDataSource 可注入的 AI 取数入口，nil 字段由 accessor 回落真实 client。
+// 仅用于把 buildAIModuleData 的编排（并发启动、失败后仍汇合可选数据）纳入单元测试。
+type aiDataSource struct {
+	quote    func(code string) (*model.Quote, error)
+	reports  func(code string, cfPageSize, bsPageSize int) (cashflow, balance, income []model.ReportRow, err error)
+	segments func(code string) ([]model.SegmentIncome, error)
+	peers    func(code string) (model.LeaderBoard, error)
+	industry func(code string) (industryCode, industryName string, err error)
+	growth   func(code string) model.GrowthSnapshot
+}
+
+// defaultAISource 绑定真实 client/fetch 方法。
+func (h *Handler) defaultAISource() aiDataSource {
+	return aiDataSource{
+		quote:    h.c.FetchQuote,
+		reports:  h.fetchAnalysisReports,
+		segments: h.c.FetchSegmentIncome,
+		peers:    h.c.FetchIndustryPeers,
+		industry: h.c.FetchIndustry,
+		growth:   h.fetchGrowthSnapshot,
+	}
 }
 
 // 分析最多支持 10 个年报；每个自然年约 4 期（Q1/中报/Q3/年报）。
@@ -40,7 +75,7 @@ const (
 
 func NewHandler(c *client.Client, aiAPIKey, aiModel, aiBaseURL string,
 	history *store.ValuationHistoryStore) *Handler {
-	return &Handler{
+	h := &Handler{
 		c:         c,
 		aiAPIKey:  aiAPIKey,
 		aiModel:   aiModel,
@@ -48,7 +83,10 @@ func NewHandler(c *client.Client, aiAPIKey, aiModel, aiBaseURL string,
 		aiCache:   newAIResultCache(),
 		growth:    newGrowthSnapshotCache(),
 		history:   history,
+		aiChat:    defaultAIChat,
 	}
+	h.aiSource = h.defaultAISource()
+	return h
 }
 
 // isSixDigitCode 判断字符串是否为 6 位 ASCII 数字（估值记录 code 校验）。

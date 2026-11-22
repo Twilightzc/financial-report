@@ -1,4 +1,4 @@
-const { createApp, ref, computed, nextTick } = Vue;
+const { createApp, ref, computed, reactive, nextTick } = Vue;
 
 // 指标趋势图：图表可用宽度窄于此值时启用窄屏布局（图例移底、字号 11px、边距收紧）。
 // 注意「窄屏」按图表实测宽度判断（弹窗宽度是 min(680px, 92vw)，非固定）；「移动端」按视口宽度，见 style.css。
@@ -230,7 +230,60 @@ function buildRadarOption(scores, narrow) {
   };
 }
 
+// AI 模块等待态：神经网络脉冲动画（纯 CSS/SVG，无图片、离线可用）。
+// 抽成局部组件，供财务/行业/估值三张卡片复用。
+const AI_THINKING = {
+  template: `
+    <div class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
+      <div class="ai-think-visual" aria-hidden="true">
+        <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
+          <g class="ai-net-edges">
+            <line x1="18" y1="32" x2="60" y2="22"></line>
+            <line x1="18" y1="32" x2="60" y2="48"></line>
+            <line x1="18" y1="32" x2="60" y2="72"></line>
+            <line x1="18" y1="32" x2="60" y2="98"></line>
+            <line x1="18" y1="60" x2="60" y2="22"></line>
+            <line x1="18" y1="60" x2="60" y2="48"></line>
+            <line x1="18" y1="60" x2="60" y2="72"></line>
+            <line x1="18" y1="60" x2="60" y2="98"></line>
+            <line x1="18" y1="88" x2="60" y2="22"></line>
+            <line x1="18" y1="88" x2="60" y2="48"></line>
+            <line x1="18" y1="88" x2="60" y2="72"></line>
+            <line x1="18" y1="88" x2="60" y2="98"></line>
+            <line x1="60" y1="22" x2="102" y2="32"></line>
+            <line x1="60" y1="22" x2="102" y2="60"></line>
+            <line x1="60" y1="22" x2="102" y2="88"></line>
+            <line x1="60" y1="48" x2="102" y2="32"></line>
+            <line x1="60" y1="48" x2="102" y2="60"></line>
+            <line x1="60" y1="48" x2="102" y2="88"></line>
+            <line x1="60" y1="72" x2="102" y2="32"></line>
+            <line x1="60" y1="72" x2="102" y2="60"></line>
+            <line x1="60" y1="72" x2="102" y2="88"></line>
+            <line x1="60" y1="98" x2="102" y2="32"></line>
+            <line x1="60" y1="98" x2="102" y2="60"></line>
+            <line x1="60" y1="98" x2="102" y2="88"></line>
+          </g>
+          <g class="ai-net-nodes">
+            <circle cx="18" cy="32" r="4"></circle>
+            <circle cx="18" cy="60" r="4"></circle>
+            <circle cx="18" cy="88" r="4"></circle>
+            <circle cx="60" cy="22" r="4"></circle>
+            <circle cx="60" cy="48" r="4"></circle>
+            <circle cx="60" cy="72" r="4"></circle>
+            <circle cx="60" cy="98" r="4"></circle>
+            <circle cx="102" cy="32" r="4"></circle>
+            <circle cx="102" cy="60" r="4"></circle>
+            <circle cx="102" cy="88" r="4"></circle>
+          </g>
+        </svg>
+      </div>
+      <p class="ai-think-text">分析中，请稍等<span class="ai-think-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
+      <p class="ai-think-tip">AI 正在研读财务报表与行业信息</p>
+    </div>`,
+};
+
 const app = createApp({
+  components: { 'ai-thinking': AI_THINKING },
   setup() {
     const code = ref('');
     const loading = ref(false);
@@ -344,16 +397,34 @@ const app = createApp({
     let valHistoryMigrationRunning = false;  // 非响应式：迁移防重入
     let firstRecordHintShown = false;        // 非响应式：首次记录提示是否已展示
 
-    // R5 AI 智能分析状态（apikey 由服务端启动参数提供，前端无需输入）
-    const aiLoading = ref(false);
-    const aiError = ref('');
-    const aiResult = ref(null);
-    const aiElapsed = ref(null); // 最近一次 AI 分析耗时（秒，1 位小数；加载中/缓存命中/失败为 null）
-    const aiRadarRef = ref(null);
-    const aiReasoning = ref('high'); // 分析模式：low 简洁 / medium 标准 / high 详细（默认详细）
+    // R26 AI 智能分析：按模块拆分的状态模型（apikey 由服务端启动参数提供，前端无需输入）。
+    // 每个模块独立 status/result/usage/elapsed，可独立触发、独立失败重试；另设顶部一键全分析。
+    const AI_MODULES = [
+      { id: 'financial',      title: '公司财务分析', desc: '财务健康与经营质量：五维评分与总体结论', implemented: true },
+      { id: 'industry',       title: '行业分析',     desc: '行业前景、业务板块、产业链与相关公司',     implemented: true },
+      { id: 'valuation',      title: '估值参数分析', desc: '估值模型与确定性参数推荐',                 implemented: true },
+      { id: 'business_model', title: '商业模式分析', desc: '九要素与商业模式评分',                    implemented: false }, // R27 置 true
+    ];
+    const visibleAIModules = AI_MODULES.filter(m => m.implemented);
+    const aiModules = reactive(Object.fromEntries(AI_MODULES.map(m => [m.id, {
+      status: 'idle',   // idle / loading / ok / error
+      result: null,
+      usage: null,
+      elapsedMs: null,
+      cached: false,
+      error: '',
+    }])));
+    const aiAllLoading = ref(false);
+    const aiAllError = ref('');
+    const aiAllElapsedMs = ref(null);
+    const aiAllUsage = ref(null);
+    const aiRadarRef = ref(null);       // 仅财务模块使用
     // R15：估值参数卡片「查看计算明细」折叠区展开态（换股票或重新分析时复位）。
     const aiValDetailOpen = ref(false);
-    const aiCache = new Map(); // AI 分析结果缓存（code|年份|模式 → 结果，同条件复用避免重复消耗 token）
+    const aiCache = new Map(); // 本地缓存：`code|startYear|endYear|module` → { result, usage }
+    const aiAnyLoading = computed(() =>
+      aiAllLoading.value || visibleAIModules.some(m => aiModules[m.id].status === 'loading'));
+    const canRunAI = computed(() => /^\d{6}$/.test((code.value || '').trim()));
 
     // R17 相关公司（行业龙头 + 产业链/合作公司）
     const companyHint = ref('');      // 行内提示（不弹全局错误）
@@ -1179,11 +1250,15 @@ const app = createApp({
         if (changed) resetValuationState();
         if (restore && restore.code === nextCode) applyValuationParams(restore);
 
-        // 切换股票时清空上一支股票的 AI 分析结果，避免残留
-        aiResult.value = null;
-        aiElapsed.value = null;
-        aiError.value = '';
-        aiLoading.value = false;
+        // 切换股票时清空上一支股票的所有 AI 模块状态，避免残留（不自动触发分析）。
+        visibleAIModules.forEach(m => resetAIModule(m.id));
+        aiAllLoading.value = false;
+        aiAllError.value = '';
+        aiAllElapsedMs.value = null;
+        aiAllUsage.value = null;
+        aiValDetailOpen.value = false;
+        companyHint.value = '';
+        companyResolving.value = '';
         fetchData(); fetchFinancials(); fetchAnalysis(); fetchValuation(); fetchCompanyValue();
       } finally {
         searchBusy = false;
@@ -1201,53 +1276,179 @@ const app = createApp({
       return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     }
 
-    // AI 一键分析：把财务指标发给大模型，返回评分/结论/行业/估值推荐。
-    async function fetchAIAnalysis() {
-      if (!code.value.trim()) return;
+    // AI 模块本地缓存键：同股票同年份同模块复用，避免重复消耗 token。
+    // 显式接收 code/年份而非直接读最新状态，确保请求发起与响应落地用同一份快照。
+    function aiLocalKey(codeValue, startYear, endYear, moduleId) {
+      return `${(codeValue || '').trim()}|${startYear || ''}|${endYear || ''}|${moduleId}`;
+    }
+
+    // 请求是否已过期：返回 'code' / 'year' / ''。
+    // 换股由 doSearch 统一清空 AI 状态，旧响应直接忽略即可；
+    // 仅改年份时 changeAnalysisRange 不重置 AI 状态，需要由旧响应负责把 loading 复位。
+    function aiStaleReason(reqCode, reqStartYear, reqEndYear) {
+      if (code.value.trim() !== reqCode) return 'code';
+      if (analysisStartYear.value !== reqStartYear || analysisEndYear.value !== reqEndYear) return 'year';
+      return '';
+    }
+
+    function resetAIModule(id) {
+      const s = aiModules[id];
+      if (!s) return;
+      s.status = 'idle'; s.result = null; s.usage = null;
+      s.elapsedMs = null; s.cached = false; s.error = '';
+    }
+
+    function applyAIModuleSuccess(id, result, usage, elapsedMs, cached) {
+      const s = aiModules[id];
+      s.status = 'ok'; s.result = result; s.usage = usage || null;
+      s.elapsedMs = elapsedMs; s.cached = !!cached; s.error = '';
+      // 只有估值模块成功才自动套用估值表单；财务/行业不得改动估值。
+      if (id === 'valuation') autoApplyAIValuation(result && result.valuation);
+      if (id === 'financial') renderRadarAfterRender();
+    }
+
+    // 单模块「一键分析」：优先本地缓存，否则请求 module=<id>。
+    async function runAIModule(id) {
+      if (!canRunAI.value || aiAllLoading.value || aiModules[id].status === 'loading') return;
+      const reqCode = code.value.trim();
+      const reqStartYear = analysisStartYear.value;
+      const reqEndYear = analysisEndYear.value;
       companyHint.value = '';      // R17：重新分析时清理相关公司的行内提示/解析态
       companyResolving.value = '';
-      const reqCode = code.value.trim();
-      const cacheKey = `${reqCode}|${analysisStartYear.value || ''}|${analysisEndYear.value || ''}|${aiReasoning.value || 'low'}`;
-      const cached = aiCache.get(cacheKey);
-      if (cached) {
-        // 同条件已分析过，直接复用结果，不重复调用大模型（没有新的请求耗时可展示）
-        aiResult.value = cached;
-        aiElapsed.value = null;
-        aiValDetailOpen.value = false;
-        autoApplyAIValuation(); // 缓存命中同样自动套用，避免估值卡片停留在默认参数
-        await renderRadarAfterRender();
+      const local = aiCache.get(aiLocalKey(reqCode, reqStartYear, reqEndYear, id));
+      if (local) {
+        applyAIModuleSuccess(id, local.result, local.usage, null, true);
         return;
       }
-      const startedAt = nowMs();
-      aiLoading.value = true;
-      aiError.value = '';
-      aiResult.value = null;
-      aiElapsed.value = null;
-      aiValDetailOpen.value = false;
+      const s = aiModules[id];
+      s.status = 'loading'; s.error = ''; s.result = null; s.usage = null; s.elapsedMs = null; s.cached = false;
+      if (id === 'valuation') aiValDetailOpen.value = false;
+      const started = nowMs();
       try {
-        const params = [];
-        if (analysisStartYear.value && analysisEndYear.value) {
-          params.push(`startYear=${analysisStartYear.value}`, `endYear=${analysisEndYear.value}`);
+        const params = [`module=${id}`];
+        if (reqStartYear && reqEndYear) {
+          params.push(`startYear=${reqStartYear}`, `endYear=${reqEndYear}`);
         }
-        params.push(`reasoning=${aiReasoning.value || 'low'}`);
         const res = await fetch(`/api/stock/${reqCode}/ai-analysis?${params.join('&')}`);
         const json = await readJSON(res);
-        if (code.value.trim() !== reqCode) return; // 期间切换了股票，丢弃旧结果
-        if (json.code !== 0) {
-          aiError.value = json.message || 'AI 分析失败';
+        const stale = aiStaleReason(reqCode, reqStartYear, reqEndYear);
+        if (stale) {
+          // 期间改年份：丢弃旧响应，并把本模块从 loading 复位，避免永久「分析中」；
+          // 换股时状态已由 doSearch 清空，直接忽略，避免误伤新股票的请求。
+          if (stale === 'year' && aiModules[id].status === 'loading') resetAIModule(id);
           return;
         }
-        aiCache.set(cacheKey, json.data);
-        aiResult.value = json.data;
-        autoApplyAIValuation(); // 分析结果落地后自动套用推荐参数到估值表单（仍可手动改）
-        // 成功后展示本次请求耗时（秒，1 位小数）；加载态与失败态保持 null。
-        aiElapsed.value = Number(((nowMs() - startedAt) / 1000).toFixed(1));
-        await renderRadarAfterRender();
+        if (json.code !== 0 || !json.data || json.data.status !== 'ok') {
+          s.status = 'error';
+          s.error = (json && json.message) || '分析失败，请重试';
+          return;
+        }
+        const elapsed = Number(((nowMs() - started) / 1000).toFixed(1));
+        // 用发起时快照写缓存，避免把 A 年份的结果写进 B 年份的 key。
+        aiCache.set(aiLocalKey(reqCode, reqStartYear, reqEndYear, id), { result: json.data.result, usage: json.data.usage });
+        applyAIModuleSuccess(id, json.data.result, json.data.usage, elapsed, false);
       } catch (e) {
-        if (code.value.trim() !== reqCode) return;
-        aiError.value = '请求失败：' + e.message;
+        const stale = aiStaleReason(reqCode, reqStartYear, reqEndYear);
+        if (stale) {
+          if (stale === 'year' && aiModules[id].status === 'loading') resetAIModule(id);
+          return;
+        }
+        s.status = 'error';
+        s.error = '请求失败：' + e.message;
+      }
+    }
+
+    // 一键全分析：一次请求 module=all，服务端并发分析所有已上线模块。
+    async function runAllAIModules() {
+      if (!canRunAI.value || aiAnyLoading.value) return;
+      const reqCode = code.value.trim();
+      const reqStartYear = analysisStartYear.value;
+      const reqEndYear = analysisEndYear.value;
+      companyHint.value = '';
+      companyResolving.value = '';
+      aiAllLoading.value = true;
+      aiAllError.value = '';
+      aiAllElapsedMs.value = null;
+      aiAllUsage.value = null;
+      aiValDetailOpen.value = false;
+      visibleAIModules.forEach(m => {
+        const s = aiModules[m.id];
+        s.status = 'loading'; s.error = ''; s.result = null; s.usage = null; s.elapsedMs = null; s.cached = false;
+      });
+      const started = nowMs();
+      try {
+        const params = ['module=all'];
+        if (reqStartYear && reqEndYear) {
+          params.push(`startYear=${reqStartYear}`, `endYear=${reqEndYear}`);
+        }
+        const res = await fetch(`/api/stock/${reqCode}/ai-analysis?${params.join('&')}`);
+        const json = await readJSON(res);
+        const stale = aiStaleReason(reqCode, reqStartYear, reqEndYear);
+        if (stale) {
+          // 期间改年份：丢弃旧响应并把所有 loading 模块复位；换股时状态已由 doSearch 清空。
+          if (stale === 'year') {
+            visibleAIModules.forEach(m => {
+              if (aiModules[m.id].status === 'loading') resetAIModule(m.id);
+            });
+          }
+          return;
+        }
+
+        const modules = json && json.data && json.data.modules;
+        if (!modules) {
+          const msg = (json && json.message) || '分析失败，请重试';
+          visibleAIModules.forEach(m => {
+            aiModules[m.id].status = 'error';
+            aiModules[m.id].error = msg;
+          });
+          aiAllError.value = msg;
+          return;
+        }
+
+        visibleAIModules.forEach(m => {
+          const r = modules[m.id];
+          if (!r) {
+            aiModules[m.id].status = 'error';
+            aiModules[m.id].error = '未返回结果，请重试';
+            return;
+          }
+          if (r.status === 'ok') {
+            // 用发起时快照写缓存，避免把 A 年份的结果写进 B 年份的 key。
+            aiCache.set(aiLocalKey(reqCode, reqStartYear, reqEndYear, m.id), { result: r.result, usage: r.usage });
+            const s = aiModules[m.id];
+            s.status = 'ok'; s.result = r.result; s.usage = r.usage || null;
+            s.elapsedMs = r.cached ? null : (r.elapsed_ms != null ? r.elapsed_ms / 1000 : null);
+            s.cached = !!r.cached; s.error = '';
+          } else {
+            aiModules[m.id].status = 'error';
+            aiModules[m.id].error = r.message || '分析失败，请重试';
+          }
+        });
+        // 统一在循环后触发一次估值自动套用，避免重复 fetchValuation('ai')。
+        if (aiModules.valuation.status === 'ok') {
+          autoApplyAIValuation(aiModules.valuation.result && aiModules.valuation.result.valuation);
+        }
+        renderRadarAfterRender();
+        aiAllElapsedMs.value = Number(((nowMs() - started) / 1000).toFixed(1));
+        aiAllUsage.value = json.data.usage || null;
+        if (json.code !== 0) aiAllError.value = json.message || '分析失败，请重试';
+      } catch (e) {
+        const stale = aiStaleReason(reqCode, reqStartYear, reqEndYear);
+        if (stale) {
+          if (stale === 'year') {
+            visibleAIModules.forEach(m => {
+              if (aiModules[m.id].status === 'loading') resetAIModule(m.id);
+            });
+          }
+          return;
+        }
+        visibleAIModules.forEach(m => {
+          aiModules[m.id].status = 'error';
+          aiModules[m.id].error = '请求失败：' + e.message;
+        });
+        aiAllError.value = '请求失败：' + e.message;
       } finally {
-        if (code.value.trim() === reqCode) aiLoading.value = false;
+        if (code.value.trim() === reqCode) aiAllLoading.value = false;
       }
     }
 
@@ -1319,23 +1520,36 @@ const app = createApp({
         }
         companyHint.value = `已解析为 ${hit.name}（${hit.code}），正在切换…`;
         code.value = hit.code;                  // 最终必须用 6 位代码
-        await doSearch();                       // 清空 aiResult、加载新公司数据；不自动触发 AI 分析
+        await doSearch();                       // 清空各 AI 模块状态、加载新公司数据；不自动触发 AI 分析
       } finally {
         companyResolveBusy = false;
         companyResolving.value = '';
       }
     }
 
+    // 财务模块的五维评分（雷达图唯一数据源；其它模块不产出 scores）。
+    function financialScores() {
+      const r = aiModules.financial.result;
+      return (r && r.scores) || [];
+    }
+
+    // 雷达图容器元素：R26 起雷达图位于 v-for 模块卡片内，模板 ref 会被 Vue 收成数组，
+    // 统一在这里解包，其余渲染/测量逻辑仍按单元素处理。
+    function radarEl() {
+      const v = aiRadarRef.value;
+      return Array.isArray(v) ? v[0] : v;
+    }
+
     // 绘制财务指标五维雷达图（维度 × 百分制评分）。
     // 窄屏判据取容器实测宽度（卡片内边距决定，非视口推断），跨阈值时整体重设 option。
     function renderRadar() {
-      if (!aiRadarRef.value || !aiResult.value) return;
-      const el = aiRadarRef.value;
+      const el = radarEl();
+      if (!el) return;
       radarNarrow.value = el.clientWidth < RADAR_NARROW_WIDTH;
       let chart = echarts.getInstanceByDom(el);
       if (chart) chart.dispose();
       chart = echarts.init(el);
-      chart.setOption(buildRadarOption(aiResult.value.scores || [], radarNarrow.value));
+      chart.setOption(buildRadarOption(financialScores(), radarNarrow.value));
     }
 
     // 等结果区（含雷达图容器）真正挂载后再初始化 ECharts：
@@ -1344,10 +1558,10 @@ const app = createApp({
     async function renderRadarAfterRender() {
       await nextTick();
       const ready = () => {
-        const el = aiRadarRef.value;
+        const el = radarEl();
         return !!el && el.clientWidth > 0 && el.clientHeight > 0;
       };
-      if (!ready() && aiResult.value) {
+      if (!ready() && radarEl()) {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       }
       renderRadar();
@@ -1355,17 +1569,17 @@ const app = createApp({
 
     // 窗口 resize / 手机横竖屏切换：防抖后跨阈值重设 option，并 resize() 重新测量容器高度。
     function handleRadarResize() {
-      if (!aiResult.value || !aiRadarRef.value) return;
+      if (!radarEl()) return;
       clearTimeout(radarResizeTimer);
       radarResizeTimer = setTimeout(() => {
-        if (!aiResult.value || !aiRadarRef.value) return;
-        const el = aiRadarRef.value;
+        const el = radarEl();
+        if (!el) return;
         const chart = echarts.getInstanceByDom(el);
         if (!chart) return;
         const next = el.clientWidth < RADAR_NARROW_WIDTH;
         if (next !== radarNarrow.value) {
           radarNarrow.value = next;
-          chart.setOption(buildRadarOption(aiResult.value.scores || [], next));
+          chart.setOption(buildRadarOption(financialScores(), next));
         }
         chart.resize(); // 容器高度随 CSS 断点变化后重新测量
       }, 120);
@@ -1468,10 +1682,9 @@ const app = createApp({
       if (!silent) ElementPlus.ElMessage.success('已应用估值参数');
     }
 
-    // AI 分析结果落地后自动套用推荐参数（与手动按钮同一入口，只是静默）。
-    // 无估值推荐 / 不适用时不动表单，避免把默认值或无效参数写进去。
-    function autoApplyAIValuation() {
-      const v = aiResult.value && aiResult.value.valuation;
+    // 估值模块成功后自动套用推荐参数（与手动按钮同一入口，只是静默）。
+    // 由调用方传入估值对象；无估值推荐 / 不适用时不动表单，避免把默认值或无效参数写进去。
+    function autoApplyAIValuation(v) {
       if (v && v.model && v.applicable !== false) applyAIValuation(v, true);
     }
 
@@ -1776,7 +1989,7 @@ const app = createApp({
     // ===================== 仪表盘侧边栏 =====================
     // 视图切换：同一时刻只显示一个区块（v-show），侧边栏高亮直接由 activeSection 决定，
     // 不再根据滚动位置反推。每个区块的滚动位置记在 sectionScroll，切走时保存、切回时恢复。
-    // 区块状态全部是 setup 里的 ref（analysisActive / activeTab / aiResult 等），v-show 不卸载组件，
+    // 区块状态全部是 setup 里的 ref（analysisActive / activeTab / aiModules 等），v-show 不卸载组件，
     // 因此切换区块不会重置状态，也不销毁 ECharts 实例与表格 DOM。
     const SECTION_IDS = ['overview', 'statements', 'analysis', 'company-value', 'valuation', 'ai'];
     const sidebarOpen = ref(false);
@@ -1800,14 +2013,14 @@ const app = createApp({
     // AI 区块被 v-show 隐藏期间容器尺寸为 0，切回时：已有实例则重新测量（必要时切回宽屏规格），
     // 尚未初始化（结果在别的区块返回、隐藏时 init 失败）则补渲染。
     function resizeRadarOnShow() {
-      if (!aiResult.value || !aiRadarRef.value) return;
-      const el = aiRadarRef.value;
+      const el = radarEl();
+      if (!el) return;
       const chart = echarts.getInstanceByDom(el);
       if (!chart) { renderRadar(); return; }
       const narrow = el.clientWidth < RADAR_NARROW_WIDTH;
       if (narrow !== radarNarrow.value) {
         radarNarrow.value = narrow;
-        chart.setOption(buildRadarOption(aiResult.value.scores || [], narrow));
+        chart.setOption(buildRadarOption(financialScores(), narrow));
       }
       chart.resize();
     }
@@ -1839,7 +2052,8 @@ const app = createApp({
       valModels, valModel, valModelDesc, valDiscount, valG, valG1, valN1, valG2, valN2, valG3,
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
-      aiLoading, aiError, aiResult, aiElapsed, aiRadarRef, aiReasoning, fetchAIAnalysis, renderRadar,
+      aiModules, visibleAIModules, aiAllLoading, aiAllError, aiAllElapsedMs, aiAllUsage,
+      aiAnyLoading, canRunAI, aiRadarRef, runAIModule, runAllAIModules, renderRadar,
       aiValDetailOpen,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
       companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessCompanies,
@@ -1988,7 +2202,7 @@ const app = createApp({
           <div v-if="data" class="selected-chip">
             <span class="selected-code">{{ data.stock.code }}</span>
             <span class="selected-name">{{ data.stock.name }}</span>
-            <span class="selected-market">{{ aiResult && aiResult.industry && aiResult.industry.name ? aiResult.industry.name : marketLabelOf(guessMarket(data.stock.code)) }}</span>
+            <span class="selected-market">{{ aiModules.industry.result && aiModules.industry.result.industry && aiModules.industry.result.industry.name ? aiModules.industry.result.industry.name : marketLabelOf(guessMarket(data.stock.code)) }}</span>
           </div>
           <div v-if="data" class="topbar-quote">
             <span :class="['topbar-price', data.quote.change_pct >= 0 ? 'up' : 'down']">{{ data.quote.price.toFixed(2) }}</span>
@@ -2457,78 +2671,46 @@ const app = createApp({
 
           <section v-show="activeSection === 'ai'" id="ai" class="view-section">
           <section class="card">
-            <div class="card-head">
+            <div class="card-head ai-toolbar">
               <h2 class="card-title">AI 智能分析</h2>
+              <el-button type="primary" :loading="aiAllLoading"
+                         :disabled="!canRunAI || aiAnyLoading" @click="runAllAIModules">一键全分析</el-button>
             </div>
             <div class="card-body">
-              <div class="ai-form">
-                <div class="ai-form-row">
-                  <span class="ai-mode-label">分析模式</span>
-                  <el-select v-model="aiReasoning" size="small" style="width:110px">
-                    <el-option label="简洁" value="low" />
-                    <el-option label="标准" value="medium" />
-                    <el-option label="详细" value="high" />
-                  </el-select>
-                  <el-button type="primary" :loading="aiLoading" @click="fetchAIAnalysis">一键分析</el-button>
+              <p class="ai-hint">可按模块单独分析，也可一键全分析；各模块相互独立，失败可单独重试。</p>
+              <el-alert v-if="aiAllError" :title="aiAllError" type="error" :closable="false" style="margin-bottom:12px" />
+              <div v-for="m in visibleAIModules" :key="m.id" class="ai-module-card">
+                <div class="ai-module-head">
+                  <div class="ai-module-title-wrap">
+                    <h3 class="ai-module-title">{{ m.title }}</h3>
+                    <span class="ai-module-desc">{{ m.desc }}</span>
+                  </div>
+                  <span class="ai-module-status" :class="'is-' + aiModules[m.id].status">
+                    {{ aiModules[m.id].status === 'idle' ? '未分析'
+                       : aiModules[m.id].status === 'loading' ? '分析中'
+                       : aiModules[m.id].status === 'ok' ? (aiModules[m.id].cached ? '缓存' : '完成')
+                       : '失败' }}
+                  </span>
+                  <el-button size="small" type="primary"
+                             :loading="aiModules[m.id].status === 'loading'"
+                             :disabled="!canRunAI || aiAllLoading || aiModules[m.id].status === 'loading'"
+                             @click="runAIModule(m.id)">一键分析</el-button>
                 </div>
-                <div class="ai-hint">对公司财务指标进行智能诊断，输出五维评分、综合结论、行业分析、估值模型推荐，并给出行业龙头与产业链/合作公司参考。分析模式：简洁更快、标准均衡、详细更深入。</div>
-              </div>
-              <el-alert v-if="aiError" :title="aiError" type="error" :closable="false" style="margin-top:12px" />
-              <!-- 等待态：神经网络脉冲动画（纯 CSS/SVG，无图片、离线可用），替代原来的整卡转圈遮罩。
-                   结果区由 aiResult 独立驱动：请求返回时 aiResult 先于 aiLoading 置位，若用 v-else-if
-                   会把结果/雷达图容器推迟到 finally 之后才挂载，导致 renderRadar 拿不到 DOM。 -->
-              <div v-if="aiLoading && !aiResult" class="ai-think" role="status" aria-live="polite" aria-label="AI 分析中，请稍等">
-                <div class="ai-think-visual" aria-hidden="true">
-                  <svg class="ai-think-net" viewBox="0 0 120 120" focusable="false">
-                    <!-- 连线：3 层网络（左 3 → 中 4 → 右 3），虚线沿左→右流动 -->
-                    <g class="ai-net-edges">
-                      <line x1="18" y1="32" x2="60" y2="22"></line>
-                      <line x1="18" y1="32" x2="60" y2="48"></line>
-                      <line x1="18" y1="32" x2="60" y2="72"></line>
-                      <line x1="18" y1="32" x2="60" y2="98"></line>
-                      <line x1="18" y1="60" x2="60" y2="22"></line>
-                      <line x1="18" y1="60" x2="60" y2="48"></line>
-                      <line x1="18" y1="60" x2="60" y2="72"></line>
-                      <line x1="18" y1="60" x2="60" y2="98"></line>
-                      <line x1="18" y1="88" x2="60" y2="22"></line>
-                      <line x1="18" y1="88" x2="60" y2="48"></line>
-                      <line x1="18" y1="88" x2="60" y2="72"></line>
-                      <line x1="18" y1="88" x2="60" y2="98"></line>
-                      <line x1="60" y1="22" x2="102" y2="32"></line>
-                      <line x1="60" y1="22" x2="102" y2="60"></line>
-                      <line x1="60" y1="22" x2="102" y2="88"></line>
-                      <line x1="60" y1="48" x2="102" y2="32"></line>
-                      <line x1="60" y1="48" x2="102" y2="60"></line>
-                      <line x1="60" y1="48" x2="102" y2="88"></line>
-                      <line x1="60" y1="72" x2="102" y2="32"></line>
-                      <line x1="60" y1="72" x2="102" y2="60"></line>
-                      <line x1="60" y1="72" x2="102" y2="88"></line>
-                      <line x1="60" y1="98" x2="102" y2="32"></line>
-                      <line x1="60" y1="98" x2="102" y2="60"></line>
-                      <line x1="60" y1="98" x2="102" y2="88"></line>
-                    </g>
-                    <!-- 节点：三层错峰脉冲 -->
-                    <g class="ai-net-nodes">
-                      <circle cx="18" cy="32" r="4"></circle>
-                      <circle cx="18" cy="60" r="4"></circle>
-                      <circle cx="18" cy="88" r="4"></circle>
-                      <circle cx="60" cy="22" r="4"></circle>
-                      <circle cx="60" cy="48" r="4"></circle>
-                      <circle cx="60" cy="72" r="4"></circle>
-                      <circle cx="60" cy="98" r="4"></circle>
-                      <circle cx="102" cy="32" r="4"></circle>
-                      <circle cx="102" cy="60" r="4"></circle>
-                      <circle cx="102" cy="88" r="4"></circle>
-                    </g>
-                  </svg>
+
+                <div v-if="aiModules[m.id].status === 'idle'" class="ai-module-empty">
+                  点击「一键分析」生成本模块结果。
                 </div>
-                <p class="ai-think-text">分析中，请稍等<span class="ai-think-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
-                <p class="ai-think-tip">AI 正在研读财务报表与行业信息</p>
-              </div>
-              <template v-if="aiResult">
+                <ai-thinking v-else-if="aiModules[m.id].status === 'loading'" />
+                <el-alert v-else-if="aiModules[m.id].status === 'error'"
+                          :title="aiModules[m.id].error" type="error" :closable="false">
+                  <el-button size="small" @click="runAIModule(m.id)">重试</el-button>
+                </el-alert>
+                <template v-else-if="aiModules[m.id].status === 'ok'">
+                  <!-- 财务：雷达图 + 五维评分 + 总体结论 -->
+                  <template v-if="m.id === 'financial'">
                 <div class="ai-radar"><div ref="aiRadarRef" class="ai-radar-box"></div></div>
                 <div class="ai-scores">
-                  <div v-for="s in aiResult.scores" :key="s.dimension" class="ai-score-row">
+                  <div v-for="s in aiModules.financial.result.scores" :key="s.dimension" class="ai-score-row">
                     <span class="ai-score-name">{{ s.dimension }}</span>
                     <el-progress :percentage="s.score" :stroke-width="12" :color="scoreColor(s.score)" style="flex:1" />
                     <span class="ai-score-comment">{{ s.comment }}</span>
@@ -2536,24 +2718,27 @@ const app = createApp({
                 </div>
                 <div class="ai-section">
                   <div class="ai-section-title">总体结论</div>
-                  <p class="ai-text">{{ aiResult.conclusion }}</p>
+                  <p class="ai-text">{{ aiModules.financial.result.conclusion }}</p>
                 </div>
+                  </template>
+                  <!-- 行业：行业分析 + 龙头 + 业务板块 + 相关公司 -->
+                  <template v-else-if="m.id === 'industry'">
                 <div class="ai-section">
-                  <div class="ai-section-title">行业分析：{{ aiResult.industry.name }}</div>
+                  <div class="ai-section-title">行业分析：{{ aiModules.industry.result.industry.name }}</div>
                   <div class="ai-grid">
-                    <div><span class="ai-k">前景</span><span class="ai-v">{{ aiResult.industry.prospect }}</span></div>
-                    <div><span class="ai-k">竞争格局</span><span class="ai-v">{{ aiResult.industry.competition }}</span></div>
-                    <div><span class="ai-k">应用方向</span><span class="ai-v">{{ aiResult.industry.application }}</span></div>
+                    <div><span class="ai-k">前景</span><span class="ai-v">{{ aiModules.industry.result.industry.prospect }}</span></div>
+                    <div><span class="ai-k">竞争格局</span><span class="ai-v">{{ aiModules.industry.result.industry.competition }}</span></div>
+                    <div><span class="ai-k">应用方向</span><span class="ai-v">{{ aiModules.industry.result.industry.application }}</span></div>
                   </div>
                   <!-- R17/D10 行业龙头：后端确定性数据，按总市值排序，已排除本公司 -->
                   <div class="ai-leaders"
-                       v-if="aiResult.leaders && ((aiResult.leaders.companies && aiResult.leaders.companies.length) || aiResult.leaders.self_rank)">
-                    <div class="ai-sub-title">{{ leaderTitle(aiResult.leaders) }}</div>
-                    <p class="ai-leader-self-note" v-if="aiResult.leaders.self_rank">
-                      本公司也是该行业龙头（排名第 {{ aiResult.leaders.self_rank }}）
+                       v-if="aiModules.industry.result.leaders && ((aiModules.industry.result.leaders.companies && aiModules.industry.result.leaders.companies.length) || aiModules.industry.result.leaders.self_rank)">
+                    <div class="ai-sub-title">{{ leaderTitle(aiModules.industry.result.leaders) }}</div>
+                    <p class="ai-leader-self-note" v-if="aiModules.industry.result.leaders.self_rank">
+                      本公司也是该行业龙头（排名第 {{ aiModules.industry.result.leaders.self_rank }}）
                     </p>
-                    <div class="ai-chips" v-if="aiResult.leaders.companies && aiResult.leaders.companies.length">
-                      <button v-for="c in aiResult.leaders.companies" :key="c.code" type="button"
+                    <div class="ai-chips" v-if="aiModules.industry.result.leaders.companies && aiModules.industry.result.leaders.companies.length">
+                      <button v-for="c in aiModules.industry.result.leaders.companies" :key="c.code" type="button"
                               class="ai-chip ai-chip-leader" @click="jumpToLeader(c)">
                         <span class="ai-chip-name">{{ c.name }}</span>
                         <span class="ai-chip-tag" v-if="c.market_label">{{ c.market_label }}</span>
@@ -2562,10 +2747,10 @@ const app = createApp({
                     <p class="ai-disclaimer">名单来自东财行业分类与同行市值数据，按总市值排序，已排除本公司；排序不代表投资价值，不构成投资建议。</p>
                   </div>
                 </div>
-                <div class="ai-section" v-if="aiResult.businesses && aiResult.businesses.length">
+                <div class="ai-section" v-if="aiModules.industry.result.businesses && aiModules.industry.result.businesses.length">
                   <div class="ai-section-title">业务板块分析</div>
                   <div class="ai-businesses">
-                    <div v-for="b in aiResult.businesses" :key="b.name" class="ai-business">
+                    <div v-for="b in aiModules.industry.result.businesses" :key="b.name" class="ai-business">
                       <div class="ai-biz-head">
                         <span class="ai-biz-name">{{ b.name }}</span>
                         <span class="ai-biz-stage">{{ b.stage }}</span>
@@ -2611,25 +2796,25 @@ const app = createApp({
                       </div>
                     </div>
                   </div>
-                  <p class="ai-disclaimer" v-if="hasAnyBusinessCompanies(aiResult)">
+                  <p class="ai-disclaimer" v-if="hasAnyBusinessCompanies(aiModules.industry.result)">
                     业务板块龙头与相关公司由 AI 推断，仅用于拓展研究，不构成投资建议。
                   </p>
                 </div>
                 <!-- R17 相关公司：产业链上下游 + 合作/关联公司（AI 推断） -->
-                <div class="ai-section" v-if="hasRelatedCompanies(aiResult)">
+                <div class="ai-section" v-if="hasRelatedCompanies(aiModules.industry.result)">
                   <div class="ai-section-title">相关公司</div>
                   <p class="ai-disclaimer">产业链与合作公司信息由 AI 生成、龙头信息来自第三方数据，均仅用于拓展研究，不构成投资建议。</p>
 
-                  <div class="ai-related" v-if="hasChainCompanies(aiResult)">
+                  <div class="ai-related" v-if="hasChainCompanies(aiModules.industry.result)">
                     <div class="ai-sub-head">
                       <span class="ai-sub-title">产业链上下游</span>
                       <span class="ai-badge">AI 推断 · 供参考</span>
                     </div>
                     <div class="ai-related-cols">
-                      <div class="ai-related-col" v-if="aiResult.chain.upstream && aiResult.chain.upstream.length">
+                      <div class="ai-related-col" v-if="aiModules.industry.result.chain.upstream && aiModules.industry.result.chain.upstream.length">
                         <div class="ai-related-label">上游</div>
                         <div class="ai-chips">
-                          <button v-for="c in aiResult.chain.upstream" :key="c.name" type="button"
+                          <button v-for="c in aiModules.industry.result.chain.upstream" :key="c.name" type="button"
                                   class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
                                   :aria-disabled="companyResolving ? 'true' : 'false'"
                                   @click="openAICompany(c)">
@@ -2640,10 +2825,10 @@ const app = createApp({
                           </button>
                         </div>
                       </div>
-                      <div class="ai-related-col" v-if="aiResult.chain.downstream && aiResult.chain.downstream.length">
+                      <div class="ai-related-col" v-if="aiModules.industry.result.chain.downstream && aiModules.industry.result.chain.downstream.length">
                         <div class="ai-related-label">下游</div>
                         <div class="ai-chips">
-                          <button v-for="c in aiResult.chain.downstream" :key="c.name" type="button"
+                          <button v-for="c in aiModules.industry.result.chain.downstream" :key="c.name" type="button"
                                   class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
                                   :aria-disabled="companyResolving ? 'true' : 'false'"
                                   @click="openAICompany(c)">
@@ -2658,13 +2843,13 @@ const app = createApp({
                     <p class="ai-disclaimer">基于公司主营业务的产业链推断，不代表真实交易关系。</p>
                   </div>
 
-                  <div class="ai-related" v-if="aiResult.partners && aiResult.partners.length">
+                  <div class="ai-related" v-if="aiModules.industry.result.partners && aiModules.industry.result.partners.length">
                     <div class="ai-sub-head">
                       <span class="ai-sub-title">合作 / 关联公司</span>
                       <span class="ai-badge">AI 推断 · 需核实</span>
                     </div>
                     <div class="ai-chips">
-                      <button v-for="c in aiResult.partners" :key="c.name" type="button"
+                      <button v-for="c in aiModules.industry.result.partners" :key="c.name" type="button"
                               class="ai-chip" :class="{ 'is-resolving': companyResolving === companyKey(c) }"
                               :aria-disabled="companyResolving ? 'true' : 'false'"
                               @click="openAICompany(c)">
@@ -2679,50 +2864,53 @@ const app = createApp({
                 </div>
                 <!-- R17：AI 公司解析提示为 AI 结果卡片公共节点（仅板块 related 时也可见） -->
                 <p class="ai-company-hint" v-if="companyHint">{{ companyHint }}</p>
+                  </template>
+                  <!-- 估值：沿用现有估值参数六块 + 计算明细 -->
+                  <template v-else-if="m.id === 'valuation'">
                 <!-- 防御：旧缓存/异常响应若无 valuation，跳过整组渲染而不是让根组件渲染抛错（白屏） -->
-                <div class="ai-section" v-if="aiResult.valuation">
+                <div class="ai-section" v-if="aiModules.valuation.result.valuation">
                   <div class="ai-section-title">估值参数</div>
                   <div class="ai-valuation ai-val-params" style="flex-direction:column;align-items:stretch;gap:12px">
                     <!-- 一、模型 -->
                     <div class="ai-val-block">
                       <div class="ai-val-head">模型</div>
-                      <div class="ai-v"><span class="ai-model">{{ aiResult.valuation.model_name }}</span><template v-if="aiResult.valuation.model_reason"> · {{ aiResult.valuation.model_reason }}</template></div>
-                      <el-alert v-if="aiResult.valuation.applicable === false" type="error" :closable="false" style="margin-top:6px"
-                                :title="(aiResult.valuation.inapplicable_reason || '现金流贴现法不适用')" />
+                      <div class="ai-v"><span class="ai-model">{{ aiModules.valuation.result.valuation.model_name }}</span><template v-if="aiModules.valuation.result.valuation.model_reason"> · {{ aiModules.valuation.result.valuation.model_reason }}</template></div>
+                      <el-alert v-if="aiModules.valuation.result.valuation.applicable === false" type="error" :closable="false" style="margin-top:6px"
+                                :title="(aiModules.valuation.result.valuation.inapplicable_reason || '现金流贴现法不适用')" />
                     </div>
                     <!-- 二、基期自由现金流（一行式，分解与逐年明细收进折叠区） -->
                     <div class="ai-val-block">
                       <div class="ai-val-head">基期自由现金流</div>
-                      <div class="ai-v">{{ fmtYiPlain(aiResult.valuation.fcf_base_value) }} 亿元<template v-if="aiResult.valuation.fcf_note"> · {{ aiResult.valuation.fcf_note }}</template></div>
+                      <div class="ai-v">{{ fmtYiPlain(aiModules.valuation.result.valuation.fcf_base_value) }} 亿元<template v-if="aiModules.valuation.result.valuation.fcf_note"> · {{ aiModules.valuation.result.valuation.fcf_note }}</template></div>
                     </div>
                     <!-- 三、折现率（只展示最终 r 与公司特定风险，推导收进折叠区） -->
                     <div class="ai-val-block">
                       <div class="ai-val-head">折现率</div>
-                      <div class="ai-v">{{ fmtRate(aiResult.valuation.discount_rate) }}% · <template v-if="aiResult.valuation.company_risk_items && aiResult.valuation.company_risk_items.length">公司特定风险：{{ riskItemsText(aiResult.valuation.company_risk_items) }}</template><template v-else>未叠加公司特定风险溢价</template></div>
-                      <div class="ai-v ai-val-muted" v-if="aiResult.valuation.discount_note">{{ aiResult.valuation.discount_note }}</div>
-                      <div class="ai-v ai-val-muted" v-if="aiResult.valuation.company_risk_note">{{ aiResult.valuation.company_risk_note }}</div>
+                      <div class="ai-v">{{ fmtRate(aiModules.valuation.result.valuation.discount_rate) }}% · <template v-if="aiModules.valuation.result.valuation.company_risk_items && aiModules.valuation.result.valuation.company_risk_items.length">公司特定风险：{{ riskItemsText(aiModules.valuation.result.valuation.company_risk_items) }}</template><template v-else>未叠加公司特定风险溢价</template></div>
+                      <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.discount_note">{{ aiModules.valuation.result.valuation.discount_note }}</div>
+                      <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.company_risk_note">{{ aiModules.valuation.result.valuation.company_risk_note }}</div>
                     </div>
                     <!-- 四、增长参数（按模型给最终参数，锚表收进折叠区） -->
                     <div class="ai-val-block">
                       <div class="ai-val-head">增长参数</div>
-                      <div class="ai-v" v-if="aiResult.valuation.model === 'zero'">零增长，无增长参数</div>
-                      <div class="ai-v" v-else-if="aiResult.valuation.model === 'perpetual'">
-                        永续增长 g = {{ fmtRate(paramValue(aiResult.valuation, 'g')) }}%
+                      <div class="ai-v" v-if="aiModules.valuation.result.valuation.model === 'zero'">零增长，无增长参数</div>
+                      <div class="ai-v" v-else-if="aiModules.valuation.result.valuation.model === 'perpetual'">
+                        永续增长 g = {{ fmtRate(paramValue(aiModules.valuation.result.valuation, 'g')) }}%
                       </div>
-                      <div class="ai-v" v-else-if="aiResult.valuation.model === 'two_stage'">
-                        g1 = {{ fmtRate(paramValue(aiResult.valuation, 'g1')) }}%（{{ paramValue(aiResult.valuation, 'n1') }} 年）→ 永续 g∞ = {{ fmtRate(aiResult.valuation.growth_terminal) }}%
+                      <div class="ai-v" v-else-if="aiModules.valuation.result.valuation.model === 'two_stage'">
+                        g1 = {{ fmtRate(paramValue(aiModules.valuation.result.valuation, 'g1')) }}%（{{ paramValue(aiModules.valuation.result.valuation, 'n1') }} 年）→ 永续 g∞ = {{ fmtRate(aiModules.valuation.result.valuation.growth_terminal) }}%
                       </div>
                       <div class="ai-v" v-else>
-                        g1 = {{ fmtRate(paramValue(aiResult.valuation, 'g1')) }}%（{{ paramValue(aiResult.valuation, 'n1') }} 年）→ g2 = {{ fmtRate(paramValue(aiResult.valuation, 'g2')) }}%（{{ paramValue(aiResult.valuation, 'n2') }} 年）→ 永续 g∞ = {{ fmtRate(aiResult.valuation.growth_terminal) }}%
+                        g1 = {{ fmtRate(paramValue(aiModules.valuation.result.valuation, 'g1')) }}%（{{ paramValue(aiModules.valuation.result.valuation, 'n1') }} 年）→ g2 = {{ fmtRate(paramValue(aiModules.valuation.result.valuation, 'g2')) }}%（{{ paramValue(aiModules.valuation.result.valuation, 'n2') }} 年）→ 永续 g∞ = {{ fmtRate(aiModules.valuation.result.valuation.growth_terminal) }}%
                       </div>
                     </div>
                     <!-- 五、结论 -->
                     <div class="ai-val-block">
                       <div class="ai-val-head">结论</div>
-                      <p class="ai-text">{{ aiResult.valuation.rationale }}</p>
-                      <p class="ai-text ai-val-warn" v-for="w in (aiResult.valuation.warnings || [])" :key="w">提示：{{ w }}</p>
+                      <p class="ai-text">{{ aiModules.valuation.result.valuation.rationale }}</p>
+                      <p class="ai-text ai-val-warn" v-for="w in (aiModules.valuation.result.valuation.warnings || [])" :key="w">提示：{{ w }}</p>
                       <div class="ai-val-actions">
-                        <el-button size="small" type="primary" plain :disabled="aiResult.valuation.applicable === false" @click="applyAIValuation(aiResult.valuation)">应用参数到估值表单</el-button>
+                        <el-button size="small" type="primary" plain :disabled="aiModules.valuation.result.valuation.applicable === false" @click="applyAIValuation(aiModules.valuation.result.valuation)">应用参数到估值表单</el-button>
                       </div>
                     </div>
                     <!-- 六、计算明细（默认收起：折现率勾稽、增长锚表、关键校验、逐年 FCF） -->
@@ -2730,21 +2918,21 @@ const app = createApp({
                       <el-button text size="small" @click="aiValDetailOpen = !aiValDetailOpen">{{ aiValDetailOpen ? '收起计算明细' : '查看计算明细' }}</el-button>
                       <div v-if="aiValDetailOpen" class="ai-val-detail-body">
                         <div class="ai-val-subhead">折现率对账</div>
-                        <div class="ai-val-lines" v-if="aiResult.valuation.discount_reconcile_available">
-                          <div class="ai-v ai-val-line" v-for="line in discountLines(aiResult.valuation)" :key="line">{{ line }}</div>
+                        <div class="ai-val-lines" v-if="aiModules.valuation.result.valuation.discount_reconcile_available">
+                          <div class="ai-v ai-val-line" v-for="line in discountLines(aiModules.valuation.result.valuation)" :key="line">{{ line }}</div>
                         </div>
                         <div class="ai-v" v-else>
-                          基准（{{ aiResult.valuation.discount_base_label === 'WACC' ? 'WACC' : (aiResult.valuation.discount_base_label === 'Re' ? 'Re' : '默认值') }}）{{ fmtRate(aiResult.valuation.discount_base_value) }}% ·
-                          取整 {{ signedPP2(aiResult.valuation.discount_rounding_adjustment) }} → {{ fmtRate(aiResult.valuation.discount_rounded) }}% ·
-                          区间约束 {{ signedPP2(aiResult.valuation.discount_range_adjustment) }} → r = {{ fmtRate(aiResult.valuation.discount_rate) }}%
+                          基准（{{ aiModules.valuation.result.valuation.discount_base_label === 'WACC' ? 'WACC' : (aiModules.valuation.result.valuation.discount_base_label === 'Re' ? 'Re' : '默认值') }}）{{ fmtRate(aiModules.valuation.result.valuation.discount_base_value) }}% ·
+                          取整 {{ signedPP2(aiModules.valuation.result.valuation.discount_rounding_adjustment) }} → {{ fmtRate(aiModules.valuation.result.valuation.discount_rounded) }}% ·
+                          区间约束 {{ signedPP2(aiModules.valuation.result.valuation.discount_range_adjustment) }} → r = {{ fmtRate(aiModules.valuation.result.valuation.discount_rate) }}%
                         </div>
 
-                        <template v-if="aiResult.valuation.model !== 'zero'">
+                        <template v-if="aiModules.valuation.result.valuation.model !== 'zero'">
                           <div class="ai-val-subhead">增长锚构成</div>
                           <table class="ai-weight-table ai-anchor-table">
                             <thead><tr><th>构成</th><th>锚值</th><th>权重</th><th>贡献</th></tr></thead>
                             <tbody>
-                              <tr v-for="row in anchorRows(aiResult.valuation)" :key="row.key">
+                              <tr v-for="row in anchorRows(aiModules.valuation.result.valuation)" :key="row.key">
                                 <td data-label="构成">{{ row.name }}</td>
                                 <td data-label="锚值">{{ row.available ? fmtRate(row.value) + '%' : '不适用' }}</td>
                                 <td data-label="权重">{{ row.available ? pctWeight(row.weight) : '—' }}</td>
@@ -2753,40 +2941,40 @@ const app = createApp({
                               <tr class="ai-weight-total">
                                 <td data-label="构成">加权合计</td>
                                 <td data-label="锚值">—</td>
-                                <td data-label="权重">{{ pctWeight(anchorTable(aiResult.valuation).weight_sum) }}</td>
-                                <td data-label="贡献">{{ fmtRate(anchorTable(aiResult.valuation).raw) }}%</td>
+                                <td data-label="权重">{{ pctWeight(anchorTable(aiModules.valuation.result.valuation).weight_sum) }}</td>
+                                <td data-label="贡献">{{ fmtRate(anchorTable(aiModules.valuation.result.valuation).raw) }}%</td>
                               </tr>
                             </tbody>
                           </table>
-                          <div class="ai-v ai-val-reconcile" v-if="anchorReconcile(aiResult.valuation)">{{ anchorReconcile(aiResult.valuation) }}</div>
-                          <div class="ai-v ai-val-muted" v-if="anchorTable(aiResult.valuation).note">{{ anchorTable(aiResult.valuation).note }}</div>
-                          <div class="ai-v ai-val-muted" v-if="aiResult.valuation.growth_history_note">{{ aiResult.valuation.growth_history_note }}</div>
-                          <div class="ai-v ai-val-muted" v-if="aiResult.valuation.growth_cycle_note">{{ aiResult.valuation.growth_cycle_note }}</div>
-                          <div class="ai-v ai-val-muted" v-if="aiResult.valuation.g1_note">{{ aiResult.valuation.g1_note }}</div>
-                          <div class="ai-v ai-val-muted" v-if="aiResult.valuation.terminal_note">{{ aiResult.valuation.terminal_note }}</div>
-                          <div class="ai-v ai-val-muted" v-if="aiResult.valuation.negative_growth_note">{{ aiResult.valuation.negative_growth_note }}</div>
+                          <div class="ai-v ai-val-reconcile" v-if="anchorReconcile(aiModules.valuation.result.valuation)">{{ anchorReconcile(aiModules.valuation.result.valuation) }}</div>
+                          <div class="ai-v ai-val-muted" v-if="anchorTable(aiModules.valuation.result.valuation).note">{{ anchorTable(aiModules.valuation.result.valuation).note }}</div>
+                          <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.growth_history_note">{{ aiModules.valuation.result.valuation.growth_history_note }}</div>
+                          <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.growth_cycle_note">{{ aiModules.valuation.result.valuation.growth_cycle_note }}</div>
+                          <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.g1_note">{{ aiModules.valuation.result.valuation.g1_note }}</div>
+                          <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.terminal_note">{{ aiModules.valuation.result.valuation.terminal_note }}</div>
+                          <div class="ai-v ai-val-muted" v-if="aiModules.valuation.result.valuation.negative_growth_note">{{ aiModules.valuation.result.valuation.negative_growth_note }}</div>
                         </template>
 
                         <div class="ai-val-subhead">关键校验</div>
                         <div class="ai-val-checks">
                           <div class="ai-val-check">
                             <span class="ai-val-check-label">资本支出覆盖率</span>
-                            <span class="ai-val-check-value">{{ checkText(aiResult.valuation.capex_check) }}</span>
-                            <div class="ai-val-check-note" v-if="aiResult.valuation.capex_check && aiResult.valuation.capex_check.note">{{ aiResult.valuation.capex_check.note }}</div>
+                            <span class="ai-val-check-value">{{ checkText(aiModules.valuation.result.valuation.capex_check) }}</span>
+                            <div class="ai-val-check-note" v-if="aiModules.valuation.result.valuation.capex_check && aiModules.valuation.result.valuation.capex_check.note">{{ aiModules.valuation.result.valuation.capex_check.note }}</div>
                           </div>
                           <div class="ai-val-check">
                             <span class="ai-val-check-label">自由现金流 ÷ 净利润</span>
-                            <span class="ai-val-check-value">{{ checkText(aiResult.valuation.fcf_profit_check) }}</span>
-                            <div class="ai-val-check-note" v-if="aiResult.valuation.fcf_profit_check && aiResult.valuation.fcf_profit_check.note">{{ aiResult.valuation.fcf_profit_check.note }}</div>
+                            <span class="ai-val-check-value">{{ checkText(aiModules.valuation.result.valuation.fcf_profit_check) }}</span>
+                            <div class="ai-val-check-note" v-if="aiModules.valuation.result.valuation.fcf_profit_check && aiModules.valuation.result.valuation.fcf_profit_check.note">{{ aiModules.valuation.result.valuation.fcf_profit_check.note }}</div>
                           </div>
                         </div>
 
-                        <template v-if="aiResult.valuation.fcf_series && aiResult.valuation.fcf_series.length">
+                        <template v-if="aiModules.valuation.result.valuation.fcf_series && aiModules.valuation.result.valuation.fcf_series.length">
                           <div class="ai-val-subhead">逐年自由现金流</div>
                           <table class="ai-weight-table">
                             <thead><tr><th>年份</th><th>经营现金流净额（亿）</th><th>保全性资本支出（亿）</th><th>FCF（亿）</th></tr></thead>
                             <tbody>
-                              <tr v-for="p in aiResult.valuation.fcf_series" :key="p.year">
+                              <tr v-for="p in aiModules.valuation.result.valuation.fcf_series" :key="p.year">
                                 <td data-label="年份">{{ p.year }}</td>
                                 <td data-label="经营现金流净额（亿）">{{ fmtYiPlain(p.operating_cash) }}</td>
                                 <td data-label="保全性资本支出（亿）">{{ fmtYiPlain(p.preservation_capex) }}</td>
@@ -2799,13 +2987,21 @@ const app = createApp({
                     </div>
                   </div>
                 </div>
+                </template>
+
                 <!-- usage / 耗时任一存在即渲染；缺失一侧不显示，另一侧照常展示 -->
-                <div v-if="aiResult.usage || aiElapsed != null" class="ai-usage">
-                  <template v-if="aiResult.usage">本次分析消耗约 {{ aiResult.usage.total_tokens }} tokens（输入 {{ aiResult.usage.prompt_tokens }} / 输出 {{ aiResult.usage.completion_tokens }}）</template>
-                  <template v-if="aiResult.usage && aiElapsed != null"> · </template>
-                  <template v-if="aiElapsed != null">{{ aiResult.usage ? '耗时' : '本次分析耗时' }} {{ aiElapsed.toFixed(1) }}s</template>
+                <div v-if="aiModules[m.id].usage || aiModules[m.id].elapsedMs != null || aiModules[m.id].cached" class="ai-usage">
+                  <template v-if="aiModules[m.id].usage">本次分析消耗约 {{ aiModules[m.id].usage.total_tokens }} tokens（输入 {{ aiModules[m.id].usage.prompt_tokens }} / 输出 {{ aiModules[m.id].usage.completion_tokens }}）</template>
+                  <template v-if="aiModules[m.id].usage && (aiModules[m.id].elapsedMs != null || aiModules[m.id].cached)"> · </template>
+                  <template v-if="aiModules[m.id].cached">缓存结果</template>
+                  <template v-else-if="aiModules[m.id].elapsedMs != null">耗时 {{ aiModules[m.id].elapsedMs.toFixed(1) }}s</template>
                 </div>
               </template>
+            </div>
+            <div v-if="aiAllElapsedMs != null" class="ai-usage ai-all-usage">
+              全分析总耗时 {{ aiAllElapsedMs.toFixed(1) }}s
+              <template v-if="aiAllUsage"> · 合计 {{ aiAllUsage.total_tokens }} tokens</template>
+            </div>
             </div>
           </section>
           </section>

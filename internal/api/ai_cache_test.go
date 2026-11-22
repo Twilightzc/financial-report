@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,10 +15,11 @@ import (
 
 	"financial-report/internal/client"
 	"financial-report/internal/model"
+	"financial-report/internal/service"
 )
 
-func testAIResult(conclusion string) *model.AIAnalysisResult {
-	return &model.AIAnalysisResult{Conclusion: conclusion}
+func testOutcome(conclusion string) *aiModuleOutcome {
+	return &aiModuleOutcome{Payload: &model.AIFinancialResult{Conclusion: conclusion}}
 }
 
 // waitCh 等待测试信号，超时即失败（避免并发用例挂死）。
@@ -33,14 +35,14 @@ func waitCh(t *testing.T, ch <-chan struct{}, what string) {
 // C1 命中：预置条目 → aiCacheHit，compute 不执行，返回同一结果对象。
 func TestAICacheHitSkipsCompute(t *testing.T) {
 	c := newAIResultCache()
-	key := aiCacheKeyFor("600519", "low", 0, 0, false)
-	want := testAIResult("预置结论")
-	c.entries[key] = aiCacheEntry{result: want, expiresAt: c.now().Add(time.Hour)}
+	key := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
+	want := testOutcome("预置结论")
+	c.entries[key] = aiCacheEntry{outcome: want, expiresAt: c.now().Add(time.Hour)}
 
 	calls := 0
-	got, outcome, err := c.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
+	got, outcome, err := c.getOrCompute(key, func() (*aiModuleOutcome, error) {
 		calls++
-		return testAIResult("不应执行"), nil
+		return testOutcome("不应执行"), nil
 	})
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
@@ -59,11 +61,11 @@ func TestAICacheHitSkipsCompute(t *testing.T) {
 // C2 未命中后命中：首次 miss 计算一次，第二次 hit 不再计算。
 func TestAICacheMissThenHit(t *testing.T) {
 	c := newAIResultCache()
-	key := aiCacheKeyFor("600519", "low", 2020, 2024, true)
-	want := testAIResult("首次结果")
+	key := aiCacheKeyFor("600519", model.AIModuleFinancial, 2020, 2024, true)
+	want := testOutcome("首次结果")
 
 	calls := 0
-	compute := func() (*model.AIAnalysisResult, error) {
+	compute := func() (*aiModuleOutcome, error) {
 		calls++
 		return want, nil
 	}
@@ -87,11 +89,11 @@ func TestAICacheExpires(t *testing.T) {
 	now := time.Date(2026, 10, 17, 10, 0, 0, 0, time.UTC)
 	c.now = func() time.Time { return now }
 
-	key := aiCacheKeyFor("600519", "low", 0, 0, false)
-	first := testAIResult("第一版")
-	second := testAIResult("第二版")
+	key := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
+	first := testOutcome("第一版")
+	second := testOutcome("第二版")
 	calls := 0
-	compute := func() (*model.AIAnalysisResult, error) {
+	compute := func() (*aiModuleOutcome, error) {
 		calls++
 		if calls == 1 {
 			return first, nil
@@ -116,16 +118,15 @@ func TestAICacheExpires(t *testing.T) {
 	if got != second {
 		t.Errorf("过期后返回旧结果，want 新结果")
 	}
-	if e := c.entries[key]; e.result != second {
+	if e := c.entries[key]; e.outcome != second {
 		t.Errorf("过期条目未被新结果替换")
 	}
 }
 
 // C4 并发去重：leader 计算期间同 key 请求等待并复用，compute 只执行一次。
-// 通过注入 now 在 waiter 查询缓存时发信号，确定性保证 waiter 先于 leader 完成进入等待。
 func TestAICacheCoalescesConcurrent(t *testing.T) {
 	c := newAIResultCache()
-	key := aiCacheKeyFor("600519", "low", 0, 0, false)
+	key := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
 	waiterEntered := make(chan struct{})
 	var clockCalls atomic.Int32
 	c.now = func() time.Time {
@@ -137,17 +138,17 @@ func TestAICacheCoalescesConcurrent(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	want := testAIResult("leader 结果")
+	want := testOutcome("leader 结果")
 	var calls atomic.Int32
 
 	type callOut struct {
-		res     *model.AIAnalysisResult
+		res     *aiModuleOutcome
 		outcome aiCacheOutcome
 		err     error
 	}
 	leaderOut := make(chan callOut, 1)
 	go func() {
-		res, outcome, err := c.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
+		res, outcome, err := c.getOrCompute(key, func() (*aiModuleOutcome, error) {
 			calls.Add(1)
 			close(entered)
 			<-release
@@ -159,9 +160,9 @@ func TestAICacheCoalescesConcurrent(t *testing.T) {
 
 	waiterOut := make(chan callOut, 1)
 	go func() {
-		res, outcome, err := c.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
+		res, outcome, err := c.getOrCompute(key, func() (*aiModuleOutcome, error) {
 			calls.Add(1)
-			return testAIResult("waiter 不应计算"), nil
+			return testOutcome("waiter 不应计算"), nil
 		})
 		waiterOut <- callOut{res, outcome, err}
 	}()
@@ -191,14 +192,14 @@ func TestAICacheCoalescesConcurrent(t *testing.T) {
 func TestAICacheDifferentKeysParallel(t *testing.T) {
 	c := newAIResultCache()
 	keys := []aiCacheKey{
-		aiCacheKeyFor("600519", "low", 0, 0, false),
-		aiCacheKeyFor("000001", "high", 0, 0, false),
+		aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false),
+		aiCacheKeyFor("600519", model.AIModuleIndustry, 0, 0, false),
 	}
 	entered := []chan struct{}{make(chan struct{}), make(chan struct{})}
 	release := make(chan struct{})
 
 	type callOut struct {
-		res     *model.AIAnalysisResult
+		res     *aiModuleOutcome
 		outcome aiCacheOutcome
 		err     error
 	}
@@ -207,8 +208,8 @@ func TestAICacheDifferentKeysParallel(t *testing.T) {
 		i := i
 		outs[i] = make(chan callOut, 1)
 		go func() {
-			want := testAIResult(fmt.Sprintf("结果%d", i))
-			res, outcome, err := c.getOrCompute(keys[i], func() (*model.AIAnalysisResult, error) {
+			want := testOutcome(fmt.Sprintf("结果%d", i))
+			res, outcome, err := c.getOrCompute(keys[i], func() (*aiModuleOutcome, error) {
 				close(entered[i])
 				<-release
 				return want, nil
@@ -216,7 +217,6 @@ func TestAICacheDifferentKeysParallel(t *testing.T) {
 			outs[i] <- callOut{res, outcome, err}
 		}()
 	}
-	// 两个 compute 同时处于阻塞态，说明不同 key 未被全局锁串行化。
 	waitCh(t, entered[0], "key0 进入 compute")
 	waitCh(t, entered[1], "key1 进入 compute")
 	close(release)
@@ -232,9 +232,9 @@ func TestAICacheDifferentKeysParallel(t *testing.T) {
 // C6 失败不缓存：compute 返回 error 不写 entries，下一次仍 miss 并重试。
 func TestAICacheFailureNotCached(t *testing.T) {
 	c := newAIResultCache()
-	key := aiCacheKeyFor("600519", "low", 0, 0, false)
+	key := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
 	calls := 0
-	compute := func() (*model.AIAnalysisResult, error) {
+	compute := func() (*aiModuleOutcome, error) {
 		calls++
 		return nil, errors.New("上游失败")
 	}
@@ -265,9 +265,9 @@ func TestAICacheCapacityEviction(t *testing.T) {
 	var lastKey aiCacheKey
 	lastCalls := 0
 	for i := 0; i <= aiCacheMax; i++ {
-		key := aiCacheKeyFor(fmt.Sprintf("%06d", i), "low", 0, 0, false)
-		want := testAIResult(fmt.Sprintf("结果%d", i))
-		if _, outcome, err := c.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
+		key := aiCacheKeyFor(fmt.Sprintf("%06d", i%1000000), model.AIModuleFinancial, 0, 0, false)
+		want := testOutcome(fmt.Sprintf("结果%d", i))
+		if _, outcome, err := c.getOrCompute(key, func() (*aiModuleOutcome, error) {
 			return want, nil
 		}); err != nil || outcome != aiCacheMiss {
 			t.Fatalf("写入 key%d = (outcome=%v, err=%v), want (aiCacheMiss, nil)", i, outcome, err)
@@ -277,7 +277,7 @@ func TestAICacheCapacityEviction(t *testing.T) {
 	if n := len(c.entries); n > aiCacheMax {
 		t.Errorf("entries = %d, want <= %d", n, aiCacheMax)
 	}
-	if _, outcome, err := c.getOrCompute(lastKey, func() (*model.AIAnalysisResult, error) {
+	if _, outcome, err := c.getOrCompute(lastKey, func() (*aiModuleOutcome, error) {
 		lastCalls++
 		return nil, nil
 	}); err != nil || outcome != aiCacheHit {
@@ -288,43 +288,41 @@ func TestAICacheCapacityEviction(t *testing.T) {
 	}
 }
 
-// C8 key 维度：reasoning / 年份任一不同即不同 key；未指定年份归一化为 0/0；
-// 显式 0/0（RangeSpecified=true）与未指定（false）必须区分。
+// C8 key 维度：module / 年份 / 代码任一不同即不同 key；未指定年份归一化为 0/0；
+// 显式 0/0（RangeSpecified=true）与未指定（false）必须区分；不再含 reasoning 维度。
 func TestAICacheKeyDimensions(t *testing.T) {
-	base := aiCacheKeyFor("600519", "low", 0, 0, false)
+	base := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
 	if base.StartYear != 0 || base.EndYear != 0 {
 		t.Errorf("未指定年份 key = %+v, want StartYear=0 EndYear=0", base)
 	}
 	if base.RangeSpecified {
 		t.Errorf("未指定年份 RangeSpecified = true, want false")
 	}
-	if aiCacheKeyFor("600519", "medium", 0, 0, false) == base {
-		t.Errorf("不同 reasoning 生成了相同 key")
+	if aiCacheKeyFor("600519", model.AIModuleIndustry, 0, 0, false) == base {
+		t.Errorf("不同 module 生成了相同 key")
 	}
-	if aiCacheKeyFor("600519", "low", 2020, 2024, true) == base {
+	if aiCacheKeyFor("600519", model.AIModuleFinancial, 2020, 2024, true) == base {
 		t.Errorf("不同年份范围生成了相同 key")
 	}
-	if aiCacheKeyFor("000001", "low", 0, 0, false) == base {
+	if aiCacheKeyFor("000001", model.AIModuleFinancial, 0, 0, false) == base {
 		t.Errorf("不同代码生成了相同 key")
 	}
-	if aiCacheKeyFor("600519", "low", 0, 0, true) == base {
+	if aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, true) == base {
 		t.Errorf("显式 0/0 与未指定年份生成了相同 key")
 	}
 }
 
-// C8b 显式 0/0 与未指定年份互不影响：写入其中一个 key 不会命中另一个。
-// 显式 0/0 在计算路径中返回 400（不缓存），未指定年份走「最新年报 - 4」默认（可缓存）。
+// C8b 显式 0/0 与未指定年份互不影响。
 func TestAICacheExplicitZeroRangeIsolated(t *testing.T) {
 	c := newAIResultCache()
-	defaultKey := aiCacheKeyFor("600519", "low", 0, 0, false)
-	explicitKey := aiCacheKeyFor("600519", "low", 0, 0, true)
+	defaultKey := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
+	explicitKey := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, true)
 
-	// 预置默认 key，显式 0/0 必须仍为 miss（不被误命中）。
-	wantDefault := testAIResult("默认年份结果")
-	c.entries[defaultKey] = aiCacheEntry{result: wantDefault, expiresAt: c.now().Add(time.Hour)}
+	wantDefault := testOutcome("默认年份结果")
+	c.entries[defaultKey] = aiCacheEntry{outcome: wantDefault, expiresAt: c.now().Add(time.Hour)}
 
 	explicitCalls := 0
-	_, outcome, err := c.getOrCompute(explicitKey, func() (*model.AIAnalysisResult, error) {
+	_, outcome, err := c.getOrCompute(explicitKey, func() (*aiModuleOutcome, error) {
 		explicitCalls++
 		return nil, errInvalidYearRange
 	})
@@ -338,9 +336,8 @@ func TestAICacheExplicitZeroRangeIsolated(t *testing.T) {
 		t.Errorf("显式 0/0 compute 调用 %d 次, want 1", explicitCalls)
 	}
 
-	// 默认 key 不受影响，仍可命中且结果不变。
-	got, outcome, err := c.getOrCompute(defaultKey, func() (*model.AIAnalysisResult, error) {
-		return testAIResult("不应计算"), nil
+	got, outcome, err := c.getOrCompute(defaultKey, func() (*aiModuleOutcome, error) {
+		return testOutcome("不应计算"), nil
 	})
 	if err != nil || outcome != aiCacheHit || got != wantDefault {
 		t.Errorf("默认 key = (%v, %v, %v), want (预置结果, aiCacheHit, nil)", got, outcome, err)
@@ -350,7 +347,7 @@ func TestAICacheExplicitZeroRangeIsolated(t *testing.T) {
 // C9 panic 释放等待者：leader panic 时等待者得到错误而非永久阻塞，inflight 清空且不写缓存。
 func TestAICachePanicReleasesWaiters(t *testing.T) {
 	c := newAIResultCache()
-	key := aiCacheKeyFor("600519", "low", 0, 0, false)
+	key := aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false)
 	waiterEntered := make(chan struct{})
 	var clockCalls atomic.Int32
 	c.now = func() time.Time {
@@ -365,7 +362,7 @@ func TestAICachePanicReleasesWaiters(t *testing.T) {
 	leaderDone := make(chan any, 1)
 	go func() {
 		defer func() { leaderDone <- recover() }()
-		_, _, _ = c.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
+		_, _, _ = c.getOrCompute(key, func() (*aiModuleOutcome, error) {
 			close(entered)
 			<-release
 			panic("compute boom")
@@ -374,14 +371,14 @@ func TestAICachePanicReleasesWaiters(t *testing.T) {
 	waitCh(t, entered, "leader 进入 compute")
 
 	type callOut struct {
-		res     *model.AIAnalysisResult
+		res     *aiModuleOutcome
 		outcome aiCacheOutcome
 		err     error
 	}
 	waiterOut := make(chan callOut, 1)
 	go func() {
-		res, outcome, err := c.getOrCompute(key, func() (*model.AIAnalysisResult, error) {
-			return testAIResult("waiter 不应计算"), nil
+		res, outcome, err := c.getOrCompute(key, func() (*aiModuleOutcome, error) {
+			return testOutcome("waiter 不应计算"), nil
 		})
 		waiterOut <- callOut{res, outcome, err}
 	}()
@@ -406,16 +403,22 @@ func TestAICachePanicReleasesWaiters(t *testing.T) {
 	}
 }
 
-// H1 缓存命中不取数：预置缓存后，handler 在任何取数之前直接返回。
-// 若实现错误地把缓存放在取数之后，本用例会因外部请求失败而暴露。
-func TestGetAIAnalysisCacheHitSkipsFetch(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := NewHandler(client.New(), "test-key", "", "", nil)
-	want := testAIResult("预置缓存结论")
-	h.aiCache.entries[aiCacheKeyFor("600519", "low", 0, 0, false)] = aiCacheEntry{
-		result:    want,
+// seedModule 预置某模块缓存（模拟同一股票同年份已分析过）。
+func seedModule(h *Handler, module string, out *aiModuleOutcome) {
+	h.aiCache.entries[aiCacheKeyFor("600519", module, 0, 0, false)] = aiCacheEntry{
+		outcome:   out,
 		expiresAt: time.Now().Add(time.Hour),
 	}
+}
+
+// H1/T15 全命中不取数：三个已上线模块预置缓存后，all 请求零上游请求直接返回。
+// 若实现错误地把缓存放在取数之后，本用例会因外部请求失败而暴露。
+func TestGetAIAnalysisAllHitSkipsFetch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	seedModule(h, model.AIModuleFinancial, &aiModuleOutcome{Payload: &model.AIFinancialResult{Conclusion: "预置财务结论"}})
+	seedModule(h, model.AIModuleIndustry, &aiModuleOutcome{Payload: &model.AIIndustryResult{Industry: model.AIIndustry{Name: "预置行业"}}})
+	seedModule(h, model.AIModuleValuation, &aiModuleOutcome{Payload: &model.AIValuationResult{Valuation: model.AIValuation{ModelName: "预置估值"}}})
 	r := NewRouter(h)
 
 	rec := httptest.NewRecorder()
@@ -424,8 +427,8 @@ func TestGetAIAnalysisCacheHitSkipsFetch(t *testing.T) {
 		t.Fatalf("HTTP = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Code int                    `json:"code"`
-		Data model.AIAnalysisResult `json:"data"`
+		Code int                        `json:"code"`
+		Data model.AIAllModulesResponse `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("响应非 JSON: %v (%s)", err, rec.Body.String())
@@ -433,12 +436,52 @@ func TestGetAIAnalysisCacheHitSkipsFetch(t *testing.T) {
 	if body.Code != 0 {
 		t.Fatalf("code = %d, want 0 (%s)", body.Code, rec.Body.String())
 	}
-	if body.Data.Conclusion != "预置缓存结论" {
-		t.Errorf("conclusion = %q, want 预置缓存结论", body.Data.Conclusion)
+	f := body.Data.Modules[model.AIModuleFinancial]
+	if f.Status != model.AIModuleStatusOK || !f.Cached || f.ElapsedMS != 0 {
+		t.Errorf("财务模块缓存响应错误: %+v", f)
+	}
+	if body.Data.Modules[model.AIModuleIndustry].Status != model.AIModuleStatusOK ||
+		body.Data.Modules[model.AIModuleValuation].Status != model.AIModuleStatusOK {
+		t.Errorf("行业/估值模块应命中缓存: %+v", body.Data.Modules)
+	}
+	if body.Data.Modules[model.AIModuleBusinessModel].Status != model.AIModuleStatusNotImplemented {
+		t.Errorf("business_model 应为 not_implemented: %+v", body.Data.Modules[model.AIModuleBusinessModel])
 	}
 }
 
-// H2 code / apikey 校验优先：均在缓存之前，不触碰缓存、不发外部请求。
+// H1b 单模块命中：只返回该模块，cached=true。
+func TestGetAIAnalysisSingleModuleHit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	seedModule(h, model.AIModuleFinancial, &aiModuleOutcome{Payload: &model.AIFinancialResult{Conclusion: "预置财务结论"}})
+	r := NewRouter(h)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?module=financial", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			Module string                   `json:"module"`
+			Status string                   `json:"status"`
+			Cached bool                     `json:"cached"`
+			Result *model.AIFinancialResult `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应非 JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body.Code != 0 || body.Data.Module != model.AIModuleFinancial || body.Data.Status != model.AIModuleStatusOK || !body.Data.Cached {
+		t.Fatalf("单模块响应错误: %+v", body)
+	}
+	if body.Data.Result == nil || body.Data.Result.Conclusion != "预置财务结论" {
+		t.Errorf("result 载荷错误: %+v", body.Data.Result)
+	}
+}
+
+// H2 code / module / apikey 校验优先：均在缓存与取数之前，不触碰缓存、不发外部请求。
 func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("DEEPSEEK_API_KEY", "")
@@ -470,6 +513,37 @@ func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 		assertCacheEmpty(t, h)
 	})
 
+	t.Run("非法module", func(t *testing.T) {
+		h := NewHandler(client.New(), "test-key", "", "", nil)
+		r := NewRouter(h)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?module=bad", nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("HTTP = %d, want 400 (%s)", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Code int `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("响应非 JSON: %v (%s)", err, rec.Body.String())
+		}
+		if body.Code != 1 {
+			t.Errorf("code = %d, want 1", body.Code)
+		}
+		assertCacheEmpty(t, h)
+	})
+
+	t.Run("年度非法", func(t *testing.T) {
+		h := NewHandler(client.New(), "test-key", "", "", nil)
+		r := NewRouter(h)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?startYear=2024&endYear=2020", nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("HTTP = %d, want 400 (%s)", rec.Code, rec.Body.String())
+		}
+		assertCacheEmpty(t, h)
+	})
+
 	t.Run("apikey缺失", func(t *testing.T) {
 		h := NewHandler(client.New(), "", "", "", nil)
 		r := NewRouter(h)
@@ -491,9 +565,163 @@ func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 	})
 }
 
-// R25 AC-11：缓存 schema 升版，r24 条目不再命中。
-func TestAICacheSchemaR25(t *testing.T) {
-	if aiCacheSchema != "r25" {
-		t.Fatalf("aiCacheSchema = %q，期望 r25", aiCacheSchema)
+// H3 business_model 单模块：明确返回尚未上线，不取数、不调 LLM。
+func TestGetAIAnalysisBusinessModelNotImplemented(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	called := 0
+	h.aiChat = func(apiKey, baseURL, modelName, system, user string) (string, model.TokenUsage, error) {
+		called++
+		return "", model.TokenUsage{}, errors.New("不应调用")
+	}
+	r := NewRouter(h)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?module=business_model", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    any    `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if body.Code != 1 || body.Message != "该分析模块尚未上线" || body.Data != nil {
+		t.Fatalf("business_model 响应错误: %+v", body)
+	}
+	if called != 0 {
+		t.Errorf("未上线模块不应调用 LLM，调用 %d 次", called)
+	}
+}
+
+// H4 旧 reasoning 参数被忽略：不报错、不影响缓存 key、不取数（单模块命中）。
+func TestGetAIAnalysisReasoningIgnored(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	seedModule(h, model.AIModuleFinancial, &aiModuleOutcome{Payload: &model.AIFinancialResult{Conclusion: "详细档结论"}})
+	r := NewRouter(h)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?module=financial&reasoning=low", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			Cached bool                     `json:"cached"`
+			Result *model.AIFinancialResult `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if body.Code != 0 || !body.Data.Cached || body.Data.Result.Conclusion != "详细档结论" {
+		t.Errorf("reasoning 参数应被忽略: %+v", body)
+	}
+}
+
+// T11 单模块执行：runAIModule 只调用一次 LLM 并解析出本模块载荷。
+func TestRunAIModuleCallsChatOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	calls := 0
+	h.aiChat = func(apiKey, baseURL, modelName, system, user string) (string, model.TokenUsage, error) {
+		calls++
+		if !strings.Contains(system, "scores") {
+			t.Errorf("财务模块 system 提示词异常")
+		}
+		return `{"scores":[
+			{"dimension":"盈利能力","score":88,"comment":"a"},
+			{"dimension":"偿债能力","score":90,"comment":"b"},
+			{"dimension":"现金获取能力","score":85,"comment":"c"},
+			{"dimension":"经营效率","score":76,"comment":"d"},
+			{"dimension":"成长能力","score":82,"comment":"e"}],"conclusion":"详细结论"}`, model.TokenUsage{TotalTokens: 123}, nil
+	}
+	specs, _, _ := service.ResolveAIModules(model.AIModuleFinancial)
+	out, err := h.runAIModule(specs[0], service.AIModuleInput{Quote: model.Quote{Name: "贵州茅台", Code: "600519"}}, "k", "m", "u")
+	if err != nil {
+		t.Fatalf("runAIModule 失败: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("LLM 调用 %d 次, want 1", calls)
+	}
+	payload, ok := out.Payload.(*model.AIFinancialResult)
+	if !ok || payload.Conclusion != "详细结论" || len(payload.Scores) != 5 {
+		t.Errorf("载荷解析错误: %+v", out.Payload)
+	}
+	if out.Usage == nil || out.Usage.TotalTokens != 123 {
+		t.Errorf("usage 未回填: %+v", out.Usage)
+	}
+}
+
+// T12 模块级失败边界：估值 LLM 失败不影响财务成功，失败模块不写缓存。
+func TestExecuteAIModulePartialFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	h.aiChat = func(apiKey, baseURL, modelName, system, user string) (string, model.TokenUsage, error) {
+		if strings.Contains(user, "估值参数事实") {
+			return "", model.TokenUsage{}, errors.New("估值上游失败")
+		}
+		return `{"scores":[
+			{"dimension":"盈利能力","score":88,"comment":"a"},
+			{"dimension":"偿债能力","score":90,"comment":"b"},
+			{"dimension":"现金获取能力","score":85,"comment":"c"},
+			{"dimension":"经营效率","score":76,"comment":"d"},
+			{"dimension":"成长能力","score":82,"comment":"e"}],"conclusion":"ok"}`, model.TokenUsage{TotalTokens: 10}, nil
+	}
+
+	specs, _, _ := service.ResolveAIModules(model.AIModuleAll)
+	byID := map[string]service.AIModuleSpec{}
+	for _, s := range specs {
+		byID[s.ID] = s
+	}
+	keyFor := func(id string) aiCacheKey { return aiCacheKeyFor("600519", id, 0, 0, false) }
+
+	fin := h.executeAIModule("600519", pendingModule{spec: byID[model.AIModuleFinancial], key: keyFor(model.AIModuleFinancial)},
+		service.AIModuleInput{Quote: model.Quote{Name: "贵州茅台", Code: "600519"}}, "k", "m", "u")
+	if fin.Status != model.AIModuleStatusOK {
+		t.Errorf("财务模块应成功: %+v", fin)
+	}
+	val := h.executeAIModule("600519", pendingModule{spec: byID[model.AIModuleValuation], key: keyFor(model.AIModuleValuation)},
+		service.AIModuleInput{Quote: model.Quote{Name: "贵州茅台", Code: "600519"}}, "k", "m", "u")
+	if val.Status != model.AIModuleStatusError || val.Message != "分析失败，请重试" {
+		t.Errorf("估值模块应失败且文案通用: %+v", val)
+	}
+	if _, ok := h.aiCache.peek(keyFor(model.AIModuleFinancial)); !ok {
+		t.Error("成功模块应写入缓存")
+	}
+	if _, ok := h.aiCache.peek(keyFor(model.AIModuleValuation)); ok {
+		t.Error("失败模块不应写入缓存")
+	}
+}
+
+// T12b aiBuildError 影响范围：三表失败只影响依赖报表的模块，行情失败影响全部。
+func TestAIBuildErrorAffects(t *testing.T) {
+	specs, _, _ := service.ResolveAIModules(model.AIModuleAll)
+	byID := map[string]service.AIModuleSpec{}
+	for _, s := range specs {
+		byID[s.ID] = s
+	}
+	reports := &aiBuildError{reports: true}
+	if !reports.affects(byID[model.AIModuleFinancial]) || !reports.affects(byID[model.AIModuleValuation]) {
+		t.Error("三表失败应影响财务/估值")
+	}
+	if reports.affects(byID[model.AIModuleIndustry]) {
+		t.Error("三表失败不应影响行业")
+	}
+	quote := &aiBuildError{quote: true}
+	for _, id := range []string{model.AIModuleFinancial, model.AIModuleIndustry, model.AIModuleValuation} {
+		if !quote.affects(byID[id]) {
+			t.Errorf("行情失败应影响 %s", id)
+		}
+	}
+}
+
+// R26 AC-9：缓存 schema 升版，r25 条目不再命中；无 reasoning 维度。
+func TestAICacheSchemaR26(t *testing.T) {
+	if aiCacheSchema != "r26" {
+		t.Fatalf("aiCacheSchema = %q，期望 r26", aiCacheSchema)
 	}
 }

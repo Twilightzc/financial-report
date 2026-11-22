@@ -126,18 +126,32 @@ func TestSerializeIndicators(t *testing.T) {
 	}
 }
 
-func TestBuildAIPrompt(t *testing.T) {
+func TestBuildFinancialPrompt(t *testing.T) {
 	a := sampleAnalysis()
 	q := model.Quote{Name: "贵州茅台", Code: "600519", MarketCap: 1.8e12}
-	system, user := BuildAIPrompt(a, q, "medium", []model.SegmentIncome{
-		{Name: "茅台酒", RevenueRatio: 0.87, ProfitRatio: 0.89, GrossMargin: 0.94},
-		{Name: "其他系列酒", RevenueRatio: 0.13, ProfitRatio: 0.11, GrossMargin: 0.76},
-	}, recommendedStub())
+	system, user := BuildFinancialPrompt(AIModuleInput{
+		Quote:    q,
+		Analysis: a,
+		Segments: []model.SegmentIncome{
+			{Name: "茅台酒", RevenueRatio: 0.87, ProfitRatio: 0.89, GrossMargin: 0.94},
+			{Name: "其他系列酒", RevenueRatio: 0.13, ProfitRatio: 0.11, GrossMargin: 0.76},
+		},
+		Rec: recommendedStub(),
+	})
 	if !strings.Contains(system, "盈利能力") {
 		t.Fatalf("系统提示词缺少框架: %s", system)
 	}
-	if !strings.Contains(system, "约200字") {
-		t.Fatalf("系统提示词缺少结论详略要求: %s", system)
+	if !strings.Contains(system, "约300字") {
+		t.Fatalf("系统提示词缺少详细档结论要求: %s", system)
+	}
+	if strings.Contains(system, "reasoning") || strings.Contains(system, "分析模式") {
+		t.Fatalf("系统提示词不应再含分析模式/推理强度: %s", system)
+	}
+	// 财务模块只输出 scores/conclusion，不得含其它模块字段。
+	for _, banned := range []string{`"industry"`, `"businesses"`, `"chain"`, `"partners"`, `"valuation"`} {
+		if strings.Contains(system, banned) {
+			t.Fatalf("财务系统提示词不应含 %s: %s", banned, system)
+		}
 	}
 	if strings.Contains(system, "指标含义字典") || strings.Contains(system, "衡量产品毛利水平") {
 		t.Fatalf("系统提示词不应含指标含义字典（含义已并入用户消息）: %s", system)
@@ -153,6 +167,10 @@ func TestBuildAIPrompt(t *testing.T) {
 	}
 	if !strings.Contains(user, "主营构成") || !strings.Contains(user, "茅台酒（营收 87.00%、利润 89.00%、毛利率 94.00%）") {
 		t.Fatalf("用户消息缺少主营构成: %s", user)
+	}
+	// 财务模块不发送估值事实块（Q3）。
+	if strings.Contains(user, "估值参数事实") {
+		t.Fatalf("财务用户消息不应含估值事实块: %s", user)
 	}
 }
 
@@ -516,8 +534,8 @@ func TestParseAIResultTolerantBusinessesTopLevel(t *testing.T) {
 	}
 }
 
-func TestBuildAIPromptBusinessRelated(t *testing.T) {
-	system, _ := BuildAIPrompt(sampleAnalysis(), model.Quote{}, "low", nil, model.ValuationRecommendation{})
+func TestBuildIndustryPromptBusinessRelated(t *testing.T) {
+	system, _ := BuildIndustryPrompt(AIModuleInput{})
 	for _, want := range []string{
 		`"related"`,
 		"每个板块可输出 related（0–3 家）",
@@ -665,8 +683,8 @@ func TestParseBusinessesLeadersRelatedIndependent(t *testing.T) {
 	}
 }
 
-func TestBuildAIPromptBusinessLeaders(t *testing.T) {
-	system, _ := BuildAIPrompt(sampleAnalysis(), model.Quote{}, "low", nil, model.ValuationRecommendation{})
+func TestBuildIndustryPromptBusinessLeaders(t *testing.T) {
+	system, _ := BuildIndustryPrompt(AIModuleInput{})
 	for _, want := range []string{
 		`"leaders"`,
 		"每个板块可输出 leaders（0–3 家）",

@@ -452,7 +452,10 @@ func TestVerifyPromptOnlyExplains(t *testing.T) {
 		},
 		Applicable: true, BaseYear: 2024,
 	}
-	system, user := BuildAIPrompt(sampleAnalysis(), model.Quote{Name: "测试公司", Code: "600000"}, "low", nil, rec)
+	system, user := BuildValuationPrompt(AIModuleInput{
+		Quote: model.Quote{Name: "测试公司", Code: "600000"},
+		Rec:   rec,
+	})
 	for _, bad := range []string{"±3% 的合理偏差", "zero 或 two_stage", "g1 必须贴近基准增速", "A_raw"} {
 		if strings.Contains(system, bad) {
 			t.Errorf("系统提示词仍含旧歧义规则「%s」", bad)

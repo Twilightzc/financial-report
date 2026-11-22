@@ -353,7 +353,10 @@ type AIChain struct {
 	Downstream []CompanyRef `json:"downstream,omitempty"` // 下游客户/渠道侧，0–3 家
 }
 
-// AIAnalysisResult AI 分析结果（前端雷达图 + 文字结论 + 估值推荐）。
+// AIAnalysisResult 曾为 AI 分析的整包结果（前端雷达图 + 文字结论 + 估值推荐）。
+//
+// R26 起 AI 分析按模块拆分，本类型不再出现在 API 响应与缓存中，
+// 仅作为 ParseAIResult 组合解析与既有测试的聚合辅助类型保留（D3）。
 type AIAnalysisResult struct {
 	Scores     []AIScore    `json:"scores"`
 	Conclusion string       `json:"conclusion"` // 总体结论
@@ -374,4 +377,58 @@ type TokenUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+// AI 分析模块标识（R26）。
+const (
+	AIModuleFinancial     = "financial"
+	AIModuleIndustry      = "industry"
+	AIModuleValuation     = "valuation"
+	AIModuleBusinessModel = "business_model" // R27
+	AIModuleAll           = "all"
+)
+
+// AI 模块响应状态。
+const (
+	AIModuleStatusOK             = "ok"
+	AIModuleStatusError          = "error"
+	AIModuleStatusNotImplemented = "not_implemented"
+)
+
+// AIFinancialResult 公司财务分析结果：只含五维评分与总体结论。
+type AIFinancialResult struct {
+	Scores     []AIScore `json:"scores"`     // 恰好 5 项，顺序固定
+	Conclusion string    `json:"conclusion"` // 详细档约 300 字
+}
+
+// AIIndustryResult 行业分析结果：行业 + 后端确定性龙头 + 业务板块 + 产业链 + 合作公司。
+type AIIndustryResult struct {
+	Industry   AIIndustry   `json:"industry"`
+	Leaders    *LeaderBoard `json:"leaders,omitempty"` // 后端确定性回填，绝不来自 AI
+	Businesses []AIBusiness `json:"businesses"`
+	Chain      *AIChain     `json:"chain,omitempty"`
+	Partners   []CompanyRef `json:"partners,omitempty"`
+}
+
+// AIValuationResult 估值参数分析结果：只含最终确定性估值结构。
+type AIValuationResult struct {
+	Valuation AIValuation `json:"valuation"`
+}
+
+// AIModuleResponse 单模块响应（同时是 all 响应 modules 的条目）。
+type AIModuleResponse struct {
+	Module    string      `json:"module"`
+	Status    string      `json:"status"` // ok / error / not_implemented
+	Message   string      `json:"message,omitempty"`
+	Result    any         `json:"result,omitempty"` // 三选一模块载荷
+	Usage     *TokenUsage `json:"usage,omitempty"`
+	ElapsedMS int64       `json:"elapsed_ms"`
+	Cached    bool        `json:"cached"`
+}
+
+// AIAllModulesResponse 全分析聚合响应。
+type AIAllModulesResponse struct {
+	Modules   map[string]AIModuleResponse `json:"modules"`
+	Usage     TokenUsage                  `json:"usage"` // 各成功模块之和（含缓存模块的原始用量）
+	ElapsedMS int64                       `json:"elapsed_ms"`
 }

@@ -8,43 +8,51 @@ import (
 	"financial-report/internal/model"
 )
 
-// AI 分析结果内存缓存（技术设计 §19.15）。
-// 同一「股票 + reasoning 档位 + 年份范围」在 TTL 内只完整计算一次（含取数与 LLM 调用）；
+// AI 分析结果内存缓存（R26 按模块独立缓存）。
+// 同一「股票 + 模块 + 年份范围」在 TTL 内只完整计算一次（含取数与 LLM 调用）；
 // 并发同 key 请求只触发一次计算，等待者复用 leader 结果；失败不缓存。
 const (
 	// aiCacheTTL 固定 10 分钟（从写入时刻起算的绝对过期）：只用于挡住短时间内的
 	// 重复点击 / 页面刷新（单次 LLM 调用数十秒且消耗 token），同时保证报表与行情
 	// 变化在 10 分钟内自然反映，不跨交易日返回旧结果。
 	aiCacheTTL = 10 * time.Minute
-	aiCacheMax = 64 // 条目上限，满则先清过期、仍满整体清空
+	aiCacheMax = 128 // 条目上限：一次 all 最多写 3~4 条；满则先清过期、仍满整体清空
 
-	// aiCacheSchema 结果结构版本：R25 起基期 FCF 改为复苏感知的 3–5 年短窗口，旧缓存不再复用。
-	aiCacheSchema = "r25"
+	// aiCacheSchema 结果结构版本：R26 起按模块拆分，旧整包缓存不再复用。
+	aiCacheSchema = "r26"
 )
 
-// aiCacheKey 缓存 key：三个维度均会改变最终分析结果，必须全部参与。
+// aiCacheKey 缓存 key：股票、模块、年份范围共同决定最终分析结果，必须全部参与。
 // RangeSpecified 区分「未显式指定年份」（StartYear/EndYear=0，实际范围由「最新年报 - 4」
 // 在计算时确定）与「显式指定 0/0」（rangeOK=true，随后按非法年份返回 400）——两者语义与
-// 结果不同，若共用 key 会互相污染缓存。
+// 结果不同，若共用 key 会互相污染缓存。R26 删除 reasoning 维度。
 type aiCacheKey struct {
-	Schema         string // 结果结构版本（R25：Schema=r25）
+	Schema         string // 结果结构版本（R26：Schema=r26）
 	Code           string // 6 位股票代码
-	Reasoning      string // low / medium / high（已归一化）
+	Module         string // financial / industry / valuation / business_model
 	StartYear      int
 	EndYear        int
 	RangeSpecified bool // 是否显式传入且可解析的年份范围
 }
 
+// aiModuleOutcome 单模块计算产物：载荷 + 本次 LLM 调用用量。
+// Payload 为 *model.AIFinancialResult / *model.AIIndustryResult / *model.AIValuationResult，
+// 写入缓存后视为只读。
+type aiModuleOutcome struct {
+	Payload any
+	Usage   *model.TokenUsage
+}
+
 type aiCacheEntry struct {
-	result    *model.AIAnalysisResult
+	outcome   *aiModuleOutcome
 	expiresAt time.Time
 }
 
-// aiFlight 同 key 在途请求；close(done) 后 result / err 只读。
+// aiFlight 同 key 在途请求；close(done) 后 outcome / err 只读。
 type aiFlight struct {
-	done   chan struct{}
-	result *model.AIAnalysisResult
-	err    error
+	done    chan struct{}
+	outcome *aiModuleOutcome
+	err     error
 }
 
 type aiCacheOutcome int
@@ -71,15 +79,30 @@ func newAIResultCache() *aiResultCache {
 }
 
 // aiCacheKeyFor 只做参数映射，不做 IO。
-func aiCacheKeyFor(code, reasoning string, startYear, endYear int, rangeSpecified bool) aiCacheKey {
+func aiCacheKeyFor(code, module string, startYear, endYear int, rangeSpecified bool) aiCacheKey {
 	return aiCacheKey{
 		Schema:         aiCacheSchema,
 		Code:           code,
-		Reasoning:      reasoning,
+		Module:         module,
 		StartYear:      startYear,
 		EndYear:        endYear,
 		RangeSpecified: rangeSpecified,
 	}
+}
+
+// peek 只读检查（过期即删，不触发计算、不等待在途）：用于「全命中不取数」。
+func (c *aiResultCache) peek(key aiCacheKey) (*aiModuleOutcome, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	if !c.now().Before(e.expiresAt) {
+		delete(c.entries, key) // 过期即删，不主动全表扫描
+		return nil, false
+	}
+	return e.outcome, true
 }
 
 // outcomeLabel 缓存结果类型的日志文案。
@@ -98,21 +121,21 @@ func outcomeLabel(outcome aiCacheOutcome) string {
 // 同 key 已有在途请求时等待并复用它，避免重复 LLM 调用。
 func (c *aiResultCache) getOrCompute(
 	key aiCacheKey,
-	compute func() (*model.AIAnalysisResult, error),
-) (*model.AIAnalysisResult, aiCacheOutcome, error) {
+	compute func() (*aiModuleOutcome, error),
+) (*aiModuleOutcome, aiCacheOutcome, error) {
 	c.mu.Lock()
 	now := c.now()
 	if e, ok := c.entries[key]; ok {
 		if now.Before(e.expiresAt) {
 			c.mu.Unlock()
-			return e.result, aiCacheHit, nil
+			return e.outcome, aiCacheHit, nil
 		}
 		delete(c.entries, key) // 过期即删，不主动全表扫描
 	}
 	if f, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
-		<-f.done // 等待 leader；done 关闭后 result / err 只读
-		return f.result, aiCacheCoalesced, f.err
+		<-f.done // 等待 leader；done 关闭后 outcome / err 只读
+		return f.outcome, aiCacheCoalesced, f.err
 	}
 	f := &aiFlight{done: make(chan struct{})}
 	c.inflight[key] = f
@@ -125,8 +148,8 @@ func (c *aiResultCache) getOrCompute(
 func (c *aiResultCache) run(
 	key aiCacheKey,
 	f *aiFlight,
-	compute func() (*model.AIAnalysisResult, error),
-) (res *model.AIAnalysisResult, err error) {
+	compute func() (*aiModuleOutcome, error),
+) (res *aiModuleOutcome, err error) {
 	finished := false
 	defer func() {
 		if finished {
@@ -144,21 +167,21 @@ func (c *aiResultCache) run(
 }
 
 // finish 负责：成功才写 entries；无论成败都删除 inflight 并唤醒等待者。
-func (c *aiResultCache) finish(key aiCacheKey, f *aiFlight, res *model.AIAnalysisResult, err error) {
+func (c *aiResultCache) finish(key aiCacheKey, f *aiFlight, res *aiModuleOutcome, err error) {
 	c.mu.Lock()
 	if err == nil && res != nil {
 		c.storeLocked(key, res)
 	}
 	delete(c.inflight, key)
-	f.result, f.err = res, err
-	close(f.done) // 在持锁期间关闭，保证等待者能看到已写入的 result / err
+	f.outcome, f.err = res, err
+	close(f.done) // 在持锁期间关闭，保证等待者能看到已写入的 outcome / err
 	c.mu.Unlock()
 }
 
-func (c *aiResultCache) storeLocked(key aiCacheKey, res *model.AIAnalysisResult) {
+func (c *aiResultCache) storeLocked(key aiCacheKey, res *aiModuleOutcome) {
 	now := c.now()
 	if len(c.entries) >= aiCacheMax {
-		// 先清过期，再决定是否整体清空（§19.15.7）
+		// 先清过期，再决定是否整体清空
 		for k, e := range c.entries {
 			if !now.Before(e.expiresAt) {
 				delete(c.entries, k)
@@ -168,5 +191,5 @@ func (c *aiResultCache) storeLocked(key aiCacheKey, res *model.AIAnalysisResult)
 			c.entries = make(map[aiCacheKey]aiCacheEntry, aiCacheMax)
 		}
 	}
-	c.entries[key] = aiCacheEntry{result: res, expiresAt: now.Add(aiCacheTTL)}
+	c.entries[key] = aiCacheEntry{outcome: res, expiresAt: now.Add(aiCacheTTL)}
 }

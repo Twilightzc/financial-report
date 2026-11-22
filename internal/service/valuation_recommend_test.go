@@ -897,10 +897,13 @@ func TestRecommendValuationParamsPassR4Validation(t *testing.T) {
 	}
 }
 
-// TestBuildAIPromptWithRecommendation 提示词只给事实块，不泄露三档/内部变量。
-func TestBuildAIPromptWithRecommendation(t *testing.T) {
+// TestBuildValuationPromptWithRecommendation 提示词只给事实块，不泄露三档/内部变量。
+func TestBuildValuationPromptWithRecommendation(t *testing.T) {
 	rec := recommendedStub()
-	system, user := BuildAIPrompt(sampleAnalysis(), model.Quote{Name: "贵州茅台", Code: "600519"}, "low", nil, rec)
+	system, user := BuildValuationPrompt(AIModuleInput{
+		Quote: model.Quote{Name: "贵州茅台", Code: "600519"},
+		Rec:   rec,
+	})
 
 	if !strings.Contains(system, "只做定性判断") {
 		t.Errorf("系统提示词应声明只做定性判断：%s", system)
