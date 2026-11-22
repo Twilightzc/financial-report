@@ -44,6 +44,10 @@ type AIModuleInput struct {
 	IndustryCode string
 	IndustryName string
 
+	// FinancialLike 最新年报是否金融类（复用 isFinancialLike 口径，无额外 IO）。
+	// 仅商业模式模块读取，用于金融类行业适配。
+	FinancialLike bool
+
 	// 仅供估值模块 finalize 两段式重算；其余模块不读。
 	ValuationInput ValuationRecommendInput
 }
@@ -57,9 +61,11 @@ type AIModuleSpec struct {
 	Needs       AIModuleNeeds
 	// BuildPrompt 只读取 AIModuleInput，不产生 IO。
 	BuildPrompt func(in AIModuleInput) (system, user string)
-	// Parse 只解析本模块 JSON；返回 *model.AIFinancialResult / *model.AIIndustryResult / *model.AIValuationResult。
+	// Parse 只解析本模块 JSON；返回 *model.AIFinancialResult / *model.AIIndustryResult /
+	// *model.AIValuationResult / *model.AIBusinessModelResult。
 	Parse func(raw, selfName string) (any, error)
-	// Finalize 可选：确定性回填（行业龙头/行业名）或两段式重算（估值）。
+	// Finalize 可选：确定性回填（行业龙头/行业名）、两段式重算（估值）
+	// 或评分/结论汇总（商业模式）。
 	Finalize func(payload any, in AIModuleInput) (any, error)
 }
 
@@ -94,8 +100,16 @@ var aiModuleSpecs = []AIModuleSpec{
 	},
 	{
 		ID: model.AIModuleBusinessModel, Title: "商业模式分析",
-		Description: "九要素与商业模式评分（R27 上线）",
-		Implemented: false, // R27 改为 true，并补齐 Needs/BuildPrompt/Parse/Finalize
+		Description: "九要素框架与商业模式评分",
+		Implemented: true,
+		// 六维指标（含 FinancialLike 判定）需要三表；行业名用于提示词适配。
+		// 不依赖 Growth/Peers/ValuationBase，all 中并集与 R26 相同，不新增上游请求。
+		Needs: AIModuleNeeds{
+			Quote: true, Reports: true, Segments: true, Analysis: true, Industry: true,
+		},
+		BuildPrompt: BuildBusinessModelPrompt,
+		Parse:       func(raw, _ string) (any, error) { return ParseAIBusinessModelResult(raw) },
+		Finalize:    FinalizeBusinessModelResult,
 	},
 }
 

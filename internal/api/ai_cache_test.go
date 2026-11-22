@@ -411,7 +411,7 @@ func seedModule(h *Handler, module string, out *aiModuleOutcome) {
 	}
 }
 
-// H1/T15 全命中不取数：三个已上线模块预置缓存后，all 请求零上游请求直接返回。
+// H1/T15 全命中不取数：四个已上线模块预置缓存后，all 请求零上游请求直接返回。
 // 若实现错误地把缓存放在取数之后，本用例会因外部请求失败而暴露。
 func TestGetAIAnalysisAllHitSkipsFetch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -419,6 +419,7 @@ func TestGetAIAnalysisAllHitSkipsFetch(t *testing.T) {
 	seedModule(h, model.AIModuleFinancial, &aiModuleOutcome{Payload: &model.AIFinancialResult{Conclusion: "预置财务结论"}})
 	seedModule(h, model.AIModuleIndustry, &aiModuleOutcome{Payload: &model.AIIndustryResult{Industry: model.AIIndustry{Name: "预置行业"}}})
 	seedModule(h, model.AIModuleValuation, &aiModuleOutcome{Payload: &model.AIValuationResult{Valuation: model.AIValuation{ModelName: "预置估值"}}})
+	seedModule(h, model.AIModuleBusinessModel, &aiModuleOutcome{Payload: &model.AIBusinessModelResult{Score: 82, Rating: "良好", Scored: true}})
 	r := NewRouter(h)
 
 	rec := httptest.NewRecorder()
@@ -444,8 +445,12 @@ func TestGetAIAnalysisAllHitSkipsFetch(t *testing.T) {
 		body.Data.Modules[model.AIModuleValuation].Status != model.AIModuleStatusOK {
 		t.Errorf("行业/估值模块应命中缓存: %+v", body.Data.Modules)
 	}
-	if body.Data.Modules[model.AIModuleBusinessModel].Status != model.AIModuleStatusNotImplemented {
-		t.Errorf("business_model 应为 not_implemented: %+v", body.Data.Modules[model.AIModuleBusinessModel])
+	bm := body.Data.Modules[model.AIModuleBusinessModel]
+	if bm.Status != model.AIModuleStatusOK || !bm.Cached {
+		t.Errorf("商业模式模块应命中缓存: %+v", bm)
+	}
+	if len(body.Data.Modules) != 4 {
+		t.Errorf("all 应返回 4 个模块，实际 %d: %+v", len(body.Data.Modules), body.Data.Modules)
 	}
 }
 
@@ -565,14 +570,69 @@ func TestGetAIAnalysisValidationBeforeCache(t *testing.T) {
 	})
 }
 
-// H3 business_model 单模块：明确返回尚未上线，不取数、不调 LLM。
-func TestGetAIAnalysisBusinessModelNotImplemented(t *testing.T) {
+// businessModelFakeJSON 九要素全「中」，并故意携带 total_score/rating/grade
+// 验证 AI 评分被丢弃（最终应为 68 / 一般）。
+const businessModelFakeJSON = `{
+  "total_score": 99,
+  "rating": "优秀",
+  "grade": "A",
+  "elements": [
+    {"key":"customer_segments","analysis":"客户基础广。","basis":"行业常识","level":"中"},
+    {"key":"value_propositions","analysis":"产品差异化有限。","basis":"主营构成","level":"中"},
+    {"key":"channels","analysis":"渠道以经销为主。","basis":"行业常识","level":"中"},
+    {"key":"customer_relationships","analysis":"关系维护常规。","basis":"AI 推断","level":"中"},
+    {"key":"revenue_streams","analysis":"收入来源集中。","basis":"主营构成","level":"中"},
+    {"key":"key_resources","analysis":"资源禀赋一般。","basis":"行业常识","level":"中"},
+    {"key":"key_activities","analysis":"关键活动常规。","basis":"AI 推断","level":"中"},
+    {"key":"key_partners","analysis":"伙伴关系稳定。","basis":"AI 推断","level":"中"},
+    {"key":"cost_structure","analysis":"成本结构普通。","basis":"行业常识","level":"中"}
+  ],
+  "summary": "模式优秀，核心优势突出。",
+  "conclusion": "公司以品牌创造价值，通过经销渠道传递价值，最终获取稳定回报。"
+}`
+
+// businessModelTestRows 最小三表年报行（普通公司：有收入、有营业成本）。
+func businessModelTestRows() []model.ReportRow {
+	f := func(v float64) *float64 { return &v }
+	return []model.ReportRow{{
+		ReportDate: "2024-12-31",
+		Fields: map[string]*float64{
+			"TOTAL_OPERATE_INCOME": f(100e8),
+			"OPERATE_COST":         f(40e8),
+			"NETCASH_OPERATE":      f(20e8),
+			"TOTAL_ASSETS":         f(200e8),
+			"TOTAL_EQUITY":         f(120e8),
+		},
+	}}
+}
+
+// H3 business_model 单模块已上线：取数一次、LLM 调用一次，AI 总分被后端重算覆盖。
+func TestGetAIAnalysisBusinessModelSuccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewHandler(client.New(), "test-key", "", "", nil)
+	rows := businessModelTestRows()
+	h.aiSource = aiDataSource{
+		quote: func(string) (*model.Quote, error) {
+			return &model.Quote{Name: "测试公司", Code: "600519", MarketCap: 1e11}, nil
+		},
+		reports: func(string, int, int) (cashflow, balance, income []model.ReportRow, err error) {
+			return rows, rows, rows, nil
+		},
+		segments: func(string) ([]model.SegmentIncome, error) {
+			return []model.SegmentIncome{{Name: "主业", RevenueRatio: 0.9}}, nil
+		},
+		industry: func(string) (string, string, error) { return "1277", "测试行业", nil },
+	}
 	called := 0
 	h.aiChat = func(apiKey, baseURL, modelName, system, user string) (string, model.TokenUsage, error) {
 		called++
-		return "", model.TokenUsage{}, errors.New("不应调用")
+		if !strings.Contains(system, "customer_segments") || !strings.Contains(system, "成本结构（CST）") {
+			t.Errorf("商业模式 system 提示词缺少九要素结构")
+		}
+		if !strings.Contains(user, "【商业模式事实") {
+			t.Errorf("商业模式用户消息缺少事实块: %s", user)
+		}
+		return businessModelFakeJSON, model.TokenUsage{TotalTokens: 100}, nil
 	}
 	r := NewRouter(h)
 	rec := httptest.NewRecorder()
@@ -581,18 +641,31 @@ func TestGetAIAnalysisBusinessModelNotImplemented(t *testing.T) {
 		t.Fatalf("HTTP = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    any    `json:"data"`
+		Code int `json:"code"`
+		Data struct {
+			Module string                       `json:"module"`
+			Status string                       `json:"status"`
+			Result *model.AIBusinessModelResult `json:"result"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("响应非 JSON: %v", err)
+		t.Fatalf("响应非 JSON: %v (%s)", err, rec.Body.String())
 	}
-	if body.Code != 1 || body.Message != "该分析模块尚未上线" || body.Data != nil {
-		t.Fatalf("business_model 响应错误: %+v", body)
+	if body.Code != 0 || body.Data.Status != model.AIModuleStatusOK || body.Data.Result == nil {
+		t.Fatalf("business_model 响应错误: %+v (%s)", body, rec.Body.String())
 	}
-	if called != 0 {
-		t.Errorf("未上线模块不应调用 LLM，调用 %d 次", called)
+	res := body.Data.Result
+	if !res.Scored || res.Score != 68 || res.Rating != "一般" {
+		t.Errorf("AI 总分应被丢弃并按九要素重算为 68/一般，实际 scored=%v score=%d rating=%q", res.Scored, res.Score, res.Rating)
+	}
+	if res.Coverage != 9 || res.Total != 9 || len(res.Elements) != 9 {
+		t.Errorf("覆盖率/要素数错误: coverage=%d total=%d elements=%d", res.Coverage, res.Total, len(res.Elements))
+	}
+	if called != 1 {
+		t.Errorf("LLM 调用 %d 次，want 1", called)
+	}
+	if _, ok := h.aiCache.peek(aiCacheKeyFor("600519", model.AIModuleBusinessModel, 0, 0, false)); !ok {
+		t.Error("成功模块应写入缓存")
 	}
 }
 
@@ -705,23 +778,153 @@ func TestAIBuildErrorAffects(t *testing.T) {
 		byID[s.ID] = s
 	}
 	reports := &aiBuildError{reports: true}
-	if !reports.affects(byID[model.AIModuleFinancial]) || !reports.affects(byID[model.AIModuleValuation]) {
-		t.Error("三表失败应影响财务/估值")
+	for _, id := range []string{model.AIModuleFinancial, model.AIModuleValuation, model.AIModuleBusinessModel} {
+		if !reports.affects(byID[id]) {
+			t.Errorf("三表失败应影响 %s", id)
+		}
 	}
 	if reports.affects(byID[model.AIModuleIndustry]) {
 		t.Error("三表失败不应影响行业")
 	}
 	quote := &aiBuildError{quote: true}
-	for _, id := range []string{model.AIModuleFinancial, model.AIModuleIndustry, model.AIModuleValuation} {
+	for _, id := range []string{model.AIModuleFinancial, model.AIModuleIndustry, model.AIModuleValuation, model.AIModuleBusinessModel} {
 		if !quote.affects(byID[id]) {
 			t.Errorf("行情失败应影响 %s", id)
 		}
 	}
+	year := &aiBuildError{year: true}
+	if !year.affects(byID[model.AIModuleBusinessModel]) {
+		t.Error("年份失败应影响商业模式（依赖年报行）")
+	}
 }
 
-// R26 AC-9：缓存 schema 升版，r25 条目不再命中；无 reasoning 维度。
-func TestAICacheSchemaR26(t *testing.T) {
-	if aiCacheSchema != "r26" {
-		t.Fatalf("aiCacheSchema = %q，期望 r26", aiCacheSchema)
+// aiAllFakeHandler 构造 all 请求的注入式 Handler：四个模块均由 fake chat 返回合法结构。
+// failBusiness=true 时商业模式模块返回非法 JSON，用于验证模块级失败隔离。
+func aiAllFakeHandler(t *testing.T, failBusiness bool) (*Handler, *int32) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(client.New(), "test-key", "", "", nil)
+	f := func(v float64) *float64 { return &v }
+	rows := []model.ReportRow{{
+		ReportDate: "2024-12-31",
+		Fields: map[string]*float64{
+			"TOTAL_OPERATE_INCOME": f(100e8), "OPERATE_COST": f(40e8),
+			"NONCASH_INVEST_LOSS": f(0), "NETCASH_OPERATE": f(20e8),
+			"TOTAL_ASSETS": f(200e8), "TOTAL_EQUITY": f(120e8),
+		},
+	}}
+	h.aiSource = aiDataSource{
+		quote: func(string) (*model.Quote, error) {
+			return &model.Quote{Name: "测试公司", Code: "600519", MarketCap: 1e11}, nil
+		},
+		reports: func(string, int, int) ([]model.ReportRow, []model.ReportRow, []model.ReportRow, error) {
+			return rows, rows, rows, nil
+		},
+		segments: func(string) ([]model.SegmentIncome, error) {
+			return []model.SegmentIncome{{Name: "主业", RevenueRatio: 0.9}}, nil
+		},
+		peers:    func(string) (model.LeaderBoard, error) { return model.LeaderBoard{}, nil },
+		industry: func(string) (string, string, error) { return "1277", "测试行业", nil },
+		growth:   func(string) model.GrowthSnapshot { return model.GrowthSnapshot{} },
+	}
+	var calls int32
+	h.aiChat = func(_, _, _, _ string, user string) (string, model.TokenUsage, error) {
+		atomic.AddInt32(&calls, 1)
+		switch {
+		case strings.Contains(user, "【商业模式事实"):
+			if failBusiness {
+				return "not-json", model.TokenUsage{TotalTokens: 1}, nil
+			}
+			return businessModelFakeJSON, model.TokenUsage{TotalTokens: 10}, nil
+		case strings.Contains(user, "【估值参数事实"):
+			return `{"valuation":{}}`, model.TokenUsage{TotalTokens: 10}, nil
+		case strings.Contains(user, "同行市值"):
+			return `{"industry":{"name":"测试行业"},"businesses":[],"chain":null,"partners":[]}`, model.TokenUsage{TotalTokens: 10}, nil
+		default:
+			return `{"scores":[
+				{"dimension":"盈利能力","score":88,"comment":"a"},
+				{"dimension":"偿债能力","score":90,"comment":"b"},
+				{"dimension":"现金获取能力","score":85,"comment":"c"},
+				{"dimension":"经营效率","score":76,"comment":"d"},
+				{"dimension":"成长能力","score":82,"comment":"e"}],"conclusion":"ok"}`, model.TokenUsage{TotalTokens: 10}, nil
+		}
+	}
+	return h, &calls
+}
+
+// T15 all 成功：4 个模块各调用一次 LLM，business_model 成功且评分由后端重算。
+func TestGetAIAnalysisAllModulesCallsEachOnce(t *testing.T) {
+	h, calls := aiAllFakeHandler(t, false)
+	r := NewRouter(h)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?module=all", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Code int                        `json:"code"`
+		Data model.AIAllModulesResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应非 JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body.Code != 0 {
+		t.Fatalf("code = %d, want 0 (%s)", body.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(calls); got != 4 {
+		t.Errorf("LLM 调用 %d 次，want 4（每模块一次）", got)
+	}
+	if len(body.Data.Modules) != 4 {
+		t.Errorf("all 应返回 4 个模块，实际 %d", len(body.Data.Modules))
+	}
+	for _, id := range []string{model.AIModuleFinancial, model.AIModuleIndustry, model.AIModuleValuation, model.AIModuleBusinessModel} {
+		if m := body.Data.Modules[id]; m.Status != model.AIModuleStatusOK {
+			t.Errorf("模块 %s 应成功: %+v", id, m)
+		}
+	}
+	bm, ok := body.Data.Modules[model.AIModuleBusinessModel].Result.(map[string]any)
+	if !ok {
+		t.Fatalf("business_model 载荷类型错误: %T", body.Data.Modules[model.AIModuleBusinessModel].Result)
+	}
+	if bm["scored"] != true || bm["score"] != float64(68) || bm["rating"] != "一般" {
+		t.Errorf("AI 总分应被丢弃重算为 68/一般: %+v", bm)
+	}
+}
+
+// AC-6 模块级失败隔离：business_model 解析失败时 all 仍 code=0，其余三模块 ok。
+func TestGetAIAnalysisBusinessModelFailureIsolated(t *testing.T) {
+	h, _ := aiAllFakeHandler(t, true)
+	r := NewRouter(h)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stock/600519/ai-analysis?module=all", nil))
+	var body struct {
+		Code int                        `json:"code"`
+		Data model.AIAllModulesResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应非 JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body.Code != 0 {
+		t.Errorf("单模块失败不应使 all 失败，code = %d (%s)", body.Code, rec.Body.String())
+	}
+	if bm := body.Data.Modules[model.AIModuleBusinessModel]; bm.Status != model.AIModuleStatusError {
+		t.Errorf("business_model 应为 error，实际 %+v", bm)
+	}
+	for _, id := range []string{model.AIModuleFinancial, model.AIModuleIndustry, model.AIModuleValuation} {
+		if m := body.Data.Modules[id]; m.Status != model.AIModuleStatusOK {
+			t.Errorf("模块 %s 不应受商业模式失败影响: %+v", id, m)
+		}
+	}
+}
+
+// R27：缓存 schema 升版，r26 条目不再命中（新增商业模式结果结构）。
+func TestAICacheSchemaR27(t *testing.T) {
+	if aiCacheSchema != "r27" {
+		t.Fatalf("aiCacheSchema = %q，期望 r27", aiCacheSchema)
+	}
+	// r26 生成的 key 与当前 key 不同，旧缓存不会被读取。
+	legacy := aiCacheKey{Schema: "r26", Code: "600519", Module: model.AIModuleFinancial}
+	if legacy == aiCacheKeyFor("600519", model.AIModuleFinancial, 0, 0, false) {
+		t.Fatal("r26 缓存 key 不应与 r27 相同")
 	}
 }

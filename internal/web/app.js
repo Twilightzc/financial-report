@@ -403,7 +403,7 @@ const app = createApp({
       { id: 'financial',      title: '公司财务分析', desc: '财务健康与经营质量：五维评分与总体结论', implemented: true },
       { id: 'industry',       title: '行业分析',     desc: '行业前景、业务板块、产业链与相关公司',     implemented: true },
       { id: 'valuation',      title: '估值参数分析', desc: '估值模型与确定性参数推荐',                 implemented: true },
-      { id: 'business_model', title: '商业模式分析', desc: '九要素与商业模式评分',                    implemented: false }, // R27 置 true
+      { id: 'business_model', title: '商业模式分析', desc: '九要素框架与商业模式评分',                implemented: true },
     ];
     const visibleAIModules = AI_MODULES.filter(m => m.implemented);
     const aiModules = reactive(Object.fromEntries(AI_MODULES.map(m => [m.id, {
@@ -1624,6 +1624,31 @@ const app = createApp({
       return PALETTE.bad;                      // <60    较弱：红
     }
 
+    // R27 商业模式：分组固定为客户侧 5 项 + 企业侧 4 项（顺序由后端给出）。
+    const businessGroups = [
+      { key: 'customer',   title: '客户侧（创造收入）', sub: '为谁创造价值、如何触达与收钱' },
+      { key: 'enterprise', title: '企业侧（产生成本）', sub: '靠什么资源、做什么、成本怎么构成' },
+    ];
+
+    // 保持后端固定顺序，只做分组过滤；旧结构缺 group 时按固定 5/4 下标兜底。
+    function businessElementsOf(result, group) {
+      const list = result && Array.isArray(result.elements) ? result.elements : [];
+      const grouped = list.filter(e => e && e.group === group);
+      if (grouped.length || list.some(e => e && e.group)) return grouped;
+      return group === 'customer' ? list.slice(0, 5) : list.slice(5, 9);
+    }
+
+    // 卡片序号：优先后端 order，缺失按当前分组下标兜底，补零为两位数。
+    function businessOrderLabel(element, index) {
+      const n = element && element.order ? element.order : index + 1;
+      return String(n).padStart(2, '0');
+    }
+
+    // 分档 → CSS 类（is-strong / is-good / ... / is-unknown）。
+    function businessLevelClass(level) {
+      return 'is-' + (level || 'unknown');
+    }
+
     // 数值显示：整数不带小数，其余保留两位。
     function fmtNum(v) {
       if (v == null || isNaN(v)) return '';
@@ -2092,6 +2117,8 @@ const app = createApp({
       jumpToLeader, openAICompany, isSixDigitCode,
       radarAxisName, buildRadarOption, validateCustomFCF, fcfUnitLabel,
       scoreColor, fmtNum, applyAIValuation,
+      // R27 商业模式九要素卡片（分组/序号/分档样式）
+      businessGroups, businessElementsOf, businessOrderLabel, businessLevelClass,
       // R19：估值参数六块展示辅助（模型参数取值、增长锚表、折现率勾稽、校验与 FCF 逐年明细）
       paramValue, fmtRate, fmtYiPlain,
       fmtSensRate, sensCellText,
@@ -3055,6 +3082,95 @@ const app = createApp({
                   </div>
                 </div>
                 </template>
+                  <!-- 商业模式：总览（总分/评级/结论/信号条/覆盖率）+ 九要素卡片 + 总体归纳 -->
+                  <template v-else-if="m.id === 'business_model'">
+                <!-- 防御：旧响应/异常结构不白屏 -->
+                <div class="ai-module-empty"
+                     v-if="!aiModules.business_model.result || !(aiModules.business_model.result.elements || []).length">
+                  未获取到商业模式分析结果，请重试。
+                </div>
+                <template v-else>
+                  <!-- 总览区：总分/评级/一句话/信号条/覆盖率 -->
+                  <div class="ai-section bm-overview">
+                    <div class="bm-overview-main">
+                      <div class="bm-overview-score" v-if="aiModules.business_model.result.scored">
+                        <span class="bm-score" :style="{ color: scoreColor(aiModules.business_model.result.score) }">
+                          {{ aiModules.business_model.result.score }}
+                        </span>
+                        <span class="bm-rating"
+                              :style="{ color: scoreColor(aiModules.business_model.result.score),
+                                        borderColor: scoreColor(aiModules.business_model.result.score) }">
+                          {{ aiModules.business_model.result.rating }}
+                        </span>
+                      </div>
+                      <div class="bm-overview-score" v-else>
+                        <span class="bm-noscore">信息不足，暂不评分</span>
+                      </div>
+                      <div class="bm-overview-text">
+                        <p class="bm-summary" v-if="aiModules.business_model.result.scored">{{ aiModules.business_model.result.summary }}</p>
+                        <p class="bm-coverage">
+                          {{ aiModules.business_model.result.coverage }}/{{ aiModules.business_model.result.total || 9 }} 要素可评分
+                          <template v-if="(aiModules.business_model.result.total || 9) - aiModules.business_model.result.coverage > 0">
+                            ，{{ (aiModules.business_model.result.total || 9) - aiModules.business_model.result.coverage }} 项信息不足
+                          </template>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div class="bm-signal">
+                      <div class="bm-signal-grid">
+                        <span v-for="e in aiModules.business_model.result.elements" :key="e.key"
+                              class="bm-signal-cell" :class="businessLevelClass(e.level)"
+                              :title="e.name + '：' + (e.level_name || '无法判断')"
+                              :aria-label="e.name + '：' + (e.level_name || '无法判断')">
+                          {{ e.code }}
+                        </span>
+                      </div>
+                      <div class="bm-legend" aria-hidden="true">
+                        <span><i class="bm-legend-dot is-strong"></i>强</span>
+                        <span><i class="bm-legend-dot is-good"></i>良</span>
+                        <span><i class="bm-legend-dot is-medium"></i>中</span>
+                        <span><i class="bm-legend-dot is-weak"></i>弱</span>
+                        <span><i class="bm-legend-dot is-poor"></i>差</span>
+                        <span><i class="bm-legend-dot is-unknown"></i>无法判断</span>
+                      </div>
+                    </div>
+
+                    <p class="bm-evidence" v-if="aiModules.business_model.result.evidence">
+                      {{ aiModules.business_model.result.evidence }}
+                    </p>
+                  </div>
+
+                  <!-- 客户侧 5 卡 / 企业侧 4 卡 -->
+                  <div class="bm-group" v-for="g in businessGroups" :key="g.key">
+                    <div class="bm-group-head">
+                      <div class="bm-group-title">{{ g.title }}</div>
+                      <div class="bm-group-sub">{{ g.sub }}</div>
+                    </div>
+                    <div class="bm-cards">
+                      <div class="bm-card" v-for="(e, i) in businessElementsOf(aiModules.business_model.result, g.key)" :key="e.key">
+                        <div class="bm-card-head">
+                          <span class="bm-card-index">{{ businessOrderLabel(e, i) }}</span>
+                          <span class="bm-card-name">{{ e.name }}（{{ e.code }}）</span>
+                          <span class="bm-level" :class="businessLevelClass(e.level)">{{ e.level_name || '无法判断' }}</span>
+                        </div>
+                        <p class="bm-card-def">{{ e.definition }}</p>
+                        <p class="bm-card-analysis">{{ e.analysis }}</p>
+                        <p class="bm-card-basis" v-if="e.basis">依据：{{ e.basis }}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 总体归纳 + 免责声明 -->
+                  <div class="ai-section">
+                    <div class="ai-section-title">总体归纳</div>
+                    <p class="ai-text">{{ aiModules.business_model.result.conclusion }}</p>
+                    <p class="ai-disclaimer">
+                      商业模式分析由 AI 生成，评分由系统按九要素固定规则汇总；AI 推断内容仅供参考，不构成投资建议。
+                    </p>
+                  </div>
+                </template>
+                  </template>
 
                 <!-- usage / 耗时任一存在即渲染；缺失一侧不显示，另一侧照常展示 -->
                 <div v-if="aiModules[m.id].usage || aiModules[m.id].elapsedMs != null || aiModules[m.id].cached"

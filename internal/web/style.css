@@ -28,6 +28,7 @@
   --bad: #e05555;           /* 好坏口径：走弱/坏 */
   --neutral-bar: #8b949e;   /* 中性指标图表色（语义独立于 --muted） */
   --amber: #d97706;
+  --good-mid: #7cc46a;      /* 好坏口径中间档「良」：AI 评分 75–89 / 商业模式分档「良」（与 PALETTE.goodMid 同步） */
   --radius: 10px;
   --shadow: none;
   --sidebar-w: 218px;
@@ -1548,4 +1549,120 @@ td.num, .val, .yoy {
   .topbar-quote { margin-left: 0; }
   .val-fields { grid-template-columns: 1fr; }
   .ai-weight-table { font-size: 11px; }
+}
+
+/* ===================== R27 商业模式分析 ===================== */
+/* 总览区：总分 + 评级 + 一句话结论 + 覆盖率 + 九段信号条 + 财务印证提示。
+   颜色只作辅助，标签/代号/图例始终有文字。 */
+.bm-overview { display: flex; flex-direction: column; gap: 12px; }
+.bm-overview-main { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.bm-overview-score { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.bm-score { font-size: 34px; font-weight: 800; line-height: 1; letter-spacing: -0.01em; }
+.bm-rating {
+  padding: 2px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+.bm-noscore { color: var(--muted); font-size: 15px; font-weight: 700; }
+.bm-overview-text { flex: 1 1 240px; min-width: 0; }
+.bm-summary { margin: 0 0 4px; color: var(--ink); font-size: 14px; line-height: 1.7; }
+.bm-coverage { margin: 0; color: var(--muted); font-size: 12px; }
+.bm-evidence {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--line-strong);
+  background: var(--surface-2);
+  border-radius: 0 8px 8px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 九段信号条：固定 9 格，每格写代号；旁边文字图例保证不依赖颜色。 */
+.bm-signal { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.bm-signal-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+.bm-signal-cell {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 26px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--bg);
+}
+.bm-legend { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
+.bm-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.bm-legend-dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+
+/* 分档颜色（同时用于信号条色块与卡片胶囊）。 */
+.bm-signal-cell.is-strong, .bm-legend-dot.is-strong { background: var(--good); }
+.bm-signal-cell.is-good, .bm-legend-dot.is-good { background: var(--good-mid); }
+.bm-signal-cell.is-medium, .bm-legend-dot.is-medium { background: var(--amber); }
+.bm-signal-cell.is-weak, .bm-legend-dot.is-weak { background: var(--bad); }
+.bm-signal-cell.is-poor, .bm-legend-dot.is-poor { background: var(--bad); }
+.bm-signal-cell.is-unknown, .bm-legend-dot.is-unknown { background: var(--muted); }
+.bm-signal-cell.is-unknown { color: var(--ink-2); }
+
+.bm-level {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.7;
+}
+.bm-level.is-strong { color: var(--good); }
+.bm-level.is-good { color: var(--good-mid); }
+.bm-level.is-medium { color: var(--amber); }
+.bm-level.is-weak { color: var(--bad); }
+.bm-level.is-poor { color: var(--bad); }
+.bm-level.is-unknown { color: var(--muted); }
+
+/* 分组：客户侧 5 卡 / 企业侧 4 卡，桌面两列、同列等高。 */
+.bm-group { margin-top: 22px; }
+.bm-group:first-of-type { margin-top: 16px; }
+.bm-group-head { margin-bottom: 10px; }
+.bm-group-title { color: var(--ink); font-size: 14px; font-weight: 700; }
+.bm-group-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.bm-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.bm-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.bm-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.bm-card-index { color: var(--muted-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.bm-card-name { color: var(--ink); font-size: 13.5px; font-weight: 700; }
+.bm-card-def { margin: 0 0 6px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.bm-card-analysis { margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.bm-card-basis { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+
+/* 移动端：卡片单列、总览自然纵向堆叠。 */
+@media (max-width: 760px) {
+  .bm-cards { grid-template-columns: 1fr; }
+  .bm-score { font-size: 32px; }
+  .bm-overview-main { gap: 10px; }
+  .bm-overview-text { flex-basis: 100%; }
+}
+
+/* 窄屏：信号条 3×3，图例换行，顺序不变。 */
+@media (max-width: 480px) {
+  .bm-signal-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 30px);
+    gap: 6px;
+  }
+  .bm-signal { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .bm-signal-cell { width: 30px; height: 26px; }
+  .bm-group-title { font-size: 13.5px; }
 }

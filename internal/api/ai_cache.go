@@ -18,8 +18,8 @@ const (
 	aiCacheTTL = 10 * time.Minute
 	aiCacheMax = 128 // 条目上限：一次 all 最多写 3~4 条；满则先清过期、仍满整体清空
 
-	// aiCacheSchema 结果结构版本：R26 起按模块拆分，旧整包缓存不再复用。
-	aiCacheSchema = "r26"
+	// aiCacheSchema 结果结构版本：R26 起按模块拆分，R27 新增商业模式模块。
+	aiCacheSchema = "r27"
 )
 
 // aiCacheKey 缓存 key：股票、模块、年份范围共同决定最终分析结果，必须全部参与。
@@ -27,7 +27,7 @@ const (
 // 在计算时确定）与「显式指定 0/0」（rangeOK=true，随后按非法年份返回 400）——两者语义与
 // 结果不同，若共用 key 会互相污染缓存。R26 删除 reasoning 维度。
 type aiCacheKey struct {
-	Schema         string // 结果结构版本（R26：Schema=r26）
+	Schema         string // 结果结构版本（R27：Schema=r27）
 	Code           string // 6 位股票代码
 	Module         string // financial / industry / valuation / business_model
 	StartYear      int
@@ -36,8 +36,8 @@ type aiCacheKey struct {
 }
 
 // aiModuleOutcome 单模块计算产物：载荷 + 本次 LLM 调用用量。
-// Payload 为 *model.AIFinancialResult / *model.AIIndustryResult / *model.AIValuationResult，
-// 写入缓存后视为只读。
+// Payload 为 *model.AIFinancialResult / *model.AIIndustryResult / *model.AIValuationResult /
+// *model.AIBusinessModelResult，写入缓存后视为只读。
 type aiModuleOutcome struct {
 	Payload any
 	Usage   *model.TokenUsage

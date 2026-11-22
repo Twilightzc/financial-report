@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"financial-report/internal/model"
@@ -98,6 +99,9 @@ func TestBuildAIModuleDataReportsFailureKeepsIndustryData(t *testing.T) {
 	if !aiFetchAffects(err, mustModuleSpec(t, model.AIModuleValuation)) {
 		t.Error("三表失败应影响估值模块")
 	}
+	if !aiFetchAffects(err, mustModuleSpec(t, model.AIModuleBusinessModel)) {
+		t.Error("三表失败应影响商业模式模块")
+	}
 	assertIndustryOptionalData(t, in)
 }
 
@@ -115,5 +119,63 @@ func TestBuildAIModuleDataYearFailureKeepsIndustryData(t *testing.T) {
 	if aiFetchAffects(err, mustModuleSpec(t, model.AIModuleIndustry)) {
 		t.Error("无年报数据不应影响行业模块")
 	}
+	if !aiFetchAffects(err, mustModuleSpec(t, model.AIModuleBusinessModel)) {
+		t.Error("无年报数据应影响商业模式模块")
+	}
 	assertIndustryOptionalData(t, in)
+}
+
+// T16 FinancialLike 由已取利润表回填：银行型（有收入、无营业成本）→ true 且写入提示词。
+func TestBuildAIModuleDataFinancialLike(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	bank := []model.ReportRow{{
+		ReportDate: "2024-12-31",
+		Fields: map[string]*float64{
+			"TOTAL_OPERATE_INCOME": f(100e8),
+			"NETCASH_OPERATE":      f(20e8),
+			"TOTAL_ASSETS":         f(2000e8),
+			"TOTAL_EQUITY":         f(200e8),
+		},
+	}}
+	h := aiBuildTestHandler(nil, bank)
+	spec := mustModuleSpec(t, model.AIModuleBusinessModel)
+	in, _, _, err := h.buildAIModuleData("600519", spec.Needs, 0, 0, false)
+	if err != nil {
+		t.Fatalf("取数失败: %v", err)
+	}
+	if !in.FinancialLike {
+		t.Errorf("银行型公司（无营业成本）FinancialLike 应为 true")
+	}
+	_, user := service.BuildBusinessModelPrompt(in)
+	if !strings.Contains(user, "金融类企业：是") {
+		t.Errorf("金融类公司提示词应标注「金融类企业：是」: %s", user)
+	}
+}
+
+// T16b 普通公司（有营业成本）FinancialLike 为 false，提示词标注「否」。
+func TestBuildAIModuleDataNotFinancialLike(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	normal := []model.ReportRow{{
+		ReportDate: "2024-12-31",
+		Fields: map[string]*float64{
+			"TOTAL_OPERATE_INCOME": f(100e8),
+			"OPERATE_COST":         f(40e8),
+			"NETCASH_OPERATE":      f(20e8),
+			"TOTAL_ASSETS":         f(200e8),
+			"TOTAL_EQUITY":         f(120e8),
+		},
+	}}
+	h := aiBuildTestHandler(nil, normal)
+	spec := mustModuleSpec(t, model.AIModuleBusinessModel)
+	in, _, _, err := h.buildAIModuleData("600519", spec.Needs, 0, 0, false)
+	if err != nil {
+		t.Fatalf("取数失败: %v", err)
+	}
+	if in.FinancialLike {
+		t.Errorf("普通公司 FinancialLike 应为 false")
+	}
+	_, user := service.BuildBusinessModelPrompt(in)
+	if !strings.Contains(user, "金融类企业：否") {
+		t.Errorf("普通公司提示词应标注「金融类企业：否」: %s", user)
+	}
 }

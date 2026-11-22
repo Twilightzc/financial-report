@@ -7,7 +7,7 @@ import (
 	"financial-report/internal/model"
 )
 
-// TestAIModuleSpecs R26 模块注册表：4 项、固定顺序、仅商业模式未上线。
+// TestAIModuleSpecs R27 模块注册表：4 项、固定顺序、全部已上线；商业模式 spec 完整。
 func TestAIModuleSpecs(t *testing.T) {
 	wantIDs := []string{
 		model.AIModuleFinancial,
@@ -26,14 +26,23 @@ func TestAIModuleSpecs(t *testing.T) {
 		if s.Title == "" || s.Description == "" {
 			t.Errorf("模块 %q 缺少标题/描述", id)
 		}
-		if s.Implemented {
-			if s.BuildPrompt == nil || s.Parse == nil {
-				t.Errorf("已上线模块 %q 缺少 BuildPrompt/Parse", id)
-			}
+		if !s.Implemented {
+			t.Errorf("模块 %q 应已上线", id)
+		}
+		if s.BuildPrompt == nil || s.Parse == nil {
+			t.Errorf("已上线模块 %q 缺少 BuildPrompt/Parse", id)
 		}
 	}
-	if aiModuleSpecs[3].Implemented {
-		t.Error("business_model 在 R26 应为未上线")
+
+	bm := aiModuleSpecs[3]
+	if bm.Finalize == nil {
+		t.Error("business_model 缺少 Finalize")
+	}
+	if !bm.Needs.Quote || !bm.Needs.Reports || !bm.Needs.Segments || !bm.Needs.Analysis || !bm.Needs.Industry {
+		t.Errorf("business_model Needs 不完整: %+v", bm.Needs)
+	}
+	if bm.Needs.Growth || bm.Needs.Peers || bm.Needs.ValuationBase {
+		t.Errorf("business_model 不应声明 Growth/Peers/ValuationBase: %+v", bm.Needs)
 	}
 }
 
@@ -50,7 +59,7 @@ func TestResolveAIModules(t *testing.T) {
 		t.Fatalf("单模块解析错误: %+v/%v/%v", specs, all, err)
 	}
 	specs, all, err = ResolveAIModules(model.AIModuleBusinessModel)
-	if err != nil || all || len(specs) != 1 || specs[0].Implemented {
+	if err != nil || all || len(specs) != 1 || !specs[0].Implemented {
 		t.Fatalf("business_model 解析错误: %+v/%v/%v", specs, all, err)
 	}
 	if _, _, err := ResolveAIModules("bad"); err == nil {

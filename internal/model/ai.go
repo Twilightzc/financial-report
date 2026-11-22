@@ -395,6 +395,22 @@ const (
 	AIModuleStatusNotImplemented = "not_implemented"
 )
 
+// 商业模式九要素分档（canonical key；中文名由后端映射，R27）。
+const (
+	BusinessLevelStrong  = "strong"
+	BusinessLevelGood    = "good"
+	BusinessLevelMedium  = "medium"
+	BusinessLevelWeak    = "weak"
+	BusinessLevelPoor    = "poor"
+	BusinessLevelUnknown = "unknown"
+)
+
+// 商业模式九要素分组（R27）。
+const (
+	BusinessGroupCustomer   = "customer"   // 客户侧（创造收入）
+	BusinessGroupEnterprise = "enterprise" // 企业侧（产生成本）
+)
+
 // AIFinancialResult 公司财务分析结果：只含五维评分与总体结论。
 type AIFinancialResult struct {
 	Scores     []AIScore `json:"scores"`     // 恰好 5 项，顺序固定
@@ -413,6 +429,35 @@ type AIIndustryResult struct {
 // AIValuationResult 估值参数分析结果：只含最终确定性估值结构。
 type AIValuationResult struct {
 	Valuation AIValuation `json:"valuation"`
+}
+
+// AIBusinessElement 商业模式九要素之一（R27）。
+// 名称/代号/分组/释义/顺序均由后端固定；AI 只回填 Analysis/Basis/Level。
+type AIBusinessElement struct {
+	Key        string `json:"key"`        // customer_segments 等固定 key
+	Name       string `json:"name"`       // 客户细分
+	Code       string `json:"code"`       // CS
+	Group      string `json:"group"`      // customer / enterprise
+	Definition string `json:"definition"` // 一句固定释义
+	Order      int    `json:"order"`      // 1-9，固定顺序
+	Level      string `json:"level"`      // strong/good/medium/weak/poor/unknown
+	LevelName  string `json:"level_name"` // 强/良/中/弱/差/无法判断
+	Analysis   string `json:"analysis"`   // 针对性分析；unknown 时为固定占位
+	Basis      string `json:"basis"`      // 判断依据；unknown 时为空
+}
+
+// AIBusinessModelResult 商业模式模块载荷（R27）。
+// 总分/评级/覆盖率由后端确定性聚合，AI 返回的同名/近似字段一律丢弃。
+type AIBusinessModelResult struct {
+	Scored     bool                `json:"scored"`             // 可评分要素是否 ≥6
+	Score      int                 `json:"score"`              // 0-100；Scored=false 时为 0
+	Rating     string              `json:"rating"`             // 优秀/良好/一般/偏弱/较差；未评分时为空
+	Summary    string              `json:"summary"`            // 一句话结论
+	Conclusion string              `json:"conclusion"`         // 总体归纳
+	Coverage   int                 `json:"coverage"`           // 可评分要素数 0-9
+	Total      int                 `json:"total"`              // 恒为 9
+	Elements   []AIBusinessElement `json:"elements"`           // 恰好 9 项，固定顺序
+	Evidence   string              `json:"evidence,omitempty"` // 轻量财务印证提示（不改变分数）
 }
 
 // AIModuleResponse 单模块响应（同时是 all 响应 modules 的条目）。

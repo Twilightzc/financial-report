@@ -28,11 +28,11 @@ type pendingModule struct {
 }
 
 // aiBuildError 取数阶段的失败，按模块依赖决定影响范围（R26 §7.4 模块失败边界）。
-// 例如三表失败只影响依赖报表的财务/估值模块，行业模块仍可继续。
+// 例如三表失败只影响依赖报表的财务/估值/商业模式模块，行业模块仍可继续。
 type aiBuildError struct {
 	quote   bool // 行情失败：所有依赖行情的模块失败
-	reports bool // 三表失败：财务/估值失败
-	year    bool // 无年报数据：财务/估值失败
+	reports bool // 三表失败：财务/估值/商业模式失败
+	year    bool // 无年报数据：财务/估值/商业模式失败
 }
 
 func (e *aiBuildError) Error() string { return "AI 取数失败" }
@@ -293,6 +293,11 @@ func (h *Handler) buildAIModuleData(
 		}
 	}
 
+	// 金融类判定复用已取到的利润表年报行，零额外 IO（仅商业模式模块读取）。
+	if needs.Reports && buildErr == nil {
+		in.FinancialLike = service.FinancialLikeFromReports(income)
+	}
+
 	// 年份兜底：仅需要六维指标时解析「最新年报 - 4」。
 	if buildErr == nil && needs.Analysis && !rangeOK {
 		latest := latestAnnualYear(cashflow)
@@ -426,7 +431,7 @@ func errorAIResponse(module, message string) model.AIModuleResponse {
 	return model.AIModuleResponse{Module: module, Status: model.AIModuleStatusError, Message: message}
 }
 
-// notImplementedAIResponse 未上线模块响应（R26 的 business_model）。
+// notImplementedAIResponse 未上线模块响应（当前注册表所有模块均已上线，保留作兜底）。
 func notImplementedAIResponse(module string) model.AIModuleResponse {
 	return model.AIModuleResponse{Module: module, Status: model.AIModuleStatusNotImplemented, Message: "该分析模块尚未上线"}
 }
