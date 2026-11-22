@@ -760,6 +760,41 @@ td.num, .val, .yoy {
 .val-field-custom .el-select { width: var(--val-unit-w); max-width: none; flex: 0 0 auto; }
 .val-field-custom { flex-wrap: wrap; row-gap: 8px; }
 .val-field-custom .el-input-number { flex: 0 0 auto; }
+
+/* 自由现金流假设：独立两列栅格，label 定宽 + 统一 200px 控件槽。
+   下拉 / 数字框 / 开关共用同一控件槽左缘，行高与间距一致，窄屏回落单列。 */
+.val-fields-fcf {
+  grid-template-columns: repeat(2, minmax(0, 300px));
+  gap: 14px 40px;
+  align-items: center;
+  justify-content: start;
+}
+.val-fields-fcf .val-field {
+  display: grid;
+  grid-template-columns: var(--val-label-w) minmax(0, 200px);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.val-fields-fcf .val-label { width: auto; }
+.val-control {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; min-width: 0;
+}
+/* 控件槽内主控件（下拉 / 数字框）吃掉剩余宽度，单位文字与开关保持固有宽度。 */
+.val-control > .el-select,
+.val-control > .el-input-number {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+.val-control > .el-select.val-unit-select {
+  flex: 0 0 var(--val-unit-w);
+  width: var(--val-unit-w);
+}
+.val-control > .val-unit,
+.val-control > .el-switch { flex: 0 0 auto; }
 .val-desc { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.6; }
 .val-unit { color: var(--muted); font-size: 12px; }
 .val-actions { display: flex; align-items: center; }
@@ -1445,6 +1480,8 @@ td.num, .val, .yoy {
   .kpi-value { font-size: 20px; }
 
   .val-fields { grid-template-columns: 1fr; }
+  .val-fields-fcf { grid-template-columns: 1fr; gap: 12px; }
+  .val-fields-fcf .val-field { grid-template-columns: var(--val-label-w) minmax(0, 1fr); }
 
   .ai-score-row { flex-wrap: wrap; gap: 4px 10px; }
   .ai-score-name { width: auto; }

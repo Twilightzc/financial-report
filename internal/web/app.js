@@ -2567,30 +2567,39 @@ const app = createApp({
 
                 <div class="val-block">
                   <div class="val-block-title">自由现金流假设</div>
-                  <div class="val-fields">
+                  <!-- 独立栅格：label 定宽 + 统一控件槽，下拉/数字框/开关左缘对齐，不再与上方 auto-fill 网格互相挤压 -->
+                  <div class="val-fields val-fields-fcf">
                     <div class="val-field">
                       <span class="val-label">基期自由现金流</span>
-                      <el-select v-model="valFCFMode" style="width:150px">
-                        <el-option v-for="m in valFCFModes" :key="m.key" :label="m.label" :value="m.key" />
-                      </el-select>
+                      <div class="val-control">
+                        <el-select v-model="valFCFMode">
+                          <el-option v-for="m in valFCFModes" :key="m.key" :label="m.label" :value="m.key" />
+                        </el-select>
+                      </div>
                     </div>
-                    <!-- R12 自定义：数值 + 单位紧贴，数值框复用 --val-input-w -->
+                    <!-- R12 自定义：数值 + 单位同处统一控件槽，保持与其他行同宽 -->
                     <div class="val-field val-field-custom" v-if="valFCFMode === 'custom'">
                       <span class="val-label">自定义值</span>
-                      <el-input-number v-model="valFCFCustomValue" :min="0" :precision="2" :controls="false"
-                                       placeholder="请输入数值" />
-                      <el-select v-model="valFCFCustomUnit" class="val-unit-select" style="width:72px">
-                        <el-option v-for="u in valFCFUnits" :key="u.key" :label="u.label" :value="u.key" />
-                      </el-select>
+                      <div class="val-control">
+                        <el-input-number v-model="valFCFCustomValue" :min="0" :precision="2" :controls="false"
+                                         placeholder="请输入数值" />
+                        <el-select v-model="valFCFCustomUnit" class="val-unit-select">
+                          <el-option v-for="u in valFCFUnits" :key="u.key" :label="u.label" :value="u.key" />
+                        </el-select>
+                      </div>
                     </div>
                     <div class="val-field" v-if="valFCFMode !== 'latest' && valFCFMode !== 'custom'">
                       <span class="val-label">选取年数</span>
-                      <el-input-number v-model="valFCFYears" :min="1" :max="10" :step="1" />
-                      <span class="val-unit">年</span>
+                      <div class="val-control">
+                        <el-input-number v-model="valFCFYears" :min="1" :max="10" :step="1" />
+                        <span class="val-unit">年</span>
+                      </div>
                     </div>
                     <div class="val-field">
                       <span class="val-label">研发调整</span>
-                      <el-switch v-model="valAdjustRD" />
+                      <div class="val-control">
+                        <el-switch v-model="valAdjustRD" />
+                      </div>
                     </div>
                   </div>
                   <div class="val-desc">研发调整：适用成长科技股，把研发投入扩张部分加回自由现金流。</div>
