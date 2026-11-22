@@ -413,6 +413,7 @@ const app = createApp({
       elapsedMs: null,
       cached: false,
       error: '',
+      collapsed: false, // 仅前端会话态：模块卡片 body 是否折叠（默认展开）
     }])));
     const aiAllLoading = ref(false);
     const aiAllError = ref('');
@@ -425,6 +426,9 @@ const app = createApp({
     const aiAnyLoading = computed(() =>
       aiAllLoading.value || visibleAIModules.some(m => aiModules[m.id].status === 'loading'));
     const canRunAI = computed(() => /^\d{6}$/.test((code.value || '').trim()));
+    // 全局折叠开关：所有已上线模块都折叠时显示「全部展开」，否则显示「全部折叠」。
+    const aiAllCollapsed = computed(() =>
+      visibleAIModules.every(m => aiModules[m.id].collapsed));
 
     // R17 相关公司（行业龙头 + 产业链/合作公司）
     const companyHint = ref('');      // 行内提示（不弹全局错误）
@@ -1250,8 +1254,12 @@ const app = createApp({
         if (changed) resetValuationState();
         if (restore && restore.code === nextCode) applyValuationParams(restore);
 
-        // 切换股票时清空上一支股票的所有 AI 模块状态，避免残留（不自动触发分析）。
-        visibleAIModules.forEach(m => resetAIModule(m.id));
+        // 切换股票时清空上一支股票的所有 AI 模块状态，避免残留（不自动触发分析）；
+        // 折叠状态仅前端会话态，换股时一并恢复默认展开。
+        visibleAIModules.forEach(m => {
+          resetAIModule(m.id);
+          aiModules[m.id].collapsed = false;
+        });
         aiAllLoading.value = false;
         aiAllError.value = '';
         aiAllElapsedMs.value = null;
@@ -1298,10 +1306,32 @@ const app = createApp({
       s.elapsedMs = null; s.cached = false; s.error = '';
     }
 
+    // 模块折叠仅前端会话态：不持久化、不进缓存。展开财务模块后需补一次雷达图测量，
+    // 因 v-show 隐藏期间容器宽高为 0。
+    function setAIModuleCollapsed(id, collapsed) {
+      const s = aiModules[id];
+      if (!s) return;
+      s.collapsed = !!collapsed;
+      if (!s.collapsed && id === 'financial') nextTick(() => resizeRadarOnShow());
+    }
+
+    function toggleAIModule(id) {
+      const s = aiModules[id];
+      if (!s) return;
+      setAIModuleCollapsed(id, !s.collapsed);
+    }
+
+    // 全局开关：全部已展开时一键折叠，否则一键展开（混合态视为展开）。
+    function toggleAllAIModules() {
+      const collapse = !aiAllCollapsed.value;
+      visibleAIModules.forEach(m => setAIModuleCollapsed(m.id, collapse));
+    }
+
     function applyAIModuleSuccess(id, result, usage, elapsedMs, cached) {
       const s = aiModules[id];
       s.status = 'ok'; s.result = result; s.usage = usage || null;
       s.elapsedMs = elapsedMs; s.cached = !!cached; s.error = '';
+      s.collapsed = false; // 分析完成默认展开，保证新结果可见
       // 只有估值模块成功才自动套用估值表单；财务/行业不得改动估值。
       if (id === 'valuation') autoApplyAIValuation(result && result.valuation);
       if (id === 'financial') renderRadarAfterRender();
@@ -1419,6 +1449,7 @@ const app = createApp({
             s.status = 'ok'; s.result = r.result; s.usage = r.usage || null;
             s.elapsedMs = r.cached ? null : (r.elapsed_ms != null ? r.elapsed_ms / 1000 : null);
             s.cached = !!r.cached; s.error = '';
+            s.collapsed = false; // 分析完成默认展开，保证新结果可见
           } else {
             aiModules[m.id].status = 'error';
             aiModules[m.id].error = r.message || '分析失败，请重试';
@@ -2053,7 +2084,8 @@ const app = createApp({
       valFCFModes, valFCFMode, valFCFYears, valFCFCustomValue, valFCFCustomUnit, valFCFUnits, valAdjustRD,
       valuation, valLoading, valError, fetchValuation,
       aiModules, visibleAIModules, aiAllLoading, aiAllError, aiAllElapsedMs, aiAllUsage,
-      aiAnyLoading, canRunAI, aiRadarRef, runAIModule, runAllAIModules, renderRadar,
+      aiAnyLoading, canRunAI, aiAllCollapsed, toggleAIModule, toggleAllAIModules,
+      aiRadarRef, runAIModule, runAllAIModules, renderRadar,
       aiValDetailOpen,
       // R17 相关公司（龙头展示 + AI 公司名称解析跳转）
       companyHint, companyResolving, companyKey, leaderTitle, hasChainCompanies, hasRelatedCompanies, hasAnyBusinessCompanies,
@@ -2673,16 +2705,22 @@ const app = createApp({
           <section class="card">
             <div class="card-head ai-toolbar">
               <h2 class="card-title">AI 智能分析</h2>
-              <el-button type="primary" :loading="aiAllLoading"
-                         :disabled="!canRunAI || aiAnyLoading" @click="runAllAIModules">一键全分析</el-button>
+              <div class="ai-toolbar-actions">
+                <el-button text size="small" @click="toggleAllAIModules">
+                  {{ aiAllCollapsed ? '全部展开' : '全部折叠' }}
+                </el-button>
+                <el-button type="primary" :loading="aiAllLoading"
+                           :disabled="!canRunAI || aiAnyLoading" @click="runAllAIModules">一键全分析</el-button>
+              </div>
             </div>
             <div class="card-body">
               <p class="ai-hint">可按模块单独分析，也可一键全分析；各模块相互独立，失败可单独重试。</p>
               <el-alert v-if="aiAllError" :title="aiAllError" type="error" :closable="false" style="margin-bottom:12px" />
               <div v-for="m in visibleAIModules" :key="m.id" class="ai-module-card"
-                   :class="'is-' + aiModules[m.id].status">
-                <!-- header：模块名 + 状态徽标 + 独立分析按钮，与正文用底色和分隔线分层 -->
-                <div class="ai-module-head">
+                   :class="['is-' + aiModules[m.id].status, { 'is-collapsed': aiModules[m.id].collapsed }]">
+                <!-- header：模块名 + 状态徽标 + 独立分析按钮 + 折叠箭头，与正文用底色和分隔线分层。
+                     点击 header 或箭头切换 body 显隐；分析按钮阻止冒泡，避免误折叠。 -->
+                <div class="ai-module-head" @click="toggleAIModule(m.id)">
                   <div class="ai-module-title-wrap">
                     <h3 class="ai-module-title">{{ m.title }}</h3>
                     <span class="ai-module-desc">{{ m.desc }}</span>
@@ -2696,11 +2734,24 @@ const app = createApp({
                   <el-button size="small" type="primary"
                              :loading="aiModules[m.id].status === 'loading'"
                              :disabled="!canRunAI || aiAllLoading || aiModules[m.id].status === 'loading'"
-                             @click="runAIModule(m.id)">一键分析</el-button>
+                             @click.stop="runAIModule(m.id)">一键分析</el-button>
+                  <button type="button" class="ai-module-toggle"
+                          :aria-expanded="!aiModules[m.id].collapsed"
+                          :aria-controls="'ai-module-body-' + m.id"
+                          :aria-label="(aiModules[m.id].collapsed ? '展开' : '收起') + m.title"
+                          :title="(aiModules[m.id].collapsed ? '展开' : '收起') + m.title"
+                          @click.stop="toggleAIModule(m.id)">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M6 9l6 6 6-6"></path>
+                    </svg>
+                  </button>
                 </div>
 
-                <!-- body：所有结果/等待/错误态统一收进卡片内边距，避免内容外渗 -->
-                <div class="ai-module-body">
+                <!-- body：所有结果/等待/错误态统一收进卡片内边距，避免内容外渗；
+                     用 v-show 保留 DOM，雷达图容器不反复重建，展开时再补 resize。 -->
+                <div class="ai-module-body" :id="'ai-module-body-' + m.id"
+                     v-show="!aiModules[m.id].collapsed">
                 <div v-if="aiModules[m.id].status === 'idle'" class="ai-module-empty">
                   点击「一键分析」生成本模块结果。
                 </div>

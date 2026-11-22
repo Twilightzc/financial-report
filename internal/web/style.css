@@ -805,6 +805,7 @@ td.num, .val, .yoy {
 /* ===================== R5 AI 分析 ===================== */
 
 .ai-hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0 0 16px; }
+.ai-toolbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .ai-radar { margin: 4px 0; }
 /* 雷达图容器：高度交给 CSS，横竖屏切换时浏览器自动改高，ECharts 靠 resize() 重新测量（FR-11）。
@@ -886,7 +887,26 @@ td.num, .val, .yoy {
   padding: 14px 16px;
   background: var(--surface-2);
   border-bottom: 1px solid var(--line-strong);
+  cursor: pointer;
+  user-select: none;
+  transition: background .15s;
 }
+.ai-module-head:hover { background: var(--surface-3); }
+.ai-module-card.is-collapsed .ai-module-head { border-bottom-color: transparent; }
+/* 折叠箭头：展开时朝下、折叠时朝右；键盘可聚焦，触控目标 ≥ 30px。 */
+.ai-module-toggle {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--muted);
+  cursor: pointer;
+  transition: color .15s, background .15s, border-color .15s;
+}
+.ai-module-toggle:hover { color: var(--brand-bright); background: var(--surface-2); border-color: var(--line-strong); }
+.ai-module-toggle:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.ai-module-toggle svg { transition: transform .18s ease; }
+.ai-module-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
 .ai-module-title-wrap { display: flex; flex-direction: column; gap: 2px; margin-right: auto; min-width: 0; }
 .ai-module-title { margin: 0; font-size: 15px; font-weight: 700; color: var(--ink); }
 .ai-module-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
@@ -1407,6 +1427,8 @@ td.num, .val, .yoy {
   .ai-module-body { padding: 12px; }
   .ai-module-title-wrap { flex-basis: 100%; margin-right: 0; }
   .ai-module-status { margin-left: auto; }
+  .ai-module-toggle { width: 36px; height: 36px; }
+  .ai-toolbar-actions { width: 100%; justify-content: flex-end; }
   .ai-section { margin-top: 16px; padding-top: 14px; }
   .ai-module-usage { margin-top: 16px; }
   /* 区块标题右侧辅助信息换行到标题下方、年份控件占满宽度 */
