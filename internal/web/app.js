@@ -2679,7 +2679,9 @@ const app = createApp({
             <div class="card-body">
               <p class="ai-hint">可按模块单独分析，也可一键全分析；各模块相互独立，失败可单独重试。</p>
               <el-alert v-if="aiAllError" :title="aiAllError" type="error" :closable="false" style="margin-bottom:12px" />
-              <div v-for="m in visibleAIModules" :key="m.id" class="ai-module-card">
+              <div v-for="m in visibleAIModules" :key="m.id" class="ai-module-card"
+                   :class="'is-' + aiModules[m.id].status">
+                <!-- header：模块名 + 状态徽标 + 独立分析按钮，与正文用底色和分隔线分层 -->
                 <div class="ai-module-head">
                   <div class="ai-module-title-wrap">
                     <h3 class="ai-module-title">{{ m.title }}</h3>
@@ -2697,6 +2699,8 @@ const app = createApp({
                              @click="runAIModule(m.id)">一键分析</el-button>
                 </div>
 
+                <!-- body：所有结果/等待/错误态统一收进卡片内边距，避免内容外渗 -->
+                <div class="ai-module-body">
                 <div v-if="aiModules[m.id].status === 'idle'" class="ai-module-empty">
                   点击「一键分析」生成本模块结果。
                 </div>
@@ -2708,12 +2712,15 @@ const app = createApp({
                 <template v-else-if="aiModules[m.id].status === 'ok'">
                   <!-- 财务：雷达图 + 五维评分 + 总体结论 -->
                   <template v-if="m.id === 'financial'">
-                <div class="ai-radar"><div ref="aiRadarRef" class="ai-radar-box"></div></div>
-                <div class="ai-scores">
-                  <div v-for="s in aiModules.financial.result.scores" :key="s.dimension" class="ai-score-row">
-                    <span class="ai-score-name">{{ s.dimension }}</span>
-                    <el-progress :percentage="s.score" :stroke-width="12" :color="scoreColor(s.score)" style="flex:1" />
-                    <span class="ai-score-comment">{{ s.comment }}</span>
+                <div class="ai-section">
+                  <div class="ai-section-title">五维评分</div>
+                  <div class="ai-radar"><div ref="aiRadarRef" class="ai-radar-box"></div></div>
+                  <div class="ai-scores">
+                    <div v-for="s in aiModules.financial.result.scores" :key="s.dimension" class="ai-score-row">
+                      <span class="ai-score-name">{{ s.dimension }}</span>
+                      <el-progress :percentage="s.score" :stroke-width="12" :color="scoreColor(s.score)" style="flex:1" />
+                      <span class="ai-score-comment">{{ s.comment }}</span>
+                    </div>
                   </div>
                 </div>
                 <div class="ai-section">
@@ -2990,14 +2997,16 @@ const app = createApp({
                 </template>
 
                 <!-- usage / 耗时任一存在即渲染；缺失一侧不显示，另一侧照常展示 -->
-                <div v-if="aiModules[m.id].usage || aiModules[m.id].elapsedMs != null || aiModules[m.id].cached" class="ai-usage">
+                <div v-if="aiModules[m.id].usage || aiModules[m.id].elapsedMs != null || aiModules[m.id].cached"
+                     class="ai-usage ai-module-usage">
                   <template v-if="aiModules[m.id].usage">本次分析消耗约 {{ aiModules[m.id].usage.total_tokens }} tokens（输入 {{ aiModules[m.id].usage.prompt_tokens }} / 输出 {{ aiModules[m.id].usage.completion_tokens }}）</template>
                   <template v-if="aiModules[m.id].usage && (aiModules[m.id].elapsedMs != null || aiModules[m.id].cached)"> · </template>
                   <template v-if="aiModules[m.id].cached">缓存结果</template>
                   <template v-else-if="aiModules[m.id].elapsedMs != null">耗时 {{ aiModules[m.id].elapsedMs.toFixed(1) }}s</template>
                 </div>
               </template>
-            </div>
+                </div><!-- /.ai-module-body -->
+              </div>
             <div v-if="aiAllElapsedMs != null" class="ai-usage ai-all-usage">
               全分析总耗时 {{ aiAllElapsedMs.toFixed(1) }}s
               <template v-if="aiAllUsage"> · 合计 {{ aiAllUsage.total_tokens }} tokens</template>

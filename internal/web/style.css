@@ -804,7 +804,7 @@ td.num, .val, .yoy {
 
 /* ===================== R5 AI 分析 ===================== */
 
-.ai-hint { color: var(--muted); font-size: 12px; }
+.ai-hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0 0 16px; }
 
 .ai-radar { margin: 4px 0; }
 /* 雷达图容器：高度交给 CSS，横竖屏切换时浏览器自动改高，ECharts 靠 resize() 重新测量（FR-11）。
@@ -816,8 +816,19 @@ td.num, .val, .yoy {
 .ai-score-comment { width: 220px; color: var(--muted); font-size: 12px; flex-shrink: 0; line-height: 1.5; }
 .ai-scores .el-progress-bar__outer { background-color: var(--surface-3); }
 
-.ai-section { margin-top: 20px; }
-.ai-section-title { font-weight: 700; color: var(--ink); margin-bottom: 8px; font-size: 14px; }
+/* 模块内小节：上分隔线 + 左侧品牌色竖条标题，让每个子块自成一体。 */
+.ai-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-strong); }
+.ai-module-body > .ai-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.ai-section-title {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 700; color: var(--ink); margin-bottom: 10px; font-size: 13.5px;
+  letter-spacing: 0.01em;
+}
+.ai-section-title::before {
+  content: ""; flex: 0 0 auto;
+  width: 3px; height: 14px; border-radius: 2px;
+  background: var(--brand);
+}
 .ai-text { color: var(--ink-2); font-size: 13px; line-height: 1.85; margin: 0; white-space: pre-wrap; }
 .ai-grid { display: flex; flex-direction: column; gap: 8px; }
 .ai-grid > div { display: flex; gap: 8px; }
@@ -826,8 +837,8 @@ td.num, .val, .yoy {
 
 .ai-businesses { display: flex; flex-direction: column; gap: 10px; }
 .ai-business {
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
   padding: 12px 14px;
   background: var(--surface-2);
 }
@@ -846,25 +857,38 @@ td.num, .val, .yoy {
 .ai-valuation {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
   padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
   background: var(--surface-2);
 }
 .ai-model { font-weight: 700; color: var(--brand-bright); font-size: 14px; }
 .ai-usage { margin-top: 16px; color: var(--muted-2); font-size: 12px; }
 
 /* ===================== R26 AI 模块卡片 ===================== */
-/* 每个已上线模块一张纵向堆叠卡片：标题/描述 + 状态徽标 + 独立「一键分析」按钮。 */
+/* 每个已上线模块一张独立面板：深一档底色 + 更亮边框 + 顶部品牌强调条，
+   与模块之间留 24px 间隔；header 用抬升底色与正文分层。 */
 .ai-module-card {
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface-2);
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-top: 3px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--bg);
+  overflow: hidden; /* 圆角内裁切 header 底色与内容，避免外渗 */
 }
-.ai-module-card + .ai-module-card { margin-top: 14px; }
-.ai-module-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+/* 顶部强调条随模块状态变化：未分析中性、分析中琥珀、完成品牌红、失败红。 */
+.ai-module-card.is-loading { border-top-color: var(--amber); }
+.ai-module-card.is-ok { border-top-color: var(--brand); }
+.ai-module-card.is-error { border-top-color: var(--bad); }
+.ai-module-card + .ai-module-card { margin-top: 24px; }
+.ai-module-head {
+  display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-strong);
+}
 .ai-module-title-wrap { display: flex; flex-direction: column; gap: 2px; margin-right: auto; min-width: 0; }
-.ai-module-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); }
+.ai-module-title { margin: 0; font-size: 15px; font-weight: 700; color: var(--ink); }
 .ai-module-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .ai-module-status {
   flex-shrink: 0;
@@ -877,24 +901,42 @@ td.num, .val, .yoy {
 .ai-module-status.is-loading { color: var(--amber); }
 .ai-module-status.is-ok { color: var(--good); }
 .ai-module-status.is-error { color: var(--bad); }
+.ai-module-body { min-width: 0; padding: 16px; }
 .ai-module-empty {
   padding: 18px 0 6px;
   color: var(--muted-2);
   font-size: 13px;
   text-align: center;
 }
-.ai-all-usage { margin-top: 14px; }
+/* token / 耗时行：与正文用分隔线隔开并弱化，避免混进结果内容。 */
+.ai-module-usage {
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted-2);
+  font-size: 12px;
+}
+.ai-all-usage { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
 
 /* R19 估值参数展示：六块紧凑排布（模型 / 基期 FCF / 折现率 / 增长参数 / 关键校验 / 结论），
    锚构成表与 FCF 明细共用 ai-weight-table；窄屏改为纵向堆叠，避免横向滚动。 */
 .ai-val-params { min-width: 0; }
 .ai-val-block {
   min-width: 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  border-top: 1px solid var(--line-strong);
 }
 .ai-val-block:first-child { padding-top: 0; border-top: 0; }
-.ai-val-head { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px; letter-spacing: 0.02em; }
+.ai-val-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  margin-bottom: 5px; letter-spacing: 0.04em;
+}
+.ai-val-head::before {
+  content: ""; flex: 0 0 auto;
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--brand-bright);
+}
 .ai-val-muted { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .ai-val-line { overflow-wrap: anywhere; }
 .ai-val-warn { color: var(--warn, var(--brand-bright)); }
@@ -1120,13 +1162,16 @@ td.num, .val, .yoy {
 /* ===================== R17 相关公司 ===================== */
 
 .ai-sub-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
-.ai-sub-title { font-weight: 600; color: var(--ink); font-size: 13px; }
+.ai-sub-title {
+  font-weight: 600; color: var(--ink); font-size: 13px;
+  padding-left: 8px; border-left: 2px solid var(--line-strong);
+}
 .ai-badge {
   padding: 1px 8px; border-radius: 999px;
   background: var(--brand-soft); color: var(--brand-bright);
   font-size: 11px; line-height: 1.6;
 }
-.ai-leaders { margin-top: 14px; }
+.ai-leaders { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .ai-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .ai-chip {
   display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 6px;
@@ -1149,6 +1194,7 @@ td.num, .val, .yoy {
 .ai-chip-loading { color: var(--muted); font-size: 11px; }
 .ai-leader-self-note { color: var(--brand-bright); font-size: 12px; line-height: 1.6; margin: 4px 0 8px; }
 .ai-related { margin-top: 14px; }
+.ai-related + .ai-related { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .ai-related-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .ai-related-col { min-width: 0; } /* 防止长名称把 grid 撑出横向滚动 */
 .ai-related-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
@@ -1354,10 +1400,15 @@ td.num, .val, .yoy {
   .card-head { padding: 14px 16px; }
   .card-body { padding: 16px; }
 
-  /* R26 模块卡片：窄屏标题占满一行，状态与按钮换行后靠右 */
-  .ai-module-card { padding: 12px; }
+  /* R26 模块面板：窄屏保持内边距不贴边，标题占满一行，状态与按钮换行后靠右 */
+  .ai-module-card { border-radius: 12px; }
+  .ai-module-card + .ai-module-card { margin-top: 20px; }
+  .ai-module-head { padding: 12px; }
+  .ai-module-body { padding: 12px; }
   .ai-module-title-wrap { flex-basis: 100%; margin-right: 0; }
   .ai-module-status { margin-left: auto; }
+  .ai-section { margin-top: 16px; padding-top: 14px; }
+  .ai-module-usage { margin-top: 16px; }
   /* 区块标题右侧辅助信息换行到标题下方、年份控件占满宽度 */
   .card-head .year-filter { width: 100%; }
   .year-filter .el-select { flex: 1 1 0; width: auto; }
